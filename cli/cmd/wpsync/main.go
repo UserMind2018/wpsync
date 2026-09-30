@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"golang.org/x/term"
 
 	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/ddev"
 	"github.com/usermind/wpsync/internal/keychain"
+	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/mailguard"
 	"github.com/usermind/wpsync/internal/profile"
 	"github.com/usermind/wpsync/internal/pull"
@@ -30,7 +33,8 @@ const usage = `wpsync – WordPress Live → Lokal
   wpsync doctor                        Umgebung prüfen
   wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync)
   wpsync unpair <site>                 Kopplung lokal entfernen
-  wpsync list                          gekoppelte Sites
+  wpsync list                          lokale Umgebungen mit Status, lokaler und Live-URL
+  wpsync stop <site>… | --all          lokale Umgebung(en) stoppen (Daten bleiben erhalten)
   wpsync scan <site> [--refresh]       zeigen, was auf der Site liegt, und auswählen, was gezogen wird
   wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
@@ -54,6 +58,8 @@ func main() {
 		err = cmdUnpair(os.Args[2:])
 	case "list":
 		err = cmdList()
+	case "stop":
+		err = cmdStop(os.Args[2:])
 	case "scan":
 		err = cmdScan(os.Args[2:])
 	case "pull":
@@ -179,17 +185,68 @@ func cmdUnpair(args []string) error {
 	return nil
 }
 
+// localEnvs lists wpsync's DDEV projects together with the paired sites.
+func localEnvs() ([]localenv.Env, error) {
+	paired, err := sites.List()
+	if err != nil {
+		return nil, err
+	}
+	root, err := sites.SitesRoot()
+	if err != nil {
+		return nil, err
+	}
+	return localenv.List(&ddev.Exec{}, root, paired)
+}
+
 func cmdList() error {
-	list, err := sites.List()
+	envs, err := localEnvs()
 	if err != nil {
 		return err
 	}
-	if len(list) == 0 {
+	if len(envs) == 0 {
 		fmt.Println("Noch keine Site gekoppelt – wpsync pair <url> <code>")
 		return nil
 	}
-	for _, s := range list {
-		fmt.Printf("%-30s %s\n", s.Name, s.URL)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "SITE\tSTATUS\tLOKAL\tLIVE")
+	for _, e := range envs {
+		local, live := "–", e.LiveURL
+		if e.Status == localenv.StatusRunning {
+			local = e.LocalURL
+		}
+		if live == "" {
+			live = "(nicht gekoppelt)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.Name, localenv.Label(e.Status), local, live)
+	}
+	return w.Flush()
+}
+
+func cmdStop(args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	all := fs.Bool("all", false, "alle laufenden wpsync-Umgebungen stoppen")
+	names, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if *all == (len(names) > 0) {
+		return errors.New("Aufruf: wpsync stop <site>… oder wpsync stop --all")
+	}
+	envs, err := localEnvs()
+	if err != nil {
+		return err
+	}
+	n, err := localenv.Stop(&ddev.Exec{Stdout: os.Stdout, Stderr: os.Stderr}, envs, names, *all)
+	if err != nil {
+		return err
+	}
+	switch n {
+	case 0:
+		fmt.Println("Nichts zu stoppen – keine der Umgebungen läuft.")
+	case 1:
+		fmt.Println("✓ 1 Umgebung gestoppt")
+	default:
+		fmt.Printf("✓ %d Umgebungen gestoppt\n", n)
 	}
 	return nil
 }

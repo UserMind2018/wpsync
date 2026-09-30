@@ -3,6 +3,14 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.1.5] – 2026-10-01 · Agent 0.2.0
+
+### Hinzugefügt
+- `wpsync list` zeigt alle lokalen wpsync-Umgebungen mit Status, lokaler und Live-URL –
+  auch solche, deren Pairing schon entfernt ist
+- `wpsync stop <site>…` und `wpsync stop --all` stoppen Umgebungen, ohne dass man in die
+  einzelnen DDEV-Projekte wechseln muss
+
 ## [0.1.4] – 2026-09-30 · Agent 0.2.0
 
 ### Geändert
