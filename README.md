@@ -368,4 +368,11 @@ Versionen: Tag `vX.Y.Z` = Version der CLI. Der Agent hat eine eigene Version
    done
    ```
 4. `gh release create vX.Y.Z` mit den Tarballs, der Agent-ZIP und `checksums.txt`.
-5. Im Tap `UserMind2018/homebrew-tap` Tag und Revision in `Formula/wpsync.rb` anheben.
+5. Im Tap `UserMind2018/homebrew-tap` in `Formula/wpsync.rb` `url` auf den neuen Tag setzen
+   und `sha256` anpassen (Befehl steht in der Tap-README).
+
+---
+
+## Lizenz
+
+MIT – siehe [LICENSE](LICENSE).

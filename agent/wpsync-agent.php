@@ -6,6 +6,8 @@
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
+ * License:           MIT
+ * License URI:       https://opensource.org/licenses/MIT
  */
 
 defined('ABSPATH') || exit;
