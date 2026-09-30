@@ -1,0 +1,408 @@
+<?php
+namespace WpSync;
+
+final class Rest
+{
+    public const NS = 'wpsync/v1';
+
+    /** @var string */
+    private static $pluginDir = '';
+
+    public static function register(string $pluginDir): void
+    {
+        self::$pluginDir = $pluginDir;
+        add_action('rest_api_init', [self::class, 'routes']);
+    }
+
+    public static function routes(): void
+    {
+        register_rest_route(self::NS, '/pair', [
+            'methods'             => 'POST',
+            'callback'            => [self::class, 'pair'],
+            'permission_callback' => '__return_true', // geschützt durch Pairing-Code
+        ]);
+        $signed = [
+            'ping'              => 'ping',
+            'infosheet'         => 'infosheet',
+            'infosheet/refresh' => 'infosheetRefresh',
+            'delta'             => 'delta',
+            'db-bundle'         => 'dbBundle',
+            'db'                => 'dbChunk',
+            'files'             => 'files',
+        ];
+        foreach ($signed as $route => $method) {
+            register_rest_route(self::NS, '/' . $route, [
+                'methods'             => 'POST',
+                'callback'            => [self::class, $method],
+                'permission_callback' => [self::class, 'auth'],
+            ]);
+        }
+    }
+
+    /** @return true|\WP_Error */
+    public static function auth(\WP_REST_Request $request)
+    {
+        Store::install();
+        $keyId  = (string) $request->get_header('x-wpsync-key');
+        $secret = preg_match('/^[a-f0-9]{16}$/', $keyId) ? Store::secretFor($keyId) : null;
+        if ($secret === null) {
+            return new \WP_Error('wpsync_unpaired', 'unknown or revoked pairing', ['status' => 401]);
+        }
+
+        $nonce = (string) $request->get_header('x-wpsync-nonce');
+        $error = Signature::check(
+            $secret,
+            $request->get_method(),
+            $request->get_route(),
+            (int) $request->get_header('x-wpsync-timestamp'),
+            $nonce,
+            $request->get_body(),
+            (string) $request->get_header('x-wpsync-signature'),
+            time()
+        );
+        if ($error !== null) {
+            return new \WP_Error('wpsync_auth', 'invalid ' . $error, ['status' => 401]);
+        }
+        if (!Store::claimNonce($nonce, time())) {
+            return new \WP_Error('wpsync_auth', 'nonce reused', ['status' => 401]);
+        }
+        Store::touchPairing($keyId);
+        return true;
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pair(\WP_REST_Request $request)
+    {
+        if (is_multisite()) {
+            return new \WP_Error('wpsync_multisite', 'Multisite wird nicht unterstützt.', ['status' => 400]); // AC-31
+        }
+        if (strpos(wp_normalize_path(WP_CONTENT_DIR) . '/', wp_normalize_path(ABSPATH)) !== 0) {
+            return new \WP_Error('wpsync_layout', 'wp-content liegt ausserhalb von ABSPATH – nicht unterstützt.', ['status' => 400]);
+        }
+        Store::install();
+
+        list($ok, $next) = Pairing::redeem(Store::getState('pairing_code'), (string) $request->get_param('code'), time());
+        Store::setState('pairing_code', $next);
+        if (!$ok) {
+            return new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
+        }
+
+        $device = substr(sanitize_text_field((string) $request->get_param('device')), 0, 100);
+        $keyId  = Pairing::newKeyId();
+        $secret = Pairing::newSecret();
+        Store::addPairing($keyId, $secret, $device !== '' ? $device : 'unbekannt');
+        Infosheet::start(); // Spec 4.4: Inventar nach dem Pairing
+
+        return new \WP_REST_Response([
+            'key_id'        => $keyId,
+            'secret'        => $secret,
+            'home'          => home_url(),
+            'agent_version' => WPSYNC_VERSION,
+        ]);
+    }
+
+    public static function ping(): \WP_REST_Response
+    {
+        return new \WP_REST_Response(self::env());
+    }
+
+    /** Vorberechnetes Inventar in einem Request (AC-7); sheet ist null, solange keins existiert. */
+    public static function infosheet(): \WP_REST_Response
+    {
+        return new \WP_REST_Response(['sheet' => Store::getState('infosheet'), 'job' => Infosheet::status()]);
+    }
+
+    /** Stösst eine Erhebung an (start) und arbeitet ein Häppchen ab – Fallback ohne WP-Cron (AC-9). */
+    public static function infosheetRefresh(\WP_REST_Request $request): \WP_REST_Response
+    {
+        if ($request->get_param('start')) {
+            Infosheet::begin();
+        }
+        $seconds = min(Infosheet::SLICE, (float) Budget::seconds((int) ini_get('max_execution_time')));
+        return new \WP_REST_Response(Infosheet::run($seconds));
+    }
+
+    /** @return array<string, mixed> */
+    public static function env(): array
+    {
+        global $wpdb;
+        return [
+            'php_version'        => PHP_VERSION,
+            'wp_version'         => get_bloginfo('version'),
+            'db_server'          => $wpdb->db_server_info(),
+            'db_charset'         => $wpdb->charset,
+            'table_prefix'       => $wpdb->base_prefix,
+            'siteurl'            => get_option('siteurl'),
+            'home'               => get_option('home'),
+            'max_execution_time' => (int) ini_get('max_execution_time'),
+            'memory_limit'       => (string) ini_get('memory_limit'),
+            'active_plugins'     => array_values((array) get_option('active_plugins', [])),
+            'agent_version'      => WPSYNC_VERSION,
+        ];
+    }
+
+    /**
+     * Seitenweise: zuerst Tabellen (Checksummen), dann Dateien – beides nur im Umfang des Profils
+     * (Spec 5.3 Nr. 3). Tabellen im Modus structure brauchen keine Checksumme, skip fehlt ganz.
+     * Cursor als JSON {"phase","i"}.
+     *
+     * @return \WP_REST_Response|\WP_Error
+     */
+    public static function delta(\WP_REST_Request $request)
+    {
+        $scope = self::scope($request);
+        if ($scope instanceof \WP_Error) {
+            return $scope;
+        }
+        $cursor = json_decode((string) $request->get_param('cursor'), true);
+        if (!is_array($cursor) || !in_array($cursor['phase'] ?? '', ['tables', 'files'], true)) {
+            $cursor = ['phase' => 'tables', 'i' => 0];
+        }
+        $index    = max(0, (int) ($cursor['i'] ?? 0));
+        $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
+        $out      = ['tables' => [], 'files' => [], 'skipped' => [], 'next' => null];
+
+        if ($cursor['phase'] === 'tables') {
+            if ($index === 0) {
+                $out['env'] = self::env();
+            }
+            $tables = self::tables();
+            for ($i = $index; $i < count($tables); $i++) {
+                if ($i > $index && microtime(true) > $deadline) {
+                    $out['next'] = wp_json_encode(['phase' => 'tables', 'i' => $i]);
+                    return new \WP_REST_Response($out);
+                }
+                $mode = $scope->tableMode($tables[$i]);
+                if ($mode !== Scope::SKIP) {
+                    $out['tables'][] = self::tableInfo($tables[$i], $mode === Scope::FULL);
+                }
+            }
+            $index = 0;
+            if (microtime(true) > $deadline) {
+                $out['next'] = wp_json_encode(['phase' => 'files', 'i' => 0]);
+                return new \WP_REST_Response($out);
+            }
+        }
+
+        $walker         = new FileWalker(ABSPATH, WP_CONTENT_DIR, self::$pluginDir, $scope);
+        $page           = $walker->page($index, $deadline);
+        $out['files']   = $page['files'];
+        $out['skipped'] = $page['skipped'];
+        if ($page['next'] !== null) {
+            $out['next'] = wp_json_encode(['phase' => 'files', 'i' => $page['next']]);
+        }
+        return new \WP_REST_Response($out);
+    }
+
+    /**
+     * Mehrere kleine Tabellen – vollständig, gefiltert oder nur als Struktur; endet vor Ablauf
+     * des Budgets, der Client fordert den Rest an.
+     *
+     * @return \WP_Error|void
+     */
+    public static function dbBundle(\WP_REST_Request $request)
+    {
+        $scope = self::scope($request);
+        if ($scope instanceof \WP_Error) {
+            return $scope;
+        }
+        $names    = array_values(array_intersect(array_map('strval', (array) $request->get_param('tables')), self::tables()));
+        $limit    = self::limit($request);
+        $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
+
+        self::beginRaw('application/octet-stream');
+        foreach ($names as $i => $table) {
+            if ($i > 0 && microtime(true) > $deadline) {
+                break;
+            }
+            $mode = $scope->tableMode($table);
+            if ($mode === Scope::SKIP) {
+                continue;
+            }
+            $sql  = '';
+            $rows = 0;
+            if ($mode === Scope::STRUCTURE) {
+                $sql = self::structureSql($table); // Schema ohne Daten (Spec 5.2)
+            } else {
+                $after  = null;
+                $offset = 0;
+                do {
+                    $chunk   = self::tableSql($table, $after, $offset, $limit, $scope);
+                    $sql    .= $chunk['sql'];
+                    $rows   += $chunk['rows'];
+                    $after   = $chunk['next'];
+                    $offset += $chunk['rows'];
+                } while ($chunk['rows'] === $limit);
+            }
+            echo Frames::table($table, $rows, strlen($sql)) . $sql . "\n"; // phpcs:ignore WordPress.Security.EscapeOutput
+            flush();
+        }
+        echo Frames::end(); // phpcs:ignore WordPress.Security.EscapeOutput
+        exit;
+    }
+
+    /** Ein Chunk einer grossen Tabelle; Keyset, wenn ein einspaltiger Primärschlüssel existiert. */
+    public static function dbChunk(\WP_REST_Request $request)
+    {
+        $scope = self::scope($request);
+        if ($scope instanceof \WP_Error) {
+            return $scope;
+        }
+        $table = (string) $request->get_param('table');
+        if (!in_array($table, self::tables(), true)) {
+            return new \WP_Error('wpsync_table', 'unknown table', ['status' => 404]);
+        }
+        $after = $request->get_param('after');
+        $chunk = self::tableSql($table, $after === null ? null : (string) $after, max(0, (int) $request->get_param('offset')), self::limit($request), $scope);
+
+        header('X-Wpsync-Rows: ' . $chunk['rows']);
+        header('X-Wpsync-Mode: ' . ($chunk['keyset'] ? 'keyset' : 'offset'));
+        if ($chunk['next'] !== null) {
+            header('X-Wpsync-Next: ' . base64_encode($chunk['next']));
+        }
+        self::beginRaw('application/sql; charset=utf-8');
+        echo $chunk['sql']; // phpcs:ignore WordPress.Security.EscapeOutput
+        exit;
+    }
+
+    /** Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). */
+    public static function files(\WP_REST_Request $request): void
+    {
+        $base = wp_normalize_path(ABSPATH);
+        $root = wp_normalize_path((string) realpath(WP_CONTENT_DIR)) . '/';
+        $self = wp_normalize_path(self::$pluginDir) . '/';
+
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- auf manchen Hosts deaktiviert
+        }
+        nocache_headers();
+        header('Content-Type: application/octet-stream');
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+
+        foreach ((array) $request->get_param('paths') as $path) {
+            $path = (string) $path;
+            $full = wp_normalize_path((string) realpath($base . $path));
+            $ok   = strpos($path, 'wp-content/') === 0
+                && strpos($full, $root) === 0
+                && strpos($full, $self) !== 0
+                && !is_link($base . $path)
+                && is_file($full)
+                && is_readable($full)
+                && Excludes::file(basename($full), (int) filesize($full)) === null;
+            if (!$ok) {
+                echo Frames::missing($path); // phpcs:ignore WordPress.Security.EscapeOutput
+                continue;
+            }
+            clearstatcache(true, $full);
+            echo Frames::file($path, (int) filesize($full), (int) filemtime($full)); // phpcs:ignore WordPress.Security.EscapeOutput
+            readfile($full);
+            echo "\n";
+            flush();
+        }
+        echo Frames::end(); // phpcs:ignore WordPress.Security.EscapeOutput
+        exit;
+    }
+
+    /** @return list<string> */
+    private static function tables(): array
+    {
+        global $wpdb;
+        $tables = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'));
+        return array_values(array_diff($tables, Store::ownTables()));
+    }
+
+    /** @return array{name: string, checksum: string|null, rows: int, bytes: int, primary_key: string|null} */
+    private static function tableInfo(string $table, bool $withChecksum): array
+    {
+        global $wpdb;
+        $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $table), ARRAY_A);
+        $checksum = $withChecksum ? (array) $wpdb->get_row('CHECKSUM TABLE `' . $table . '`', ARRAY_A) : [];
+        return [
+            'name'        => $table,
+            'checksum'    => isset($checksum['Checksum']) ? (string) $checksum['Checksum'] : null,
+            'rows'        => (int) ($status['Rows'] ?? 0),
+            'bytes'       => (int) ($status['Data_length'] ?? 0) + (int) ($status['Index_length'] ?? 0),
+            'primary_key' => self::singlePrimaryKey($table),
+        ];
+    }
+
+    private static function singlePrimaryKey(string $table): ?string
+    {
+        global $wpdb;
+        $columns = $wpdb->get_col('SHOW KEYS FROM `' . $table . "` WHERE Key_name = 'PRIMARY'", 4);
+        return count($columns) === 1 ? (string) $columns[0] : null;
+    }
+
+    /**
+     * @return array{sql: string, rows: int, next: string|null, keyset: bool}
+     */
+    private static function tableSql(string $table, ?string $after, int $offset, int $limit, Scope $scope): array
+    {
+        global $wpdb;
+        $pk     = self::singlePrimaryKey($table);
+        $dbh    = $wpdb->dbh;
+        $escape = static function (string $value) use ($dbh): string {
+            return mysqli_real_escape_string($dbh, $value);
+        };
+        // Abgewählte Post-Typen bleiben samt Metadaten auf dem Server (Spec 5.2, AC-14).
+        $filter = $scope->rowFilter($table, [
+            'posts'              => $wpdb->posts,
+            'postmeta'           => $wpdb->postmeta,
+            'term_relationships' => $wpdb->term_relationships,
+            'comments'           => $wpdb->comments,
+        ], $escape);
+        // Eigene Optionen (Altlast Spike) verlassen den Server nie (AC-27).
+        $where = implode(' AND ', array_filter([
+            $table === $wpdb->options ? "option_name NOT LIKE 'wpsync\\_%'" : '',
+            $filter['where'],
+        ]));
+        $rows = (array) $wpdb->get_results(SqlBuilder::select($table, $where, $pk, $after, $offset, $limit, $escape, $filter['join']), ARRAY_A);
+
+        $sql  = ($after === null && $offset === 0) ? self::structureSql($table) : '';
+        $sql .= SqlBuilder::inserts($table, array_map('array_values', $rows), $escape);
+
+        $last = end($rows);
+        return [
+            'sql'    => $sql,
+            'rows'   => count($rows),
+            'next'   => ($pk !== null && is_array($last)) ? (string) $last[$pk] : null,
+            'keyset' => $pk !== null,
+        ];
+    }
+
+    /** @return Scope|\WP_Error */
+    private static function scope(\WP_REST_Request $request)
+    {
+        try {
+            return Scope::fromArray($request->get_param('scope'));
+        } catch (\InvalidArgumentException $e) {
+            return new \WP_Error('wpsync_scope', 'invalid scope: ' . $e->getMessage(), ['status' => 400]);
+        }
+    }
+
+    private static function structureSql(string $table): string
+    {
+        global $wpdb;
+        $create = (array) $wpdb->get_row('SHOW CREATE TABLE `' . $table . '`', ARRAY_N);
+        return SqlBuilder::preamble($table, (string) $create[1]);
+    }
+
+    private static function limit(\WP_REST_Request $request): int
+    {
+        $limit = (int) $request->get_param('limit');
+        return min(20000, max(1, $limit > 0 ? $limit : 2000));
+    }
+
+    /** Rohausgabe, gzip wenn der Client es anbietet und der Server nicht selbst komprimiert. */
+    private static function beginRaw(string $contentType): void
+    {
+        nocache_headers();
+        header('Content-Type: ' . $contentType);
+        $acceptsGzip = strpos((string) ($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''), 'gzip') !== false;
+        if ($acceptsGzip && !ini_get('zlib.output_compression') && function_exists('ob_gzhandler')) {
+            ob_start('ob_gzhandler');
+        }
+    }
+}

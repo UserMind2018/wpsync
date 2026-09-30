@@ -1,0 +1,9 @@
+.DS_Store
+.idea/
+.vscode/
+cli/bin/
+cli/wpsync
+cli/*.tar.gz
+agent/vendor/
+agent/dist/
+agent/.phpunit.result.cache

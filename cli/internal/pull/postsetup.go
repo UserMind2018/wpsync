@@ -1,0 +1,149 @@
+package pull
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/ddev"
+)
+
+// ErrMailguardMissing stops a pull: a local site must never send real mail (AC-22).
+var ErrMailguardMissing = errors.New("local-mailguard is not active in the container")
+
+// LocalDisabledPlugins are deactivated locally (Spike B14, AC-23).
+var LocalDisabledPlugins = []string{
+	// Mail – in addition to local-mailguard
+	"wp-mail-smtp", "wp-mail-smtp-pro", "post-smtp", "fluent-smtp", "easy-wp-smtp",
+	// Access protection & security – lock you out locally
+	"password-protected", "better-wp-security", "ithemes-security-pro", "wps-hide-login",
+	"wordfence", "all-in-one-wp-security-and-firewall", "sucuri-scanner",
+	// Caching
+	"wp-rocket", "w3-total-cache", "litespeed-cache", "wp-super-cache", "wp-fastest-cache",
+}
+
+// DropIns from caching plugins that break a local site.
+var DropIns = []string{"advanced-cache.php", "object-cache.php"}
+
+// PostSetupOptions adapts the post-setup to the pull profile.
+type PostSetupOptions struct {
+	// ExcludedPlugins were not pulled; active ones are removed from active_plugins (AC-15).
+	ExcludedPlugins []string
+}
+
+// PostSetup rewrites URLs, sets local constants and deactivates problematic or missing plugins.
+func PostSetup(r ddev.Runner, env agentapi.Env, localURL string, o PostSetupOptions, out io.Writer) error {
+	sources := []string{env.Home}
+	if env.SiteURL != "" && env.SiteURL != env.Home {
+		sources = append(sources, env.SiteURL)
+	}
+	for _, src := range sources {
+		// Plain and JSON-escaped (Elementor & co. store "https:\/\/…").
+		pairs := [][2]string{{src, localURL}, {strings.ReplaceAll(src, "/", `\/`), strings.ReplaceAll(localURL, "/", `\/`)}}
+		for _, p := range pairs {
+			if err := r.Run("wp", "search-replace", p[0], p[1], "--all-tables-with-prefix", "--skip-columns=guid",
+				"--report-changed-only", "--skip-plugins", "--skip-themes"); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, args := range [][]string{
+		{"wp", "config", "set", "WP_ENVIRONMENT_TYPE", "local", "--type=constant"},
+		{"wp", "config", "set", "DISABLE_WP_CRON", "true", "--raw", "--type=constant"},
+	} {
+		if err := r.Run(args...); err != nil {
+			return err
+		}
+	}
+
+	var deactivate []string
+	for _, slug := range LocalDisabledPlugins {
+		for _, active := range env.ActivePlugins {
+			if strings.HasPrefix(active, slug+"/") {
+				deactivate = append(deactivate, slug)
+			}
+		}
+	}
+	if len(deactivate) > 0 {
+		fmt.Fprintf(out, "  lokal deaktiviert: %s\n", strings.Join(deactivate, ", "))
+		args := append([]string{"wp", "plugin", "deactivate"}, deactivate...)
+		if err := r.Run(append(args, "--skip-plugins", "--skip-themes")...); err != nil {
+			return err
+		}
+	}
+	if err := dropMissingPlugins(r, env, o.ExcludedPlugins, out); err != nil {
+		return err
+	}
+
+	// Second pass with plugins loaded: only then can WP-CLI unserialize objects of plugin classes
+	// (Spike B13, AC-21). Loading plugins locally may fail – a warning, not an abort.
+	for _, src := range sources {
+		if err := r.Run("wp", "search-replace", src, localURL, env.TablePrefix+"options", "--precise", "--report-changed-only"); err != nil {
+			fmt.Fprintf(out, "  ! Search-Replace mit geladenen Plugins fehlgeschlagen – plugin-serialisierte Optionen können noch %s enthalten (%v)\n", src, err)
+			break
+		}
+	}
+	return nil
+}
+
+var slugRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// dropMissingPlugins removes excluded but active plugins from active_plugins. Their files were
+// not pulled, so `wp plugin deactivate` would not find them.
+func dropMissingPlugins(r ddev.Runner, env agentapi.Env, excluded []string, out io.Writer) error {
+	var names, quoted []string
+	for _, slug := range excluded {
+		if !slugRe.MatchString(slug) {
+			continue
+		}
+		for _, active := range env.ActivePlugins {
+			if pluginSlug(active) == slug {
+				names = append(names, slug)
+				quoted = append(quoted, "'"+slug+"'")
+				break
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "  lokal deaktiviert (nicht gezogen): %s\n", strings.Join(names, ", "))
+	code := "$drop = [" + strings.Join(quoted, ",") + "]; " +
+		`update_option("active_plugins", array_values(array_filter((array) get_option("active_plugins", []), function ($p) use ($drop) { ` +
+		`$s = strpos($p, "/") === false ? basename($p, ".php") : dirname($p); return !in_array($s, $drop, true); })));`
+	return r.Run("wp", "eval", code, "--skip-plugins", "--skip-themes")
+}
+
+// pluginSlug turns elementor/elementor.php into elementor and hello.php into hello.
+func pluginSlug(file string) string {
+	if i := strings.Index(file, "/"); i >= 0 {
+		return file[:i]
+	}
+	return strings.TrimSuffix(file, ".php")
+}
+
+// RemoveDropIns deletes caching drop-ins below docroot/wp-content.
+func RemoveDropIns(docroot string) {
+	for _, name := range DropIns {
+		os.Remove(filepath.Join(docroot, "wp-content", name))
+	}
+}
+
+// MailguardCheck verifies that local-mailguard itself is loaded (not just any wp_mail filter,
+// which an SMTP plugin would also register) and its wp_mail filter is active.
+func MailguardCheck(r ddev.Runner) error {
+	out, err := r.Output("wp", "eval", `echo function_exists("local_mailguard_collect") && has_filter("wp_mail") ? "ok" : "missing";`)
+	if err != nil {
+		return fmt.Errorf("%w (%v)", ErrMailguardMissing, err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(out), "ok") {
+		return ErrMailguardMissing
+	}
+	return nil
+}
