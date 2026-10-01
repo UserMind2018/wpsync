@@ -24,6 +24,7 @@ type Options struct {
 	MailguardSource string
 	Full            bool
 	Yes             bool                    // accept profile deviations without asking
+	NoAnonymize     bool                    // pull personal data in plain text (needs confirmation)
 	Confirm         func(string) bool       // asks the user; nil without a terminal
 	SaveSite        func(*sites.Site) error // records a confirmed deviation in the profile
 	Out             io.Writer
@@ -40,6 +41,9 @@ var ErrNoInfosheet = errors.New("die Site hat noch kein Infosheet")
 
 // ErrAborted: the user declined to continue.
 var ErrAborted = errors.New("abgebrochen")
+
+// ErrAgentCannotAnonymize: the agent is older than 0.3.0 and would deliver plain personal data.
+var ErrAgentCannotAnonymize = errors.New("der Agent auf der Site kann noch nicht anonymisieren")
 
 type plan struct {
 	scope agentapi.Scope
@@ -85,12 +89,21 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	}
 
 	scope := prof.Scope(sheet)
+	scope.PlainPII = o.NoAnonymize
 	modes := prof.TableModes(sheet.Tables)
 	delta, err := c.Delta(scope)
 	if err != nil {
 		return nil, err
 	}
-	var fresh []string
+	if !o.NoAnonymize && delta.Env.Anon == "" {
+		// An agent before 0.3.0 ignores the scope field and would send plain data (AC-36).
+		return nil, ErrAgentCannotAnonymize
+	}
+	class := make(map[string]string, len(sheet.Tables))
+	for _, t := range sheet.Tables {
+		class[t.Name] = t.Class
+	}
+	var fresh, plain []string
 	for i := range delta.Tables {
 		t := &delta.Tables[i]
 		mode, ok := modes[t.Name]
@@ -100,9 +113,23 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 			fresh = append(fresh, t.Name)
 		}
 		t.Mode = TableKey(mode, scope, delta.Env.TablePrefix, t.Name)
+		switch {
+		case mode != profile.ModeFull:
+		case t.Anonymized:
+			t.Mode = AnonKey(delta.Env.Anon, t.Mode)
+		case class[t.Name] == "pii":
+			plain = append(plain, t.Name)
+		}
 	}
 	if len(fresh) > 0 {
 		fmt.Fprintf(o.Out, "  Tabellen jünger als das Infosheet (werden vollständig geladen): %s\n", strings.Join(fresh, ", "))
+	}
+	if len(plain) > 0 {
+		reason := "keine Anonymisierungsregel"
+		if o.NoAnonymize {
+			reason = "--no-anonymize"
+		}
+		fmt.Fprintf(o.Out, "  ! Personenbezogene Tabellen im Klartext (%s): %s\n", reason, strings.Join(plain, ", "))
 	}
 	return &plan{scope: scope, delta: delta}, nil
 }

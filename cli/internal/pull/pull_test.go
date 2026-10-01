@@ -34,7 +34,7 @@ func prepareServer(t *testing.T, extraTable string, deltaBody *map[string]any) *
 			if deltaBody != nil {
 				json.NewDecoder(r.Body).Decode(deltaBody)
 			}
-			w.Write([]byte(`{"env":{"table_prefix":"wp_"},"tables":[{"name":"wp_posts","checksum":"1"},{"name":"wp_e_submissions"},{"name":"wp_brand_new","checksum":"2"}],"files":[],"skipped":[],"next":null}`))
+			w.Write([]byte(`{"env":{"table_prefix":"wp_","anon":"1.abcd1234"},"tables":[{"name":"wp_posts","checksum":"1"},{"name":"wp_e_submissions"},{"name":"wp_brand_new","checksum":"2"}],"files":[],"skipped":[],"next":null}`))
 		default:
 			t.Errorf("unexpected request %s", r.URL.Query().Get("rest_route"))
 		}
@@ -119,5 +119,114 @@ func TestPrepareWithoutProfile(t *testing.T) {
 	o := Options{Out: &bytes.Buffer{}}
 	if _, err := prepare(quickClient("http://127.0.0.1:1"), &o, true); !errors.Is(err, ErrNoProfile) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// anonServer answers infosheet and delta for the anonymization tests and counts table requests.
+func anonServer(t *testing.T, deltaEnv, deltaTables string, deltaBody *map[string]any, dataRequests *int) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("rest_route") {
+		case "/wpsync/v1/infosheet":
+			w.Write([]byte(`{"sheet":{"env":{"table_prefix":"wp_"},
+"tables":[{"name":"wp_users","class":"pii","essential":true},{"name":"wp_forms","class":"pii"},{"name":"wp_orders","class":"content"}],
+"post_types":[],"plugins":[],"themes":[],"uploads":[],"findings":[],"orphan_meta":{}},"job":{}}`))
+		case "/wpsync/v1/delta":
+			if deltaBody != nil {
+				json.NewDecoder(r.Body).Decode(deltaBody)
+			}
+			w.Write([]byte(`{"env":` + deltaEnv + `,"tables":` + deltaTables + `,"files":[],"skipped":[],"next":null}`))
+		default:
+			*dataRequests++
+		}
+	}))
+}
+
+func anonProfile(t *testing.T) *profile.Profile {
+	t.Helper()
+	sheet := &agentapi.Infosheet{Tables: []agentapi.TableInfo{
+		{Name: "wp_users", Class: "pii", Essential: true}, {Name: "wp_forms", Class: "pii"}, {Name: "wp_orders", Class: "content"},
+	}}
+	p, err := profile.New(sheet, profile.PresetFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+const anonTables = `[{"name":"wp_users","checksum":"1","anonymized":true},{"name":"wp_forms","checksum":"2"},{"name":"wp_orders","checksum":"3"}]`
+
+// AC-37, AC-39: pseudonymisierte Tabellen bekommen einen eigenen Modus-Schlüssel, PII ohne Regel wird genannt.
+func TestPrepareTagsAnonymizedTablesAndNamesPlainPII(t *testing.T) {
+	var body map[string]any
+	var data int
+	srv := anonServer(t, `{"table_prefix":"wp_","anon":"1.abcd1234"}`, anonTables, &body, &data)
+	defer srv.Close()
+	var out bytes.Buffer
+	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &out}
+
+	p, err := prepare(quickClient(srv.URL), &o, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes := map[string]string{}
+	for _, tb := range p.delta.Tables {
+		modes[tb.Name] = tb.Mode
+	}
+	want := map[string]string{"wp_users": "anon:1.abcd1234+full", "wp_forms": profile.ModeFull, "wp_orders": profile.ModeFull}
+	for name, mode := range want {
+		if modes[name] != mode {
+			t.Errorf("%s mode = %q, want %q", name, modes[name], mode)
+		}
+	}
+	scope, _ := body["scope"].(map[string]any)
+	if _, sent := scope["plain_pii"]; sent {
+		t.Errorf("plain_pii must not be sent by default, scope = %v", scope)
+	}
+	got := out.String()
+	if !strings.Contains(got, "keine Anonymisierungsregel") || !strings.Contains(got, "wp_forms") {
+		t.Errorf("uncovered pii table not named:\n%s", got)
+	}
+	if strings.Contains(got, "wp_orders") || strings.Contains(got, "wp_users") {
+		t.Errorf("only pii tables without a rule belong into the warning:\n%s", got)
+	}
+}
+
+// AC-36: Ein Agent ohne Anonymisierung lieferte Klartext – abbrechen, bevor Tabellendaten fliessen.
+func TestPrepareRefusesAgentsThatCannotAnonymize(t *testing.T) {
+	var data int
+	srv := anonServer(t, `{"table_prefix":"wp_"}`, `[{"name":"wp_users","checksum":"1"}]`, nil, &data)
+	defer srv.Close()
+	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &bytes.Buffer{}}
+
+	if _, err := prepare(quickClient(srv.URL), &o, true); !errors.Is(err, ErrAgentCannotAnonymize) {
+		t.Fatalf("err = %v", err)
+	}
+	if data != 0 {
+		t.Fatalf("%d table requests before the abort", data)
+	}
+}
+
+// AC-38: --no-anonymize verlangt Klartext ausdrücklich und funktioniert auch mit altem Agent.
+func TestPrepareWithNoAnonymizeAsksForPlainData(t *testing.T) {
+	var body map[string]any
+	var data int
+	srv := anonServer(t, `{"table_prefix":"wp_"}`, `[{"name":"wp_users","checksum":"1"},{"name":"wp_orders","checksum":"3"}]`, &body, &data)
+	defer srv.Close()
+	var out bytes.Buffer
+	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &out, NoAnonymize: true}
+
+	p, err := prepare(quickClient(srv.URL), &o, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, _ := body["scope"].(map[string]any)
+	if scope["plain_pii"] != true {
+		t.Errorf("scope = %v", scope)
+	}
+	if p.delta.Tables[0].Mode != profile.ModeFull {
+		t.Errorf("plain tables keep the plain mode key, got %q", p.delta.Tables[0].Mode)
+	}
+	if !strings.Contains(out.String(), "--no-anonymize") || !strings.Contains(out.String(), "wp_users") {
+		t.Errorf("plain pull must name the pii tables:\n%s", out.String())
 	}
 }

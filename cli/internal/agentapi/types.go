@@ -13,6 +13,8 @@ type Env struct {
 	MemoryLimit      string   `json:"memory_limit"`
 	ActivePlugins    []string `json:"active_plugins"`
 	AgentVersion     string   `json:"agent_version"`
+	// Anon is the agent's anonymization id: rule version plus key fingerprint. Empty before agent 0.3.0.
+	Anon string `json:"anon"`
 }
 
 // Table is one database table with its change marker.
@@ -22,8 +24,11 @@ type Table struct {
 	Rows       int64   `json:"rows"`
 	Bytes      int64   `json:"bytes"`
 	PrimaryKey *string `json:"primary_key"`
-	// Mode is set by the CLI, not the agent: full, structure or filtered:<post types>.
-	// The baseline remembers it so a changed profile reloads the table.
+	// Anonymized: the agent delivers this table's rows pseudonymized in the requested scope.
+	Anonymized bool `json:"anonymized"`
+	// Mode is set by the CLI, not the agent: full, structure or filtered:<post types>, prefixed
+	// with anon:<id>+ for pseudonymized tables. The baseline remembers it so a changed profile,
+	// rule set or --no-anonymize reloads the table.
 	Mode string `json:"-"`
 }
 
@@ -114,6 +119,8 @@ type TableInfo struct {
 	Class     string `json:"class"`
 	Plugin    string `json:"plugin"`
 	Essential bool   `json:"essential"`
+	// Anonymized: the agent has an anonymization rule for this table.
+	Anonymized bool `json:"anonymized"`
 }
 
 // PostType summarizes one post type including its postmeta.
@@ -155,11 +162,13 @@ type InfosheetStatus struct {
 	GeneratedAt int64  `json:"generated_at"`
 }
 
-// Scope limits what the agent delivers (Spec 5.2); the zero value means everything.
+// Scope limits what the agent delivers (Spec 5.2); the zero value means everything, pseudonymized.
 type Scope struct {
 	Tables           map[string]string `json:"tables,omitempty"` // table → structure | skip
 	ExcludePostTypes []string          `json:"exclude_post_types,omitempty"`
 	ExcludePlugins   []string          `json:"exclude_plugins,omitempty"`
 	ExcludeThemes    []string          `json:"exclude_themes,omitempty"`
 	UploadsSince     string            `json:"uploads_since,omitempty"`
+	// PlainPII asks for personal data in plain text. Without it the agent pseudonymizes (Spec 11.3).
+	PlainPII bool `json:"plain_pii,omitempty"`
 }
