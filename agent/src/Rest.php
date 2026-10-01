@@ -85,7 +85,7 @@ final class Rest
         }
         Store::install();
         $keyId  = (string) $request->get_header('x-wpsync-key');
-        $secret = preg_match('/^[a-f0-9]{16}$/', $keyId) ? Store::secretFor($keyId) : null;
+        $secret = preg_match('/^[a-f0-9]{16}\z/', $keyId) ? Store::secretFor($keyId) : null;
         if ($secret === null) {
             return new \WP_Error('wpsync_unpaired', 'unknown or revoked pairing', ['status' => 401]);
         }
@@ -333,8 +333,24 @@ final class Rest
         if (!in_array($table, self::tables(), true)) {
             return new \WP_Error('wpsync_table', 'unknown table', ['status' => 404]);
         }
-        $after = self::param($request, 'after');
-        $chunk = self::tableSql($table, is_scalar($after) ? (string) $after : null, max(0, (int) self::param($request, 'offset')), self::limit($request), $scope);
+        // Wie /db-bundle: abgewählte Tabellen verlassen den Server nicht (CR-06, Spec 5.2).
+        $mode = $scope->tableMode($table);
+        if ($mode === Scope::SKIP) {
+            return new \WP_Error('wpsync_scope', 'table excluded by scope', ['status' => 400]);
+        }
+        $after  = self::param($request, 'after');
+        $after  = is_scalar($after) ? (string) $after : null;
+        $offset = max(0, (int) self::param($request, 'offset'));
+        if ($mode === Scope::STRUCTURE) {
+            $chunk = [
+                'sql'    => ($after === null && $offset === 0) ? self::structureSql($table) : '',
+                'rows'   => 0,
+                'next'   => null,
+                'keyset' => false,
+            ];
+        } else {
+            $chunk = self::tableSql($table, $after, $offset, self::limit($request), $scope);
+        }
 
         header('X-Wpsync-Rows: ' . $chunk['rows']);
         header('X-Wpsync-Mode: ' . ($chunk['keyset'] ? 'keyset' : 'offset'));
