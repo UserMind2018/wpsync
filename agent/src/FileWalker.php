@@ -49,7 +49,7 @@ final class FileWalker
 
             $size   = (int) @filesize($full);
             $path   = substr($full, strlen($this->absPath) + 1);
-            $reason = Excludes::file(basename($full), $size);
+            $reason = Excludes::path(substr($full, strlen($this->contentDir) + 1), $size);
             if ($reason === 'too_large') {
                 $skipped[] = ['path' => $path, 'size' => $size];
             } elseif ($reason === null) {
