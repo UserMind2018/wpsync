@@ -205,3 +205,19 @@ func TestEstimate(t *testing.T) {
 		t.Errorf("files = %d, want %d", files, want)
 	}
 }
+
+// AC-39: PII-Tabellen, die mit Daten und ohne Regel gezogen werden.
+func TestPlainPII(t *testing.T) {
+	s := testSheet()
+	for i := range s.Tables {
+		if s.Tables[i].Name == "wp_users" || s.Tables[i].Name == "wp_comments" {
+			s.Tables[i].Anonymized = true
+		}
+	}
+	if got := mustNew(t, PresetNoTransactions).PlainPII(s.Tables); len(got) != 0 {
+		t.Errorf("standard preset pulls no uncovered pii table, got %v", got)
+	}
+	if got, want := mustNew(t, PresetFull).PlainPII(s.Tables), []string{"wp_e_submissions_values"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("PlainPII = %v, want %v", got, want)
+	}
+}
