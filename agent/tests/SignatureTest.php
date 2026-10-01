@@ -44,6 +44,11 @@ final class SignatureTest extends TestCase
         $this->assertSame('nonce', Signature::check(self::SECRET, 'POST', self::ROUTE, 1000, 'xyz', '{}', 'x', 1000));
     }
 
+    public function testNonceWithTrailingNewlineFails(): void
+    {
+        $this->assertSame('nonce', Signature::check(self::SECRET, 'POST', self::ROUTE, 1000, self::NONCE . "\n", '{}', 'x', 1000));
+    }
+
     private function sign(int $timestamp, string $body): string
     {
         return Signature::sign(self::SECRET, Signature::payload('POST', self::ROUTE, $timestamp, self::NONCE, $body));

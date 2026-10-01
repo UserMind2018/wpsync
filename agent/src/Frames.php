@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Rahmen für gestreamte Antworten:
  *   "F <path>\t<size>\t<mtime>\n" <bytes> "\n"   Datei
@@ -15,9 +17,10 @@ final class Frames
         return 'F ' . $path . "\t" . $size . "\t" . $mtime . "\n";
     }
 
+    /** Der Pfad kommt ungeprüft vom Client – Steuerzeichen würden den Rahmen brechen (CR-07). */
     public static function missing(string $path): string
     {
-        return 'M ' . $path . "\n";
+        return 'M ' . preg_replace('/[\x00-\x1f\x7f]/', '?', $path) . "\n";
     }
 
     public static function table(string $name, int $rows, int $bytes): string

@@ -1,11 +1,16 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Eigene Tabellen – nie exportiert, nie checksummiert (Spike B6, AC-27).
  */
 final class Store
 {
+    /** Autoload-Option, damit die Prüfung keine Query kostet; „wpsync_%“ verlässt den Server nie (AC-27). */
+    public const SCHEMA_OPTION = 'wpsync_schema';
+
     public static function table(string $name): string
     {
         global $wpdb;
@@ -18,10 +23,34 @@ final class Store
         return [self::table('pairings'), self::table('nonces'), self::table('state')];
     }
 
-    /** Idempotent; wird bei Aktivierung und vor jedem API-Zugriff aufgerufen (ZIP-Update ohne Aktivierung). */
+    /** @var list<string>|null */
+    private static $dataTables = null;
+
+    /**
+     * Tabellen, die exportiert werden dürfen (siehe TableList); pro Request einmal ermittelt.
+     *
+     * @return list<string>
+     */
+    public static function dataTables(): array
+    {
+        global $wpdb;
+        if (self::$dataTables === null) {
+            $rows             = (array) $wpdb->get_results("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'", ARRAY_N);
+            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix);
+        }
+        return self::$dataTables;
+    }
+
+    /**
+     * Legt die Tabellen an – nur bei Aktivierung und nach einem Versionswechsel (ZIP-Update ohne
+     * Aktivierung), nicht bei jedem Request (SEC-09).
+     */
     public static function install(): void
     {
         global $wpdb;
+        if (get_option(self::SCHEMA_OPTION) === WPSYNC_VERSION) {
+            return;
+        }
         $collate = $wpdb->get_charset_collate();
         $wpdb->query('CREATE TABLE IF NOT EXISTS `' . self::table('pairings') . '` (
             key_id CHAR(16) NOT NULL PRIMARY KEY,
@@ -39,6 +68,14 @@ final class Store
             name VARCHAR(64) NOT NULL PRIMARY KEY,
             value LONGTEXT NOT NULL
         ) ' . $collate);
+        update_option(self::SCHEMA_OPTION, WPSYNC_VERSION, true);
+    }
+
+    /** Aktivierung erzwingt das Anlegen, auch wenn die Marke von einer früheren Installation stammt. */
+    public static function activate(): void
+    {
+        delete_option(self::SCHEMA_OPTION);
+        self::install();
     }
 
     /** Deaktivieren entfernt alle eigenen Daten und damit alle Pairings. */
@@ -48,6 +85,7 @@ final class Store
         foreach (self::ownTables() as $table) {
             $wpdb->query('DROP TABLE IF EXISTS `' . $table . '`');
         }
+        delete_option(self::SCHEMA_OPTION);
         delete_option('wpsync_secret'); // Altlast aus dem Spike
     }
 
@@ -82,15 +120,23 @@ final class Store
         return $code;
     }
 
-    public static function addPairing(string $keyId, string $secret, string $device): void
+    /** @return bool false, wenn die Zeile nicht geschrieben wurde */
+    public static function addPairing(string $keyId, string $secret, string $device): bool
     {
         global $wpdb;
-        $wpdb->insert(self::table('pairings'), [
+        return 1 === $wpdb->insert(self::table('pairings'), [
             'key_id'  => $keyId,
             'secret'  => $secret,
             'device'  => $device,
             'created' => time(),
         ]);
+    }
+
+    /** MySQL-Locks gelten serverweit – der Name muss Datenbank und Präfix enthalten. */
+    public static function lockName(string $purpose): string
+    {
+        global $wpdb;
+        return 'wpsync_' . $purpose . '_' . substr(md5(DB_NAME . '|' . $wpdb->base_prefix), 0, 12);
     }
 
     public static function secretFor(string $keyId): ?string

@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Dateien unter wp-content, relativ zu ABSPATH, in fester Reihenfolge und seitenweise.
  * Symlinks werden übersprungen (zeigen typischerweise aus der Site heraus, z. B. local-mailguard).
@@ -49,7 +51,7 @@ final class FileWalker
 
             $size   = (int) @filesize($full);
             $path   = substr($full, strlen($this->absPath) + 1);
-            $reason = Excludes::file(basename($full), $size);
+            $reason = Excludes::path(substr($full, strlen($this->contentDir) + 1), $size);
             if ($reason === 'too_large') {
                 $skipped[] = ['path' => $path, 'size' => $size];
             } elseif ($reason === null) {

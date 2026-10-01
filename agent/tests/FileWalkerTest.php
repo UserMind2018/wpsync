@@ -115,4 +115,33 @@ final class FileWalkerTest extends TestCase
             array_column($page['files'], 'path')
         );
     }
+
+    public function testAppliesTheSameExcludesAsFilesEndpoint(): void
+    {
+        $root = sys_get_temp_dir() . '/wpsync-walker-excl-' . bin2hex(random_bytes(4));
+        foreach ([
+            'wp-content/Cache/page.html',
+            'wp-content/.htpasswd',
+            'wp-content/site-backup.zip',
+            'wp-content/uploads/dump.sql',
+            'wp-content/uploads/sec-debug.LOG',
+            'wp-content/plugins/foo/.svn/entries',
+            'wp-content/plugins/foo/install.sql',
+            'wp-content/themes/t/style.css',
+        ] as $path) {
+            if (!is_dir(dirname($root . '/' . $path))) {
+                mkdir(dirname($root . '/' . $path), 0777, true);
+            }
+            file_put_contents($root . '/' . $path, 'x');
+        }
+        try {
+            $page = (new FileWalker($root, $root . '/wp-content', $root . '/none'))->page(0, microtime(true) + 60);
+            $this->assertSame(
+                ['wp-content/plugins/foo/install.sql', 'wp-content/themes/t/style.css'],
+                array_column($page['files'], 'path')
+            );
+        } finally {
+            exec('rm -rf ' . escapeshellarg($root));
+        }
+    }
 }

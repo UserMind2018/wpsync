@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Umfang eines Pulls laut Profil des CLI (Spec 5.2): Tabellenmodi, abgewählte Post-Typen,
  * Plugins, Themes und Upload-Jahre. Ungültige Angaben lehnt der Agent ab, statt sie still zu
@@ -41,16 +43,16 @@ final class Scope
             throw new \InvalidArgumentException('tables must be an object');
         }
         foreach ($tables as $table => $mode) {
-            if (!is_string($table) || preg_match('/^[A-Za-z0-9_$]{1,64}$/', $table) !== 1 || !in_array($mode, [self::STRUCTURE, self::SKIP], true)) {
+            if (!is_string($table) || preg_match('/^[A-Za-z0-9_$]{1,64}\z/', $table) !== 1 || !in_array($mode, [self::STRUCTURE, self::SKIP], true)) {
                 throw new \InvalidArgumentException('invalid table mode for ' . (string) $table);
             }
             $scope->tables[$table] = $mode;
         }
-        $scope->postTypes = self::names($raw['exclude_post_types'] ?? [], '/^[a-z0-9_-]{1,20}$/', 'post type');
-        $scope->plugins   = self::names($raw['exclude_plugins'] ?? [], '/^[A-Za-z0-9._-]{1,100}$/', 'plugin');
-        $scope->themes    = self::names($raw['exclude_themes'] ?? [], '/^[A-Za-z0-9._-]{1,100}$/', 'theme');
+        $scope->postTypes = self::names($raw['exclude_post_types'] ?? [], '/^[a-z0-9_-]{1,20}\z/', 'post type');
+        $scope->plugins   = self::names($raw['exclude_plugins'] ?? [], '/^[A-Za-z0-9._-]{1,100}\z/', 'plugin');
+        $scope->themes    = self::names($raw['exclude_themes'] ?? [], '/^[A-Za-z0-9._-]{1,100}\z/', 'theme');
         $since            = (string) ($raw['uploads_since'] ?? '');
-        if ($since !== '' && preg_match('/^\d{4}$/', $since) !== 1) {
+        if ($since !== '' && preg_match('/^\d{4}\z/', $since) !== 1) {
             throw new \InvalidArgumentException('invalid uploads_since');
         }
         $scope->uploadsSince = $since;

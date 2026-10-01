@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Infosheet in Häppchen (Spec 4.4, E20): Übersicht → Post-Typen nach ID-Bereichen → Postmeta
  * nach meta_id-Bereichen → Dateigrößen. Der Zustand ist reines JSON und liegt zwischen den

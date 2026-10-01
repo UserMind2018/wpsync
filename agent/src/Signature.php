@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * HMAC-SHA256 über "METHOD\nROUTE\nTIMESTAMP\nNONCE\nsha256(BODY)".
  * Alle Parameter stehen im Body und sind damit mitsigniert.
@@ -35,7 +37,7 @@ final class Signature
         if (abs($now - $timestamp) > self::MAX_SKEW) {
             return 'timestamp';
         }
-        if (!preg_match('/^[a-f0-9]{32}$/', $nonce)) {
+        if (!preg_match('/^[a-f0-9]{32}\z/', $nonce)) {
             return 'nonce';
         }
         $expected = self::sign($secret, self::payload($method, $route, $timestamp, $nonce, $body));

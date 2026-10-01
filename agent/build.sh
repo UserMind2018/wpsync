@@ -7,9 +7,18 @@ for f in wpsync-agent.php src/*.php; do
   php -l "$f" >/dev/null
 done
 
+# Jede Quelldatei bricht ohne WordPress sofort ab – ein Direktaufruf verrät sonst Serverpfade (SEC-13).
+missing="$(grep -L "defined('ABSPATH') || exit;" src/*.php || true)"
+if [ -n "$missing" ]; then
+  echo "ABSPATH-Guard fehlt in:"
+  echo "$missing"
+  exit 1
+fi
+
 rm -rf dist
 mkdir -p dist/wpsync-agent/src
 cp wpsync-agent.php dist/wpsync-agent/
 cp src/*.php dist/wpsync-agent/src/
+cp ../LICENSE dist/wpsync-agent/LICENSE # MIT verlangt den Lizenztext in jeder Kopie (CR-14)
 (cd dist && zip -qr wpsync-agent.zip wpsync-agent && rm -rf wpsync-agent)
 echo "dist/wpsync-agent.zip"

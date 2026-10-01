@@ -93,4 +93,22 @@ final class ScopeTest extends TestCase
         $this->assertSame('LEFT JOIN `wp_posts` p ON p.`ID` = t.`comment_post_ID`', $s->rowFilter('wp_comments', self::CORE, $e)['join']);
         $this->assertSame(['join' => '', 'where' => ''], $s->rowFilter('wp_options', self::CORE, $e));
     }
+
+    public function testPostTypeWithTrailingNewlineIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        Scope::fromArray(['exclude_post_types' => ["revision\n"]]);
+    }
+
+    public function testTableNameWithTrailingNewlineIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        Scope::fromArray(['tables' => ["wp_users\n" => 'skip']]);
+    }
+
+    public function testUploadsSinceWithTrailingNewlineIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        Scope::fromArray(['uploads_since' => "2024\n"]);
+    }
 }

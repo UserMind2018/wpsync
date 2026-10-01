@@ -1,12 +1,23 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 final class Rest
 {
     public const NS = 'wpsync/v1';
 
+    /** Mindestabstand zwischen zwei Einlöseversuchen, global (SEC-09). */
+    private const PAIR_INTERVAL = 1;
+
     /** @var string */
     private static $pluginDir = '';
+
+    /** @var \WP_REST_Request|null */
+    private static $authRequest = null;
+
+    /** @var true|\WP_Error|null */
+    private static $authResult = null;
 
     public static function register(string $pluginDir): void
     {
@@ -39,12 +50,44 @@ final class Rest
         }
     }
 
-    /** @return true|\WP_Error */
+    /**
+     * WordPress ruft die Permission-Callback pro Request zweimal auf (Allow-Header). Der zweite
+     * Lauf scheiterte bisher an „nonce reused“ und verdoppelte alle Queries (CR-10).
+     *
+     * @return true|\WP_Error
+     */
     public static function auth(\WP_REST_Request $request)
     {
+        if (self::$authRequest !== $request) {
+            self::$authRequest = $request;
+            self::$authResult  = self::authenticate($request);
+        }
+        return self::$authResult;
+    }
+
+    /** Ohne TLS liefen Secret (Pairing) und Dumps im Klartext (SEC-03). */
+    private static function requireTls(): ?\WP_Error
+    {
+        if (is_ssl() || (defined('WPSYNC_ALLOW_HTTP') && WPSYNC_ALLOW_HTTP)) {
+            return null;
+        }
+        return new \WP_Error(
+            'wpsync_https',
+            "wpsync erfordert HTTPS. Nur für lokale Umgebungen: define('WPSYNC_ALLOW_HTTP', true); in wp-config.php.",
+            ['status' => 400]
+        );
+    }
+
+    /** @return true|\WP_Error */
+    private static function authenticate(\WP_REST_Request $request)
+    {
+        $tls = self::requireTls();
+        if ($tls !== null) {
+            return $tls;
+        }
         Store::install();
         $keyId  = (string) $request->get_header('x-wpsync-key');
-        $secret = preg_match('/^[a-f0-9]{16}$/', $keyId) ? Store::secretFor($keyId) : null;
+        $secret = preg_match('/^[a-f0-9]{16}\z/', $keyId) ? Store::secretFor($keyId) : null;
         if ($secret === null) {
             return new \WP_Error('wpsync_unpaired', 'unknown or revoked pairing', ['status' => 401]);
         }
@@ -73,6 +116,11 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function pair(\WP_REST_Request $request)
     {
+        global $wpdb;
+        $tls = self::requireTls();
+        if ($tls !== null) {
+            return $tls;
+        }
         if (is_multisite()) {
             return new \WP_Error('wpsync_multisite', 'Multisite wird nicht unterstützt.', ['status' => 400]); // AC-31
         }
@@ -81,16 +129,51 @@ final class Rest
         }
         Store::install();
 
-        list($ok, $next) = Pairing::redeem(Store::getState('pairing_code'), (string) $request->get_param('code'), time());
-        Store::setState('pairing_code', $next);
+        // Lesen, Prüfen und Zurückschreiben des Codes müssen ein Schritt sein, sonst lösen
+        // parallele Requests denselben Code mehrfach ein (SEC-04).
+        $lock = Store::lockName('pair');
+        if ((int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 5)', $lock)) !== 1) {
+            return new \WP_Error('wpsync_busy', 'Bitte gleich noch einmal versuchen.', ['status' => 429]);
+        }
+        try {
+            return self::redeem($request, time());
+        } finally {
+            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+        }
+    }
+
+    /**
+     * Läuft nur unter der Pairing-Sperre.
+     *
+     * @return \WP_REST_Response|\WP_Error
+     */
+    private static function redeem(\WP_REST_Request $request, int $now)
+    {
+        $invalid = new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
+        $stored  = Store::getState('pairing_code');
+        if ($stored === null) {
+            return $invalid; // kein offener Code: anonyme Requests lösen keinen Schreibzugriff aus (SEC-09)
+        }
+        $last = Store::getState('pair_last');
+        if ($last !== null && $now - (int) ($last['t'] ?? 0) < self::PAIR_INTERVAL) {
+            return new \WP_Error('wpsync_rate', 'Zu viele Versuche – bitte kurz warten.', ['status' => 429]);
+        }
+        Store::setState('pair_last', ['t' => $now]);
+
+        list($ok, $next) = Pairing::redeem($stored, self::text($request, 'code'), $now);
         if (!$ok) {
-            return new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
+            Store::setState('pairing_code', $next);
+            return $invalid;
         }
 
-        $device = substr(sanitize_text_field((string) $request->get_param('device')), 0, 100);
         $keyId  = Pairing::newKeyId();
         $secret = Pairing::newSecret();
-        Store::addPairing($keyId, $secret, $device !== '' ? $device : 'unbekannt');
+        $device = Pairing::device(sanitize_text_field(self::text($request, 'device')));
+        if (!Store::addPairing($keyId, $secret, $device)) {
+            // Der Code bleibt gültig: der Client hat kein Pairing bekommen (CR-01).
+            return new \WP_Error('wpsync_store', 'Pairing konnte nicht gespeichert werden.', ['status' => 500]);
+        }
+        Store::setState('pairing_code', null);
         Infosheet::start(); // Spec 4.4: Inventar nach dem Pairing
 
         return new \WP_REST_Response([
@@ -115,7 +198,7 @@ final class Rest
     /** Stösst eine Erhebung an (start) und arbeitet ein Häppchen ab – Fallback ohne WP-Cron (AC-9). */
     public static function infosheetRefresh(\WP_REST_Request $request): \WP_REST_Response
     {
-        if ($request->get_param('start')) {
+        if (self::param($request, 'start')) {
             Infosheet::begin();
         }
         $seconds = min(Infosheet::SLICE, (float) Budget::seconds((int) ini_get('max_execution_time')));
@@ -154,7 +237,7 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $cursor = json_decode((string) $request->get_param('cursor'), true);
+        $cursor = json_decode(self::text($request, 'cursor'), true);
         if (!is_array($cursor) || !in_array($cursor['phase'] ?? '', ['tables', 'files'], true)) {
             $cursor = ['phase' => 'tables', 'i' => 0];
         }
@@ -206,7 +289,7 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $names    = array_values(array_intersect(array_map('strval', (array) $request->get_param('tables')), self::tables()));
+        $names    = array_values(array_intersect(array_filter((array) self::param($request, 'tables'), 'is_string'), self::tables()));
         $limit    = self::limit($request);
         $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
 
@@ -248,12 +331,28 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $table = (string) $request->get_param('table');
+        $table = self::text($request, 'table');
         if (!in_array($table, self::tables(), true)) {
             return new \WP_Error('wpsync_table', 'unknown table', ['status' => 404]);
         }
-        $after = $request->get_param('after');
-        $chunk = self::tableSql($table, $after === null ? null : (string) $after, max(0, (int) $request->get_param('offset')), self::limit($request), $scope);
+        // Wie /db-bundle: abgewählte Tabellen verlassen den Server nicht (CR-06, Spec 5.2).
+        $mode = $scope->tableMode($table);
+        if ($mode === Scope::SKIP) {
+            return new \WP_Error('wpsync_scope', 'table excluded by scope', ['status' => 400]);
+        }
+        $after  = self::param($request, 'after');
+        $after  = is_scalar($after) ? (string) $after : null;
+        $offset = max(0, (int) self::param($request, 'offset'));
+        if ($mode === Scope::STRUCTURE) {
+            $chunk = [
+                'sql'    => ($after === null && $offset === 0) ? self::structureSql($table) : '',
+                'rows'   => 0,
+                'next'   => null,
+                'keyset' => false,
+            ];
+        } else {
+            $chunk = self::tableSql($table, $after, $offset, self::limit($request), $scope);
+        }
 
         header('X-Wpsync-Rows: ' . $chunk['rows']);
         header('X-Wpsync-Mode: ' . ($chunk['keyset'] ? 'keyset' : 'offset'));
@@ -265,11 +364,21 @@ final class Rest
         exit;
     }
 
-    /** Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). */
-    public static function files(\WP_REST_Request $request): void
+    /**
+     * Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). Es gelten dieselben
+     * festen Ausschlüsse wie in der Dateiliste, geprüft am aufgelösten Pfad (SEC-02).
+     *
+     * @return \WP_Error|void
+     */
+    public static function files(\WP_REST_Request $request)
     {
+        $rootReal = realpath(WP_CONTENT_DIR);
+        if ($rootReal === false) {
+            // Ohne aufgelösten Root wäre der Präfixvergleich unten wirkungslos (SEC-11).
+            return new \WP_Error('wpsync_layout', 'wp-content ist nicht auflösbar.', ['status' => 500]);
+        }
         $base = wp_normalize_path(ABSPATH);
-        $root = wp_normalize_path((string) realpath(WP_CONTENT_DIR)) . '/';
+        $root = wp_normalize_path($rootReal) . '/';
         $self = wp_normalize_path(self::$pluginDir) . '/';
 
         if (function_exists('set_time_limit')) {
@@ -278,11 +387,17 @@ final class Rest
         nocache_headers();
         header('Content-Type: application/octet-stream');
         while (ob_get_level() > 0) {
-            ob_end_flush();
+            ob_end_clean(); // fremde Pufferinhalte gehören nicht in den Stream (CR-07)
         }
 
-        foreach ((array) $request->get_param('paths') as $path) {
-            $path = (string) $path;
+        foreach ((array) self::param($request, 'paths') as $path) {
+            if (!is_string($path)) {
+                continue;
+            }
+            if (preg_match('/[\x00-\x1f\x7f]/', $path) === 1) {
+                echo Frames::missing($path); // phpcs:ignore WordPress.Security.EscapeOutput -- realpath() würfe bei \0 (CR-07)
+                continue;
+            }
             $full = wp_normalize_path((string) realpath($base . $path));
             $ok   = strpos($path, 'wp-content/') === 0
                 && strpos($full, $root) === 0
@@ -290,14 +405,20 @@ final class Rest
                 && !is_link($base . $path)
                 && is_file($full)
                 && is_readable($full)
-                && Excludes::file(basename($full), (int) filesize($full)) === null;
-            if (!$ok) {
+                && Excludes::path(substr($full, strlen($root)), (int) filesize($full)) === null;
+            $in   = $ok ? fopen($full, 'rb') : false;
+            if ($in === false) {
                 echo Frames::missing($path); // phpcs:ignore WordPress.Security.EscapeOutput
                 continue;
             }
             clearstatcache(true, $full);
-            echo Frames::file($path, (int) filesize($full), (int) filemtime($full)); // phpcs:ignore WordPress.Security.EscapeOutput
-            readfile($full);
+            $size = (int) filesize($full);
+            echo Frames::file($path, $size, (int) filemtime($full)); // phpcs:ignore WordPress.Security.EscapeOutput
+            $sent = self::send($in, $size);
+            fclose($in);
+            if ($sent !== $size) {
+                exit; // Datei wurde währenddessen kürzer: ohne E enden, der Client bricht ab und holt neu
+            }
             echo "\n";
             flush();
         }
@@ -305,19 +426,37 @@ final class Rest
         exit;
     }
 
+    /**
+     * Sendet höchstens $size Bytes – wächst die Datei währenddessen, bleibt der Rahmen intakt (CR-07).
+     *
+     * @param resource $in
+     */
+    private static function send($in, int $size): int
+    {
+        $sent = 0;
+        while ($sent < $size) {
+            $chunk = fread($in, min(1048576, $size - $sent));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput
+            $sent += strlen($chunk);
+            flush();
+        }
+        return $sent;
+    }
+
     /** @return list<string> */
     private static function tables(): array
     {
-        global $wpdb;
-        $tables = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'));
-        return array_values(array_diff($tables, Store::ownTables()));
+        return Store::dataTables();
     }
 
     /** @return array{name: string, checksum: string|null, rows: int, bytes: int, primary_key: string|null} */
     private static function tableInfo(string $table, bool $withChecksum): array
     {
         global $wpdb;
-        $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $table), ARRAY_A);
+        $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($table)), ARRAY_A);
         $checksum = $withChecksum ? (array) $wpdb->get_row('CHECKSUM TABLE `' . $table . '`', ARRAY_A) : [];
         return [
             'name'        => $table,
@@ -372,11 +511,29 @@ final class Rest
         ];
     }
 
+    /**
+     * Parameter ausschliesslich aus dem JSON-Body: nur der ist signiert (SEC-07).
+     * get_param() läse auch den Query-String.
+     *
+     * @return mixed null, wenn der Parameter fehlt
+     */
+    private static function param(\WP_REST_Request $request, string $name)
+    {
+        $json = $request->get_json_params();
+        return is_array($json) && array_key_exists($name, $json) ? $json[$name] : null;
+    }
+
+    private static function text(\WP_REST_Request $request, string $name): string
+    {
+        $value = self::param($request, $name);
+        return is_scalar($value) ? (string) $value : '';
+    }
+
     /** @return Scope|\WP_Error */
     private static function scope(\WP_REST_Request $request)
     {
         try {
-            return Scope::fromArray($request->get_param('scope'));
+            return Scope::fromArray(self::param($request, 'scope'));
         } catch (\InvalidArgumentException $e) {
             return new \WP_Error('wpsync_scope', 'invalid scope: ' . $e->getMessage(), ['status' => 400]);
         }
@@ -391,7 +548,7 @@ final class Rest
 
     private static function limit(\WP_REST_Request $request): int
     {
-        $limit = (int) $request->get_param('limit');
+        $limit = (int) self::param($request, 'limit');
         return min(20000, max(1, $limit > 0 ? $limit : 2000));
     }
 

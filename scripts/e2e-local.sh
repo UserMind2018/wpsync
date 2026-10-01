@@ -38,6 +38,7 @@ fi
 
 echo "== 1b-Fixtures in der Quelle"
 ddev wp config set DISABLE_WP_CRON true --raw --type=constant # AC-9: Infosheet ohne WP-Cron
+ddev wp config set WPSYNC_ALLOW_HTTP true --raw --type=constant # SEC-03: die lokale Quelle läuft über http
 if [ "$(ddev wp post list --post_type=revision --format=count)" = "0" ]; then
   for id in $(ddev wp post list --post_type=page --posts_per_page=5 --format=ids); do
     ddev wp post update "$id" --post_content="Revision $id" >/dev/null
@@ -63,12 +64,15 @@ echo "== AC-25: Frontend bleibt geschützt"
 status="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Wpsync-Signature: x' "$SOURCE_URL/?p=1")"
 [ "$status" = "302" ] || fail "protected page returned $status"
 
+echo "== SEC-03: pair über http nur mit --insecure"
+if "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "${TARGET}0" 2>/dev/null; then fail "paired over http without --insecure"; fi
+
 echo "== pair"
 "$WPSYNC" unpair "$TARGET" >/dev/null 2>&1 || true
-"$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "$TARGET"
+"$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "$TARGET" --insecure
 
 echo "== AC-3: Code ist verbraucht"
-if "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "${TARGET}2" 2>/dev/null; then fail "code reused"; fi
+if "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "${TARGET}2" --insecure 2>/dev/null; then fail "code reused"; fi
 
 echo "== AC-9: scan --refresh ohne WP-Cron"
 "$WPSYNC" scan "$TARGET" --refresh --preset ohne-transaktionen --exclude-plugin e2e-excluded --uploads-since "$YEAR" | tee "$E2E/scan1.log"

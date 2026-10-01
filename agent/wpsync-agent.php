@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       wpsync Agent
  * Description:       Signierte, lesende Schnittstelle für wpsync pull (Live → Lokal).
- * Version:           0.2.0
+ * Version:           0.2.1
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -12,16 +12,16 @@
 
 defined('ABSPATH') || exit;
 
-const WPSYNC_VERSION = '0.2.0';
+const WPSYNC_VERSION = '0.2.1';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
-    'Classifier', 'Probe', 'Inventory', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
+    'Classifier', 'Probe', 'Inventory', 'TableList', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }
 
-register_activation_hook(__FILE__, [\WpSync\Store::class, 'install']);
+register_activation_hook(__FILE__, [\WpSync\Store::class, 'activate']);
 register_deactivation_hook(__FILE__, static function (): void {
     \WpSync\Infosheet::unschedule();
     \WpSync\Store::uninstall();

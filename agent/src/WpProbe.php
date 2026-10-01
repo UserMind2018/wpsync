@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /** Probe über $wpdb, get_plugins() und wp_get_themes(). */
 final class WpProbe implements Probe
 {
@@ -52,11 +54,11 @@ final class WpProbe implements Probe
     {
         global $wpdb;
         $rows = (array) $wpdb->get_results($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'), ARRAY_A);
-        $own  = Store::ownTables();
-        $out  = [];
+        $allowed = array_flip(Store::dataTables());
+        $out     = [];
         foreach ($rows as $row) {
-            if (in_array($row['Name'], $own, true)) {
-                continue;
+            if (!isset($allowed[$row['Name']])) {
+                continue; // Views, eigene Tabellen, fremde Installationen
             }
             $out[] = [
                 'name'  => (string) $row['Name'],

@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /** Datenquelle des Inventars: in WordPress WpProbe, in Tests ein Fake. */
 interface Probe
 {

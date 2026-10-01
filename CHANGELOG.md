@@ -3,6 +3,37 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.1.6] – 2026-10-02 · Agent 0.2.1
+
+Sicherheits-Release nach dem Audit des Agents 0.2.0. **Agent auf allen gekoppelten Sites aktualisieren.**
+
+### Sicherheit
+- „Password Protected" liess sich mit `?x=/wp-json/wpsync/v1` an jeder URL abschalten. Der
+  Bypass gilt jetzt nur noch für exakt bekannte wpsync-Routen, ohne Signatur-Header nur für
+  den Namespace-Index und `/pair`
+- `/files` wendet dieselben festen Ausschlüsse an wie die Dateiliste. Neu ausgeschlossen:
+  `.svn`, `.hg`, `backup(s)`, `backup-*`, `.env*`, `.htpasswd`, SQL-Dumps ausserhalb von
+  Plugins/Themes, Archive direkt unter `wp-content`. Alle Vergleiche ohne Gross-/Kleinschreibung
+- Der Agent verlangt HTTPS. Lokale Umgebungen: `define('WPSYNC_ALLOW_HTTP', true);`.
+  `wpsync pair` koppelt über `http://` nur noch mit `--insecure`
+- Ein Pairing-Code lässt sich auch parallel nur einmal einlösen; höchstens ein Versuch pro Sekunde
+- Parameter werden nur noch aus dem signierten Body gelesen
+- Tabellen fremder Installationen in derselben Datenbank und jede `wpsync_*`-Tabelle bleiben auf dem Server
+- Quelldateien des Agents lassen sich nicht mehr direkt aufrufen
+
+### Behoben
+- `/pair` meldete Erfolg, obwohl das Pairing bei bestimmten Gerätenamen nicht gespeichert wurde
+- Views werden nicht mehr wie Tabellen gedumpt
+- `/db` beachtet den Tabellenmodus des Profils (`skip`, `structure`)
+- Ein Pfad mit Nullbyte brach den Dateistream ab
+- Anonyme Requests lösten `CREATE TABLE` aus; die Authentifizierung lief pro Request doppelt
+- Das tägliche Inventar läuft nur noch auf gekoppelten Sites; ein hängender Job wird nach 1 h ersetzt
+
+### Hinweis
+- Erkennt WordPress hinter einem TLS-Proxy die Verbindung nicht als HTTPS (`is_ssl()`),
+  antwortet der Agent mit `400 wpsync_https`. Dann die Proxy-Erkennung in `wp-config.php`
+  einrichten.
+
 ## [0.1.5] – 2026-10-01 · Agent 0.2.0
 
 ### Hinzugefügt
