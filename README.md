@@ -122,7 +122,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 |---|---|
 | `wpsync setup` | Einmalig pro Mac: legt `/etc/resolver/ddev.site` an (umgeht den DNS-Rebind-Schutz von Routern wie der FRITZ!Box), führt `mkcert -install` aus, prüft Docker und DDEV. Fragt einmal nach dem Passwort. |
 | `wpsync doctor` | Prüft ohne sudo: Resolver, Docker ≥ 25, DDEV, local-mailguard, freie Ports. Nennt pro Problem die Lösung, Exit-Code ≠ 0 bei Fehlern. |
-| `wpsync pair <url> <code> [--name n] [--device d]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). |
+| `wpsync pair <url> <code> [--name n] [--device d] [--insecure]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). Nur über `https://`; `--insecure` erlaubt `http://` für lokale Testumgebungen. |
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
@@ -230,9 +230,15 @@ Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
 - **Widerruf:** Werkzeuge → wpsync → Gerät widerrufen. Danach ist das Secret wertlos.
 - **Read-only:** Der Agent liest Dateien und Datenbank; er schreibt nur in eigene
   `wpsync_*`-Tabellen und -Optionen.
-- **Feste Ausschlüsse (serverseitig):** eigene Tabellen/Optionen, `wp-content/cache`,
-  `upgrade`, `wflogs`, bekannte Backup-Ordner, `.git`, Symlinks, `*.log`, Dateien > 256 MB.
-- **Zugriffsschutz:** Signierte wpsync-Routen passieren das Plugin „Password Protected“.
+- **Transport:** Der Agent antwortet nur über HTTPS. Für lokale Umgebungen:
+  `define('WPSYNC_ALLOW_HTTP', true);` in `wp-config.php` und `wpsync pair … --insecure`.
+- **Feste Ausschlüsse (serverseitig, für Liste und Abruf):** eigene und fremde
+  `wpsync_*`-Tabellen und -Optionen, Views, Tabellen einer zweiten Installation in derselben
+  Datenbank, `wp-content/cache`, `upgrade`, `wflogs`, bekannte Backup-Ordner, `backup(s)`,
+  `.git`/`.svn`/`.hg`, Symlinks, `*.log`, `.env*`, `.htpasswd`, SQL-Dumps ausserhalb von
+  Plugins und Themes, Archive direkt unter `wp-content`, Dateien > 256 MB.
+- **Zugriffsschutz:** Nur wpsync-Routen passieren das Plugin „Password Protected" – ohne
+  Signatur-Header ausschliesslich der Namespace-Index und `/pair`.
 - **Keine Mails lokal:** Ohne aktiven local-mailguard läuft kein Pull. Grund: Ein Prod-Dump
   bringt oft SMTP-Plugins mit echten Zugangsdaten mit.
 
@@ -298,6 +304,7 @@ die Baseline – keine DB-Dumps.
 | `*.ddev.site` löst nicht auf | `wpsync setup` fehlt oder der Router blockiert DNS-Rebind → `wpsync doctor` |
 | „noch kein Pull-Profil – zuerst wpsync scan …“ | einmal `wpsync scan <site>` |
 | `401` beim Pull | Pairing auf der Site widerrufen → `wpsync unpair <site>`, neu koppeln |
+| `400 wpsync_https` | Der Agent sieht die Verbindung als unverschlüsselt → HTTPS-Erkennung hinter dem Proxy einrichten; lokal `WPSYNC_ALLOW_HTTP` setzen |
 | „Der Server antwortet nicht mehr – vermutlich eine IP-Sperre“ | fail2ban/WAF hat gesperrt. Genannte IP entsperren und whitelisten, `User-Agent: wpsync/*` freigeben, ggf. `rps` senken |
 | Infosheet veraltet / fehlt | WP-Cron ist auf der Site aus → `wpsync scan <site> --refresh` |
 | Pull bricht mit Mailguard-Fehler ab | `wpsync doctor` zeigt, welche Datei gesucht wird – meist zeigt `WPSYNC_MAILGUARD` ins Leere. Hat die Site eigene Mail-Wege außerhalb von `wp_mail`, greift der Riegel dort nicht |
@@ -321,6 +328,9 @@ vendor/bin/phpunit
 
 # End-to-End (DDEV-Quelle → pair → scan → pull → status)
 scripts/e2e-local.sh       # endet mit „E2E OK“; Arbeitsordner: $WPSYNC_E2E_DIR (~/wpsync-e2e)
+
+# Sicherheits-Regressionen (braucht die Quelle aus e2e-local.sh)
+scripts/e2e-security.sh
 ```
 
 Struktur:
