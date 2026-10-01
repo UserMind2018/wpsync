@@ -81,13 +81,13 @@ final class Rest
         }
         Store::install();
 
-        list($ok, $next) = Pairing::redeem(Store::getState('pairing_code'), (string) $request->get_param('code'), time());
+        list($ok, $next) = Pairing::redeem(Store::getState('pairing_code'), self::text($request, 'code'), time());
         Store::setState('pairing_code', $next);
         if (!$ok) {
             return new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
         }
 
-        $device = substr(sanitize_text_field((string) $request->get_param('device')), 0, 100);
+        $device = substr(sanitize_text_field(self::text($request, 'device')), 0, 100);
         $keyId  = Pairing::newKeyId();
         $secret = Pairing::newSecret();
         Store::addPairing($keyId, $secret, $device !== '' ? $device : 'unbekannt');
@@ -115,7 +115,7 @@ final class Rest
     /** Stösst eine Erhebung an (start) und arbeitet ein Häppchen ab – Fallback ohne WP-Cron (AC-9). */
     public static function infosheetRefresh(\WP_REST_Request $request): \WP_REST_Response
     {
-        if ($request->get_param('start')) {
+        if (self::param($request, 'start')) {
             Infosheet::begin();
         }
         $seconds = min(Infosheet::SLICE, (float) Budget::seconds((int) ini_get('max_execution_time')));
@@ -154,7 +154,7 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $cursor = json_decode((string) $request->get_param('cursor'), true);
+        $cursor = json_decode(self::text($request, 'cursor'), true);
         if (!is_array($cursor) || !in_array($cursor['phase'] ?? '', ['tables', 'files'], true)) {
             $cursor = ['phase' => 'tables', 'i' => 0];
         }
@@ -206,7 +206,7 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $names    = array_values(array_intersect(array_map('strval', (array) $request->get_param('tables')), self::tables()));
+        $names    = array_values(array_intersect(array_filter((array) self::param($request, 'tables'), 'is_string'), self::tables()));
         $limit    = self::limit($request);
         $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
 
@@ -248,12 +248,12 @@ final class Rest
         if ($scope instanceof \WP_Error) {
             return $scope;
         }
-        $table = (string) $request->get_param('table');
+        $table = self::text($request, 'table');
         if (!in_array($table, self::tables(), true)) {
             return new \WP_Error('wpsync_table', 'unknown table', ['status' => 404]);
         }
-        $after = $request->get_param('after');
-        $chunk = self::tableSql($table, $after === null ? null : (string) $after, max(0, (int) $request->get_param('offset')), self::limit($request), $scope);
+        $after = self::param($request, 'after');
+        $chunk = self::tableSql($table, is_scalar($after) ? (string) $after : null, max(0, (int) self::param($request, 'offset')), self::limit($request), $scope);
 
         header('X-Wpsync-Rows: ' . $chunk['rows']);
         header('X-Wpsync-Mode: ' . ($chunk['keyset'] ? 'keyset' : 'offset'));
@@ -281,7 +281,7 @@ final class Rest
             ob_end_flush();
         }
 
-        foreach ((array) $request->get_param('paths') as $path) {
+        foreach ((array) self::param($request, 'paths') as $path) {
             $path = (string) $path;
             $full = wp_normalize_path((string) realpath($base . $path));
             $ok   = strpos($path, 'wp-content/') === 0
@@ -372,11 +372,29 @@ final class Rest
         ];
     }
 
+    /**
+     * Parameter ausschliesslich aus dem JSON-Body: nur der ist signiert (SEC-07).
+     * get_param() läse auch den Query-String.
+     *
+     * @return mixed null, wenn der Parameter fehlt
+     */
+    private static function param(\WP_REST_Request $request, string $name)
+    {
+        $json = $request->get_json_params();
+        return is_array($json) && array_key_exists($name, $json) ? $json[$name] : null;
+    }
+
+    private static function text(\WP_REST_Request $request, string $name): string
+    {
+        $value = self::param($request, $name);
+        return is_scalar($value) ? (string) $value : '';
+    }
+
     /** @return Scope|\WP_Error */
     private static function scope(\WP_REST_Request $request)
     {
         try {
-            return Scope::fromArray($request->get_param('scope'));
+            return Scope::fromArray(self::param($request, 'scope'));
         } catch (\InvalidArgumentException $e) {
             return new \WP_Error('wpsync_scope', 'invalid scope: ' . $e->getMessage(), ['status' => 400]);
         }
@@ -391,7 +409,7 @@ final class Rest
 
     private static function limit(\WP_REST_Request $request): int
     {
-        $limit = (int) $request->get_param('limit');
+        $limit = (int) self::param($request, 'limit');
         return min(20000, max(1, $limit > 0 ? $limit : 2000));
     }
 
