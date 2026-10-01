@@ -5,6 +5,9 @@ final class Rest
 {
     public const NS = 'wpsync/v1';
 
+    /** Mindestabstand zwischen zwei Einlöseversuchen, global (SEC-09). */
+    private const PAIR_INTERVAL = 1;
+
     /** @var string */
     private static $pluginDir = '';
 
@@ -111,6 +114,7 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function pair(\WP_REST_Request $request)
     {
+        global $wpdb;
         $tls = self::requireTls();
         if ($tls !== null) {
             return $tls;
@@ -123,16 +127,51 @@ final class Rest
         }
         Store::install();
 
-        list($ok, $next) = Pairing::redeem(Store::getState('pairing_code'), self::text($request, 'code'), time());
-        Store::setState('pairing_code', $next);
+        // Lesen, Prüfen und Zurückschreiben des Codes müssen ein Schritt sein, sonst lösen
+        // parallele Requests denselben Code mehrfach ein (SEC-04).
+        $lock = Store::lockName('pair');
+        if ((int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 5)', $lock)) !== 1) {
+            return new \WP_Error('wpsync_busy', 'Bitte gleich noch einmal versuchen.', ['status' => 429]);
+        }
+        try {
+            return self::redeem($request, time());
+        } finally {
+            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+        }
+    }
+
+    /**
+     * Läuft nur unter der Pairing-Sperre.
+     *
+     * @return \WP_REST_Response|\WP_Error
+     */
+    private static function redeem(\WP_REST_Request $request, int $now)
+    {
+        $invalid = new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
+        $stored  = Store::getState('pairing_code');
+        if ($stored === null) {
+            return $invalid; // kein offener Code: anonyme Requests lösen keinen Schreibzugriff aus (SEC-09)
+        }
+        $last = Store::getState('pair_last');
+        if ($last !== null && $now - (int) ($last['t'] ?? 0) < self::PAIR_INTERVAL) {
+            return new \WP_Error('wpsync_rate', 'Zu viele Versuche – bitte kurz warten.', ['status' => 429]);
+        }
+        Store::setState('pair_last', ['t' => $now]);
+
+        list($ok, $next) = Pairing::redeem($stored, self::text($request, 'code'), $now);
         if (!$ok) {
-            return new \WP_Error('wpsync_code', 'Pairing-Code ungültig oder abgelaufen.', ['status' => 403]);
+            Store::setState('pairing_code', $next);
+            return $invalid;
         }
 
-        $device = substr(sanitize_text_field(self::text($request, 'device')), 0, 100);
         $keyId  = Pairing::newKeyId();
         $secret = Pairing::newSecret();
-        Store::addPairing($keyId, $secret, $device !== '' ? $device : 'unbekannt');
+        $device = Pairing::device(sanitize_text_field(self::text($request, 'device')));
+        if (!Store::addPairing($keyId, $secret, $device)) {
+            // Der Code bleibt gültig: der Client hat kein Pairing bekommen (CR-01).
+            return new \WP_Error('wpsync_store', 'Pairing konnte nicht gespeichert werden.', ['status' => 500]);
+        }
+        Store::setState('pairing_code', null);
         Infosheet::start(); // Spec 4.4: Inventar nach dem Pairing
 
         return new \WP_REST_Response([

@@ -58,4 +58,11 @@ final class Pairing
         $stored['attempts']++;
         return [false, $stored['attempts'] >= self::MAX_ATTEMPTS ? null : $stored];
     }
+
+    /** Gerätename für die Spalte VARCHAR(100): nach Zeichen kürzen, nie mitten im Mehrbyte-Zeichen (CR-01). */
+    public static function device(string $name): string
+    {
+        $name = mb_substr($name, 0, 100, 'UTF-8');
+        return $name !== '' ? $name : 'unbekannt';
+    }
 }

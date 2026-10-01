@@ -56,4 +56,18 @@ final class PairingTest extends TestCase
         $this->assertFalse($ok);
         $this->assertNull($next);
     }
+
+    public function testDeviceIsCutAtCharactersNotBytes(): void
+    {
+        $device = Pairing::device(str_repeat('a', 99) . 'ä' . 'zzz');
+        $this->assertSame(str_repeat('a', 99) . 'ä', $device);
+        $this->assertTrue(mb_check_encoding($device, 'UTF-8'), 'a multibyte character must not be cut in half (CR-01)');
+        $this->assertSame(100, mb_strlen(Pairing::device(str_repeat('ä', 150)), 'UTF-8'));
+    }
+
+    public function testEmptyDeviceGetsPlaceholder(): void
+    {
+        $this->assertSame('unbekannt', Pairing::device(''));
+        $this->assertSame('Mac.fritz.box', Pairing::device('Mac.fritz.box'));
+    }
 }

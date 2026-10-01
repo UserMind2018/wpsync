@@ -100,15 +100,23 @@ final class Store
         return $code;
     }
 
-    public static function addPairing(string $keyId, string $secret, string $device): void
+    /** @return bool false, wenn die Zeile nicht geschrieben wurde */
+    public static function addPairing(string $keyId, string $secret, string $device): bool
     {
         global $wpdb;
-        $wpdb->insert(self::table('pairings'), [
+        return 1 === $wpdb->insert(self::table('pairings'), [
             'key_id'  => $keyId,
             'secret'  => $secret,
             'device'  => $device,
             'created' => time(),
         ]);
+    }
+
+    /** MySQL-Locks gelten serverweit – der Name muss Datenbank und Präfix enthalten. */
+    public static function lockName(string $purpose): string
+    {
+        global $wpdb;
+        return 'wpsync_' . $purpose . '_' . substr(md5(DB_NAME . '|' . $wpdb->base_prefix), 0, 12);
     }
 
     public static function secretFor(string $keyId): ?string
