@@ -230,3 +230,24 @@ func TestPrepareWithNoAnonymizeAsksForPlainData(t *testing.T) {
 		t.Errorf("plain pull must name the pii tables:\n%s", out.String())
 	}
 }
+
+// AC-38: Klartext nur nach ausdrücklicher Bestätigung – geprüft, bevor irgendetwas angefasst wird.
+func TestRunAsksBeforePullingPlainPII(t *testing.T) {
+	o := Options{
+		Site:        sites.Site{Name: "kunde", URL: "http://127.0.0.1:1", Profile: &profile.Profile{}},
+		SitesRoot:   t.TempDir(),
+		Out:         &bytes.Buffer{},
+		NoAnonymize: true,
+	}
+	if err := Run(o); !errors.Is(err, ErrPlainNeedsConfirmation) {
+		t.Fatalf("without terminal and without --yes: err = %v", err)
+	}
+	var asked string
+	o.Confirm = func(q string) bool { asked = q; return false }
+	if err := Run(o); !errors.Is(err, ErrAborted) {
+		t.Fatalf("declined: err = %v", err)
+	}
+	if !strings.Contains(strings.ToLower(asked), "klartext") {
+		t.Errorf("question = %q", asked)
+	}
+}

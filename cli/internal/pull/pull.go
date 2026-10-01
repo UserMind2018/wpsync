@@ -45,6 +45,9 @@ var ErrAborted = errors.New("abgebrochen")
 // ErrAgentCannotAnonymize: the agent is older than 0.3.0 and would deliver plain personal data.
 var ErrAgentCannotAnonymize = errors.New("der Agent auf der Site kann noch nicht anonymisieren")
 
+// ErrPlainNeedsConfirmation: --no-anonymize without a terminal needs --yes.
+var ErrPlainNeedsConfirmation = errors.New("--no-anonymize braucht eine Bestätigung")
+
 type plan struct {
 	scope agentapi.Scope
 	delta *agentapi.Delta
@@ -136,6 +139,14 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 
 // Run pulls the site into its DDEV project within the profile's scope.
 func Run(o Options) error {
+	if o.NoAnonymize && !o.Yes {
+		if o.Confirm == nil {
+			return ErrPlainNeedsConfirmation
+		}
+		if !o.Confirm("Personenbezogene Daten (Benutzer, Kommentare, Bestellungen) im KLARTEXT auf diesen Rechner ziehen?") {
+			return ErrAborted
+		}
+	}
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
 	docroot := filepath.Join(siteDir, "public")
