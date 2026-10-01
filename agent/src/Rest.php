@@ -431,16 +431,14 @@ final class Rest
     /** @return list<string> */
     private static function tables(): array
     {
-        global $wpdb;
-        $tables = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'));
-        return array_values(array_diff($tables, Store::ownTables()));
+        return Store::dataTables();
     }
 
     /** @return array{name: string, checksum: string|null, rows: int, bytes: int, primary_key: string|null} */
     private static function tableInfo(string $table, bool $withChecksum): array
     {
         global $wpdb;
-        $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $table), ARRAY_A);
+        $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($table)), ARRAY_A);
         $checksum = $withChecksum ? (array) $wpdb->get_row('CHECKSUM TABLE `' . $table . '`', ARRAY_A) : [];
         return [
             'name'        => $table,

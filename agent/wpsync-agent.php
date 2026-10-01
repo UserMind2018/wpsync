@@ -16,7 +16,7 @@ const WPSYNC_VERSION = '0.2.0';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
-    'Classifier', 'Probe', 'Inventory', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
+    'Classifier', 'Probe', 'Inventory', 'TableList', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }

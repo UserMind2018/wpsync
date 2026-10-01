@@ -21,6 +21,24 @@ final class Store
         return [self::table('pairings'), self::table('nonces'), self::table('state')];
     }
 
+    /** @var list<string>|null */
+    private static $dataTables = null;
+
+    /**
+     * Tabellen, die exportiert werden dürfen (siehe TableList); pro Request einmal ermittelt.
+     *
+     * @return list<string>
+     */
+    public static function dataTables(): array
+    {
+        global $wpdb;
+        if (self::$dataTables === null) {
+            $rows             = (array) $wpdb->get_results("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'", ARRAY_N);
+            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix);
+        }
+        return self::$dataTables;
+    }
+
     /**
      * Legt die Tabellen an – nur bei Aktivierung und nach einem Versionswechsel (ZIP-Update ohne
      * Aktivierung), nicht bei jedem Request (SEC-09).
