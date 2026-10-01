@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 final class Rest
 {
     public const NS = 'wpsync/v1';

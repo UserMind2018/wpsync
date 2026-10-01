@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /** Probe über $wpdb, get_plugins() und wp_get_themes(). */
 final class WpProbe implements Probe
 {

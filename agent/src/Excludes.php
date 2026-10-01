@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Feste, serverseitige Ausschlüsse. path() ist die einzige Entscheidung und gilt für die
  * Dateiliste (/delta) und den Abruf (/files) gleichermassen (SEC-02). Alle Vergleiche sind

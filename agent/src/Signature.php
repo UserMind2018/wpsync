@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * HMAC-SHA256 über "METHOD\nROUTE\nTIMESTAMP\nNONCE\nsha256(BODY)".
  * Alle Parameter stehen im Body und sind damit mitsigniert.

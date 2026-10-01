@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Eigene Tabellen – nie exportiert, nie checksummiert (Spike B6, AC-27).
  */

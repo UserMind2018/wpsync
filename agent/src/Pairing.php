@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Pairing-Code: 8 Zeichen, 10 min gültig, einmalig, nach 5 Fehlversuchen verbrannt (AC-3).
  */

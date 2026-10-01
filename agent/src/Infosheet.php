@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Führt das Inventar in Häppchen aus (Spec 4.4): per WP-Cron mit 10 s Pause dazwischen oder
  * synchron über /infosheet/refresh, wenn WP-Cron nicht läuft (AC-9). Ein MySQL-Lock verhindert

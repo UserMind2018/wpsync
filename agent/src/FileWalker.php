@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Dateien unter wp-content, relativ zu ABSPATH, in fester Reihenfolge und seitenweise.
  * Symlinks werden übersprungen (zeigen typischerweise aus der Site heraus, z. B. local-mailguard).

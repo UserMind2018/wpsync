@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Rahmen für gestreamte Antworten:
  *   "F <path>\t<size>\t<mtime>\n" <bytes> "\n"   Datei

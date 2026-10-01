@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Größen unter wp-content nach Gruppen für das Infosheet: plugins/<slug>, themes/<slug>,
  * uploads/<Jahr>, uploads/other, top/<Ordner>, top/. – seitenweise mit Index-Cursor.

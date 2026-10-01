@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * „Password Protected“ sperrt sonst auch die REST-API (Spike B11). Der Bypass gilt nur für
  * exakt bekannte wpsync-Routen und nie anhand des Query-Strings (SEC-01). Ohne formal gültige

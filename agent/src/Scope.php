@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Umfang eines Pulls laut Profil des CLI (Spec 5.2): Tabellenmodi, abgewählte Post-Typen,
  * Plugins, Themes und Upload-Jahre. Ungültige Angaben lehnt der Agent ab, statt sie still zu

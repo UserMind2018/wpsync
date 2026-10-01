@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen und widerrufen.
  * Das Secret wird nie angezeigt (Spike B19, AC-5).

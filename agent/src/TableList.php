@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Welche Tabellen den Server verlassen dürfen: nur echte Tabellen mit dem eigenen Präfix.
  * Views würden beim Import durch die View in die Basistabelle schreiben (CR-02). Eine zweite

@@ -1,6 +1,8 @@
 <?php
 namespace WpSync;
 
+defined('ABSPATH') || exit;
+
 /**
  * Einstufung von Tabellen und Post-Typen für Infosheet und Presets (Spec 4.4, AC-8).
  * Namen ohne Tabellen-Prefix und klein geschrieben; exakte Treffer vor Prefix-Treffern,
