@@ -21,6 +21,19 @@ final class Anonymizer
     /** Kein Hash: höchstens 32 Zeichen vergleicht WordPress mit md5(), das nie mit „!“ beginnt. */
     public const NO_LOGIN = '!wpsync-anonymized';
 
+    /** Adressfelder von WooCommerce – als Spalten (HPOS) und, mit Präfix, als Meta-Schlüssel. Land und Bundesland bleiben. */
+    private const ADDRESS = [
+        'first_name' => 'name:Vorname',
+        'last_name'  => 'name:Nachname',
+        'company'    => 'fixed:',
+        'address_1'  => 'fixed:Musterstraße 1',
+        'address_2'  => 'fixed:',
+        'city'       => 'fixed:Musterstadt',
+        'postcode'   => 'fixed:00000',
+        'email'      => 'email',
+        'phone'      => 'fixed:',
+    ];
+
     /** @var string */
     private $key;
     /** @var string */
@@ -134,6 +147,20 @@ final class Anonymizer
     }
 
     /**
+     * Explizite Schlüssel statt Wildcard: WooCommerce Subscriptions speichert _billing_period.
+     *
+     * @return array<string, string>
+     */
+    private static function address(string $prefix): array
+    {
+        $out = [];
+        foreach (self::ADDRESS as $field => $strategy) {
+            $out[$prefix . $field] = $strategy;
+        }
+        return $out;
+    }
+
+    /**
      * Pro Tabelle eine Liste von Regeln; jede Regel hat optional
      *  - when: [Spalte, erlaubte Werte] – gilt nur für solche Zeilen
      *  - set:  Spalte → Strategie
@@ -156,7 +183,16 @@ final class Anonymizer
             'session_tokens'            => 'fixed:',
             '_application_passwords'    => 'fixed:',
             'community-events-location' => 'fixed:',
-        ];
+        ] + self::address('billing_') + self::address('shipping_');
+
+        $orderMeta = [
+            '_customer_ip_address'    => 'ip',
+            '_customer_user_agent'    => 'fixed:',
+            '_order_key'              => 'tag:wc_order_',
+            '_transaction_id'         => 'fixed:',
+            '_billing_address_index'  => 'fixed:',
+            '_shipping_address_index' => 'fixed:',
+        ] + self::address('_billing_') + self::address('_shipping_');
 
         $rules = [
             // WordPress Core
@@ -189,6 +225,50 @@ final class Anonymizer
                 'admin_email'     => 'email',
                 'new_admin_email' => 'email',
             ]]]],
+            // WooCommerce: klassische Bestellungen (Posts) – post_password ist der Order-Key, post_excerpt die Kundennotiz
+            'posts' => [[
+                'when' => ['post_type', ['shop_order', 'shop_order_refund', 'shop_subscription']],
+                'set'  => ['post_password' => 'tag:wc_order_', 'post_excerpt' => 'fixed:'],
+            ]],
+            'postmeta' => [['meta' => ['meta_key', 'meta_value', $orderMeta]]],
+            // WooCommerce: HPOS
+            'wc_orders' => [['set' => [
+                'billing_email'  => 'email',
+                'ip_address'     => 'ip',
+                'user_agent'     => 'fixed:',
+                'customer_note'  => 'fixed:',
+                'transaction_id' => 'fixed:',
+            ]]],
+            'wc_order_addresses' => [['set' => self::ADDRESS]],
+            'wc_orders_meta'     => [['meta' => ['meta_key', 'meta_value', [
+                '_billing_address_index'           => 'fixed:',
+                '_shipping_address_index'          => 'fixed:',
+                '_wc_order_attribution_user_agent' => 'fixed:',
+            ]]]],
+            'wc_order_operational_data' => [['set' => ['order_key' => 'tag:wc_order_']]],
+            'wc_customer_lookup'        => [['set' => [
+                'username'   => 'tag:user_',
+                'first_name' => 'name:Vorname',
+                'last_name'  => 'name:Nachname',
+                'email'      => 'email',
+                'city'       => 'fixed:Musterstadt',
+                'postcode'   => 'fixed:00000',
+            ]]],
+            'wc_download_log'                              => [['set' => ['user_ip_address' => 'ip']]],
+            'woocommerce_downloadable_product_permissions' => [['set' => ['user_email' => 'email', 'order_key' => 'tag:wc_order_']]],
+            // WooCommerce: Sitzungen und Geheimnisse
+            'woocommerce_sessions'          => [['set' => ['session_value' => 'fixed:a:0:{}']]],
+            'woocommerce_api_keys'          => [['set' => ['consumer_key' => 'tag:ck_', 'consumer_secret' => 'tag:cs_', 'truncated_key' => 'fixed:0000000']]],
+            'woocommerce_payment_tokens'    => [['set' => ['token' => 'tag:tok_']]],
+            'woocommerce_payment_tokenmeta' => [['set' => ['meta_value' => 'fixed:']]],
+            'wc_webhooks'                   => [['set' => ['secret' => 'fixed:']]],
+            // WooCommerce: geprüft, keine Personendaten (D4)
+            'wc_order_stats'             => [],
+            'wc_order_product_lookup'    => [],
+            'wc_order_tax_lookup'        => [],
+            'wc_order_coupon_lookup'     => [],
+            'woocommerce_order_items'    => [],
+            'woocommerce_order_itemmeta' => [],
         ];
         return $rules;
     }

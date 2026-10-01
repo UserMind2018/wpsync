@@ -135,4 +135,97 @@ final class AnonymizerTest extends TestCase
         $this->assertNotSame($id, Anonymizer::id(self::OTHER));
         $this->assertStringNotContainsString(substr(self::KEY, 0, 8), $id, 'the key itself never leaves the server');
     }
+
+    /** AC-40: Adressen weg, Land und Bundesland bleiben (Steuer- und Versandtests). */
+    public function testWooAddressesKeepCountryAndState(): void
+    {
+        $row = $this->one('wp_wc_order_addresses', [
+            'id' => '1', 'order_id' => '10', 'address_type' => 'billing', 'first_name' => 'Erika', 'last_name' => 'Mustermann',
+            'company' => 'Muster GmbH', 'address_1' => 'Heidestraße 17', 'address_2' => 'Hinterhaus', 'city' => 'Köln',
+            'state' => 'NW', 'postcode' => '51147', 'country' => 'DE', 'email' => 'erika@example.com', 'phone' => '+49 221 123',
+        ]);
+        $this->assertSame(['10', 'billing', 'NW', 'DE'], [$row['order_id'], $row['address_type'], $row['state'], $row['country']]);
+        $this->assertMatchesRegularExpression('/^Vorname [0-9a-f]{6}\z/', $row['first_name']);
+        $this->assertMatchesRegularExpression('/^Nachname [0-9a-f]{6}\z/', $row['last_name']);
+        $this->assertSame(['', 'Musterstraße 1', '', 'Musterstadt', '00000', ''], [
+            $row['company'], $row['address_1'], $row['address_2'], $row['city'], $row['postcode'], $row['phone'],
+        ]);
+    }
+
+    /** AC-33: eine Person, ein Pseudonym – in Core, HPOS, klassischer Postmeta, Usermeta und Lookup. */
+    public function testWooEmailMatchesTheUserEmailEverywhere(): void
+    {
+        $expected = $this->one('wp_users', ['user_email' => 'erika@example.com'])['user_email'];
+        $this->assertSame($expected, $this->one('wp_wc_orders', ['billing_email' => 'Erika@example.com'])['billing_email']);
+        $this->assertSame($expected, $this->one('wp_wc_order_addresses', ['email' => 'erika@example.com'])['email']);
+        $this->assertSame($expected, $this->one('wp_wc_customer_lookup', ['email' => 'erika@example.com'])['email']);
+        $this->assertSame($expected, $this->one('wp_postmeta', ['meta_key' => '_billing_email', 'meta_value' => 'erika@example.com'])['meta_value']);
+        $this->assertSame($expected, $this->one('wp_usermeta', ['meta_key' => 'billing_email', 'meta_value' => 'erika@example.com'])['meta_value']);
+        $this->assertSame($expected, $this->one('wp_woocommerce_downloadable_product_permissions', ['user_email' => 'erika@example.com'])['user_email']);
+    }
+
+    public function testWooOrderColumns(): void
+    {
+        $order = $this->one('wp_wc_orders', [
+            'id' => '10', 'status' => 'wc-completed', 'total_amount' => '19.99', 'customer_id' => '7', 'billing_email' => 'erika@example.com',
+            'ip_address' => '203.0.113.7', 'user_agent' => 'Mozilla/5.0', 'customer_note' => 'Bitte bei Nachbar Meier abgeben', 'transaction_id' => 'pi_3abc',
+        ]);
+        $this->assertSame(['10', 'wc-completed', '19.99', '7'], [$order['id'], $order['status'], $order['total_amount'], $order['customer_id']]);
+        $this->assertSame(['0.0.0.0', '', '', ''], [$order['ip_address'], $order['user_agent'], $order['customer_note'], $order['transaction_id']]);
+    }
+
+    /** Der Order-Key steht an drei Stellen und muss überall gleich bleiben. */
+    public function testOrderKeyStaysConsistent(): void
+    {
+        $post = $this->one('wp_posts', ['ID' => '10', 'post_type' => 'shop_order', 'post_password' => 'wc_order_AbC123', 'post_excerpt' => 'Bitte klingeln']);
+        $meta = $this->one('wp_postmeta', ['meta_key' => '_order_key', 'meta_value' => 'wc_order_AbC123']);
+        $hpos = $this->one('wp_wc_order_operational_data', ['order_id' => '10', 'order_key' => 'wc_order_AbC123']);
+
+        $this->assertMatchesRegularExpression('/^wc_order_[0-9a-f]{16}\z/', $post['post_password']);
+        $this->assertSame($post['post_password'], $meta['meta_value']);
+        $this->assertSame($post['post_password'], $hpos['order_key']);
+        $this->assertSame('', $post['post_excerpt']);
+    }
+
+    public function testPostsOfOtherTypesStayUntouched(): void
+    {
+        $page = ['ID' => '2', 'post_type' => 'page', 'post_password' => 'geheim', 'post_excerpt' => 'Auszug', 'post_title' => 'Über uns'];
+        $this->assertSame($page, $this->one('wp_posts', $page));
+    }
+
+    /** D5: WooCommerce Subscriptions speichert _billing_period – nur explizite Adress-Schlüssel ersetzen. */
+    public function testPostmetaReplacesOnlyExplicitAddressKeys(): void
+    {
+        $first = $this->one('wp_postmeta', ['meta_id' => '1', 'post_id' => '10', 'meta_key' => '_billing_first_name', 'meta_value' => 'Erika']);
+        $this->assertMatchesRegularExpression('/^Vorname [0-9a-f]{6}\z/', $first['meta_value']);
+        $this->assertSame('0.0.0.0', $this->one('wp_postmeta', ['meta_key' => '_customer_ip_address', 'meta_value' => '203.0.113.7'])['meta_value']);
+        $this->assertSame('', $this->one('wp_postmeta', ['meta_key' => '_billing_address_index', 'meta_value' => 'Erika Mustermann Köln'])['meta_value']);
+
+        foreach ([['_billing_period', 'month'], ['_billing_country', 'DE'], ['_shipping_state', 'NW'], ['_edit_lock', '1700000000:1'], ['_elementor_data', '[]']] as $kv) {
+            $row = ['meta_key' => $kv[0], 'meta_value' => $kv[1]];
+            $this->assertSame($row, $this->one('wp_postmeta', $row), $kv[0] . ' must stay');
+        }
+    }
+
+    public function testWooSecretsAndSessions(): void
+    {
+        $this->assertSame('a:0:{}', $this->one('wp_woocommerce_sessions', ['session_key' => '7', 'session_value' => 'a:1:{s:8:"customer";s:3:"...";}'])['session_value']);
+        $key = $this->one('wp_woocommerce_api_keys', ['key_id' => '1', 'description' => 'ERP', 'consumer_key' => 'abc', 'consumer_secret' => 'cs_live', 'truncated_key' => 'a1b2c3d']);
+        $this->assertSame('ERP', $key['description']);
+        $this->assertMatchesRegularExpression('/^ck_[0-9a-f]{16}\z/', $key['consumer_key']);
+        $this->assertMatchesRegularExpression('/^cs_[0-9a-f]{16}\z/', $key['consumer_secret']);
+        $this->assertSame('', $this->one('wp_wc_webhooks', ['webhook_id' => '1', 'secret' => 'whsec'])['secret']);
+        $this->assertSame('', $this->one('wp_woocommerce_payment_tokenmeta', ['meta_key' => 'last4', 'meta_value' => '4242'])['meta_value']);
+        $this->assertSame('0.0.0.0', $this->one('wp_wc_download_log', ['user_ip_address' => '203.0.113.7'])['user_ip_address']);
+    }
+
+    /** D4: geprüfte Tabellen ohne Personendaten gelten als abgedeckt und bleiben unverändert. */
+    public function testWooTablesWithoutPersonalColumnsAreCovered(): void
+    {
+        foreach (['wc_order_stats', 'wc_order_product_lookup', 'wc_order_tax_lookup', 'wc_order_coupon_lookup', 'woocommerce_order_items', 'woocommerce_order_itemmeta'] as $table) {
+            $this->assertTrue(Anonymizer::covers('wp_' . $table, 'wp_'), $table);
+        }
+        $row = ['order_id' => '10', 'net_total' => '16.80', 'customer_id' => '3'];
+        $this->assertSame($row, $this->one('wp_wc_order_stats', $row));
+    }
 }
