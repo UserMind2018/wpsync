@@ -3,6 +3,14 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unveröffentlicht] · Agent 0.2.2
+
+### Behoben
+- `wpsync scan` wurde auf Sites mit vielen Dateien unter `wp-content` nie fertig: Der Größenscan
+  des Infosheets lief pro Häppchen die ganze bisherige Strecke erneut ab und schaffte ab etwa
+  21.000 Dateien nur noch eine Datei pro Häppchen. Er setzt jetzt am Pfad der zuletzt gezählten
+  Datei fort. **Agent aktualisieren**; ein laufender Scan eines älteren Agents zählt die Dateien neu
+
 ## [0.1.6] – 2026-10-02 · Agent 0.2.1
 
 Sicherheits-Release nach dem Audit des Agents 0.2.0. **Agent auf allen gekoppelten Sites aktualisieren.**
