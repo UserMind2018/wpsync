@@ -232,7 +232,8 @@ func Run(o Options) error {
 		if err != nil {
 			return err
 		}
-		if err := PostSetup(runner, delta.Env, localURL, PostSetupOptions{ExcludedPlugins: p.scope.ExcludePlugins}, o.Out); err != nil {
+		setup := PostSetupOptions{ExcludedPlugins: p.scope.ExcludePlugins, LocalAdmin: !o.NoAnonymize}
+		if err := PostSetup(runner, delta.Env, localURL, setup, o.Out); err != nil {
 			return err
 		}
 		timer.done("Post-Setup")
@@ -267,6 +268,9 @@ func Run(o Options) error {
 	}
 	fmt.Fprintf(o.Out, "\n✓ Fertig in %s – %d Requests, %.1f MB übertragen\n  %s\n",
 		time.Since(started).Round(time.Millisecond), client.Stats.Requests, float64(client.Stats.BytesIn)/(1<<20), localURL)
+	if !o.NoAnonymize {
+		fmt.Fprintf(o.Out, "  Login: %s / %s – %s/wp-admin/ (übernommene Konten sind pseudonymisiert)\n", LocalAdminUser, LocalAdminPassword, localURL)
+	}
 	timer.print()
 	return nil
 }
