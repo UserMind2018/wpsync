@@ -106,7 +106,8 @@ final class Inventory
         $tables = [];
         foreach ($d['tables'] as $t) {
             $tables[] = ['name' => (string) $t['name'], 'rows' => (int) $t['rows'], 'bytes' => (int) $t['bytes']]
-                + Classifier::table((string) $t['name'], (string) $d['prefix']);
+                + Classifier::table((string) $t['name'], (string) $d['prefix'])
+                + ['anonymized' => Anonymizer::covers((string) $t['name'], (string) $d['prefix'])];
         }
 
         $postTypes = [];

@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       wpsync Agent
  * Description:       Signierte, lesende Schnittstelle für wpsync pull (Live → Lokal).
- * Version:           0.2.2
+ * Version:           0.3.0
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -12,11 +12,11 @@
 
 defined('ABSPATH') || exit;
 
-const WPSYNC_VERSION = '0.2.2';
+const WPSYNC_VERSION = '0.3.0';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
-    'Classifier', 'Probe', 'Inventory', 'TableList', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
+    'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'Store', 'WpProbe', 'Infosheet', 'Protection', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }

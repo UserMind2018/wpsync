@@ -112,6 +112,21 @@ final class Store
         $wpdb->replace(self::table('state'), ['name' => $name, 'value' => wp_json_encode($value)]);
     }
 
+    /**
+     * Schlüssel der Pseudonyme (Spec 11.2): einmal erzeugt, bleibt er bis zur Deaktivierung des
+     * Plugins gleich – sonst wechselten die Pseudonyme zwischen zwei Pulls. Liegt in
+     * wpsync_state und verlässt den Server damit nie (AC-27).
+     */
+    public static function anonKey(): string
+    {
+        $state = self::getState('anon_key');
+        if ($state === null || !is_string($state['key'] ?? null) || strlen($state['key']) !== 64) {
+            self::setState('anon_key', ['key' => bin2hex(random_bytes(32))]);
+            $state = self::getState('anon_key'); // gewinnt ein paralleler Request, gilt dessen Schlüssel
+        }
+        return (string) ($state['key'] ?? '');
+    }
+
     public static function issuePairingCode(): string
     {
         self::install();
