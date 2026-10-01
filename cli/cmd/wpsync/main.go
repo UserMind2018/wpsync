@@ -31,7 +31,7 @@ const usage = `wpsync – WordPress Live → Lokal
 
   wpsync setup                         einmalig pro Mac (fragt einmal nach dem Passwort)
   wpsync doctor                        Umgebung prüfen
-  wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync)
+  wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync; nur https, lokal: --insecure)
   wpsync unpair <site>                 Kopplung lokal entfernen
   wpsync list                          lokale Umgebungen mit Status, lokaler und Live-URL
   wpsync stop <site>… | --all          lokale Umgebung(en) stoppen (Daten bleiben erhalten)
@@ -127,17 +127,21 @@ func cmdPair(args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	name := fs.String("name", "", "lokaler Name der Site (Standard: aus der URL)")
 	device := fs.String("device", "", "Gerätename im WP-Admin (Standard: Rechnername)")
+	insecure := fs.Bool("insecure", false, "http:// zulassen – nur für lokale Testumgebungen")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 2 {
-		return errors.New("Aufruf: wpsync pair <url> <code> [--name n]")
+		return errors.New("Aufruf: wpsync pair <url> <code> [--name n] [--insecure]")
 	}
 	hc := &http.Client{Timeout: 30 * time.Second}
 	base, err := agentapi.Discover(hc, positional[0])
 	if err != nil {
 		return fmt.Errorf("wpsync-Agent unter %s nicht gefunden – ist das Plugin aktiv? (%v)", positional[0], err)
+	}
+	if !*insecure && !agentapi.IsHTTPS(base) {
+		return fmt.Errorf("%s ist nicht verschlüsselt – Secret und Daten liefen im Klartext über die Leitung. Nur für lokale Testumgebungen: --insecure", base)
 	}
 	if *name == "" {
 		if *name, err = sites.NameFromURL(base); err != nil {
@@ -426,6 +430,8 @@ func explain(err error, site *sites.Site) error {
 		return fmt.Errorf("Site leitet jetzt auf %s um – neu koppeln mit wpsync pair", apiErr.Message)
 	case "rest_no_route":
 		return fmt.Errorf("der wpsync-Agent auf %s ist zu alt – Version 0.2.0 installieren", site.URL)
+	case "wpsync_https":
+		return fmt.Errorf("der Agent auf %s sieht die Verbindung als unverschlüsselt – hinter einem Proxy muss WordPress HTTPS erkennen (is_ssl), lokal: define('WPSYNC_ALLOW_HTTP', true); in wp-config.php", site.URL)
 	}
 	return err
 }

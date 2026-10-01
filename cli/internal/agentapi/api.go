@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -153,4 +154,11 @@ func Pair(hc *http.Client, baseURL, code, device string) (*PairResult, error) {
 		return nil, fmt.Errorf("pair: invalid response")
 	}
 	return &res, nil
+}
+
+// IsHTTPS reports whether baseURL is encrypted. /pair returns the secret in the response body,
+// so pairing over plain HTTP hands it to anyone on the path (SEC-03).
+func IsHTTPS(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
