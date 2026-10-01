@@ -21,7 +21,7 @@ foreach ([
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }
 
-register_activation_hook(__FILE__, [\WpSync\Store::class, 'install']);
+register_activation_hook(__FILE__, [\WpSync\Store::class, 'activate']);
 register_deactivation_hook(__FILE__, static function (): void {
     \WpSync\Infosheet::unschedule();
     \WpSync\Store::uninstall();

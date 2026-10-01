@@ -6,6 +6,9 @@ namespace WpSync;
  */
 final class Store
 {
+    /** Autoload-Option, damit die Prüfung keine Query kostet; „wpsync_%“ verlässt den Server nie (AC-27). */
+    public const SCHEMA_OPTION = 'wpsync_schema';
+
     public static function table(string $name): string
     {
         global $wpdb;
@@ -18,10 +21,16 @@ final class Store
         return [self::table('pairings'), self::table('nonces'), self::table('state')];
     }
 
-    /** Idempotent; wird bei Aktivierung und vor jedem API-Zugriff aufgerufen (ZIP-Update ohne Aktivierung). */
+    /**
+     * Legt die Tabellen an – nur bei Aktivierung und nach einem Versionswechsel (ZIP-Update ohne
+     * Aktivierung), nicht bei jedem Request (SEC-09).
+     */
     public static function install(): void
     {
         global $wpdb;
+        if (get_option(self::SCHEMA_OPTION) === WPSYNC_VERSION) {
+            return;
+        }
         $collate = $wpdb->get_charset_collate();
         $wpdb->query('CREATE TABLE IF NOT EXISTS `' . self::table('pairings') . '` (
             key_id CHAR(16) NOT NULL PRIMARY KEY,
@@ -39,6 +48,14 @@ final class Store
             name VARCHAR(64) NOT NULL PRIMARY KEY,
             value LONGTEXT NOT NULL
         ) ' . $collate);
+        update_option(self::SCHEMA_OPTION, WPSYNC_VERSION, true);
+    }
+
+    /** Aktivierung erzwingt das Anlegen, auch wenn die Marke von einer früheren Installation stammt. */
+    public static function activate(): void
+    {
+        delete_option(self::SCHEMA_OPTION);
+        self::install();
     }
 
     /** Deaktivieren entfernt alle eigenen Daten und damit alle Pairings. */
@@ -48,6 +65,7 @@ final class Store
         foreach (self::ownTables() as $table) {
             $wpdb->query('DROP TABLE IF EXISTS `' . $table . '`');
         }
+        delete_option(self::SCHEMA_OPTION);
         delete_option('wpsync_secret'); // Altlast aus dem Spike
     }
 

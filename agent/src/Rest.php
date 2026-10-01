@@ -8,6 +8,12 @@ final class Rest
     /** @var string */
     private static $pluginDir = '';
 
+    /** @var \WP_REST_Request|null */
+    private static $authRequest = null;
+
+    /** @var true|\WP_Error|null */
+    private static $authResult = null;
+
     public static function register(string $pluginDir): void
     {
         self::$pluginDir = $pluginDir;
@@ -39,9 +45,41 @@ final class Rest
         }
     }
 
-    /** @return true|\WP_Error */
+    /**
+     * WordPress ruft die Permission-Callback pro Request zweimal auf (Allow-Header). Der zweite
+     * Lauf scheiterte bisher an „nonce reused“ und verdoppelte alle Queries (CR-10).
+     *
+     * @return true|\WP_Error
+     */
     public static function auth(\WP_REST_Request $request)
     {
+        if (self::$authRequest !== $request) {
+            self::$authRequest = $request;
+            self::$authResult  = self::authenticate($request);
+        }
+        return self::$authResult;
+    }
+
+    /** Ohne TLS liefen Secret (Pairing) und Dumps im Klartext (SEC-03). */
+    private static function requireTls(): ?\WP_Error
+    {
+        if (is_ssl() || (defined('WPSYNC_ALLOW_HTTP') && WPSYNC_ALLOW_HTTP)) {
+            return null;
+        }
+        return new \WP_Error(
+            'wpsync_https',
+            "wpsync erfordert HTTPS. Nur für lokale Umgebungen: define('WPSYNC_ALLOW_HTTP', true); in wp-config.php.",
+            ['status' => 400]
+        );
+    }
+
+    /** @return true|\WP_Error */
+    private static function authenticate(\WP_REST_Request $request)
+    {
+        $tls = self::requireTls();
+        if ($tls !== null) {
+            return $tls;
+        }
         Store::install();
         $keyId  = (string) $request->get_header('x-wpsync-key');
         $secret = preg_match('/^[a-f0-9]{16}$/', $keyId) ? Store::secretFor($keyId) : null;
@@ -73,6 +111,10 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function pair(\WP_REST_Request $request)
     {
+        $tls = self::requireTls();
+        if ($tls !== null) {
+            return $tls;
+        }
         if (is_multisite()) {
             return new \WP_Error('wpsync_multisite', 'Multisite wird nicht unterstützt.', ['status' => 400]); // AC-31
         }
