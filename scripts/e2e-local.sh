@@ -53,6 +53,13 @@ ddev wp eval '$c = new E2E_Object_Config(); $c->url = home_url("/e2e"); update_o
 mkdir -p public/wp-content/uploads/2019/01
 printf 'wpsync-proxy-ok' > public/wp-content/uploads/2019/01/wpsync-proxy.txt
 
+echo "== 1c-Fixtures in der Quelle"
+if ! ddev wp user get erika --field=ID >/dev/null 2>&1; then
+  ddev wp user create erika erika.mustermann@kunde-echt.example --role=subscriber \
+    --first_name=Erika --last_name=Mustermann --display_name="Erika Mustermann" --user_pass=geheim-e2e >/dev/null
+fi
+ERIKA_ID="$(ddev wp user get erika --field=ID)"
+
 cp "$ROOT/agent/dist/wpsync-agent.zip" public/wpsync-agent.zip
 ddev wp plugin install /var/www/html/public/wpsync-agent.zip --force --activate
 rm public/wpsync-agent.zip
@@ -116,6 +123,22 @@ echo "== AC-21: plugin-serialisiertes Objekt enthält die lokale URL"
 url="$(ddev wp eval 'echo get_option("e2e_object_config")->url;')"
 [ "$url" = "$TARGET_URL/e2e" ] || fail "AC-21 object url is '$url'"
 
+echo "== AC-32: keine echten Personendaten lokal und im Dump"
+real="$(ddev mysql -N -e "SELECT COUNT(*) FROM e2e_users WHERE user_email NOT LIKE '%@example.invalid'")"
+[ "$real" = "0" ] || fail "AC-32 $real users with a real e-mail"
+hashes="$(ddev mysql -N -e "SELECT COUNT(*) FROM e2e_users WHERE user_login <> 'wpsync' AND user_pass <> '!wpsync-anonymized'")"
+[ "$hashes" = "0" ] || fail "AC-32 $hashes password hashes pulled"
+if grep -rqi "mustermann\|kunde-echt\|geheim-e2e" .wpsync/db; then fail "AC-32 plain personal data left the server"; fi
+ddev wp option get admin_email | grep -Eq '^user-[0-9a-f]{16}@example\.invalid$' || fail "AC-32 admin_email not pseudonymized"
+ERIKA_PSEUDO="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID")"
+echo "$ERIKA_PSEUDO" | grep -Eq '^user-[0-9a-f]{16}@example\.invalid$' || fail "AC-32 pseudonym is '$ERIKA_PSEUDO'"
+grep -q "Login: wpsync / wpsync" "$E2E/pull1.log" || fail "AC-34 login hint missing"
+
+echo "== AC-34: lokaler Admin kann sich anmelden, übernommene Konten nicht"
+ddev wp user check-password wpsync wpsync || fail "AC-34 local admin cannot log in"
+[ "$(ddev wp user get wpsync --field=roles)" = "administrator" ] || fail "AC-34 local admin is no administrator"
+[ "$(ddev wp user list --field=user_login | grep -c '^admin$' || true)" = "0" ] || fail "AC-34 original login still present"
+
 echo "== AC-16: fehlendes Upload-Jahr kommt über den Proxy"
 [ ! -f public/wp-content/uploads/2019/01/wpsync-proxy.txt ] || fail "AC-16 2019 was pulled despite --uploads-since"
 # *.ddev.site zeigt im Container auf 127.0.0.1 – für den Test die Quelle über den DDEV-Router erreichbar machen
@@ -143,5 +166,19 @@ echo "== AC-29: status zeigt Änderungen ohne Transfer"
 grep -q "e2e_posts" "$E2E/status.log" || fail "AC-29 changed table missing"
 grep -q "wp-content/themes/status-test.txt" "$E2E/status.log" || fail "AC-29 changed file missing"
 grep -q "keine Inhalte übertragen" "$E2E/status.log" || fail "AC-29 status transferred content"
+
+echo "== AC-38: Klartext nur mit --no-anonymize und Bestätigung"
+if "$WPSYNC" pull "$TARGET" --no-anonymize </dev/null >/dev/null 2>&1; then fail "AC-38 plain pull without confirmation"; fi
+"$WPSYNC" pull "$TARGET" --no-anonymize --yes | tee "$E2E/pull3.log"
+grep -q "im Klartext (--no-anonymize)" "$E2E/pull3.log" || fail "AC-38 no plain-text warning"
+plain="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID")"
+[ "$plain" = "erika.mustermann@kunde-echt.example" ] || fail "AC-38 plain pull delivered '$plain'"
+
+echo "== AC-33/AC-38: der nächste Pull pseudonymisiert wieder – mit demselben Pseudonym"
+"$WPSYNC" pull "$TARGET" --yes | tee "$E2E/pull4.log"
+again="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID")"
+[ "$again" = "$ERIKA_PSEUDO" ] || fail "AC-33 pseudonym changed from '$ERIKA_PSEUDO' to '$again'"
+if grep -rqi "kunde-echt" .wpsync/db; then fail "AC-38 plain dump still on disk after the anonymized pull"; fi
+ddev wp user check-password wpsync wpsync || fail "AC-34 local admin lost after re-anonymizing"
 
 echo "E2E OK"
