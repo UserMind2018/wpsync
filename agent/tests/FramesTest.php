@@ -15,4 +15,10 @@ final class FramesTest extends TestCase
         $this->assertSame("T wp_posts\t3\t120\n", Frames::table('wp_posts', 3, 120));
         $this->assertSame("E\n", Frames::end());
     }
+
+    public function testMissingNeverBreaksTheFrame(): void
+    {
+        $this->assertSame("M wp-content/a?b?c\n", Frames::missing("wp-content/a\nb\0c"));
+        $this->assertSame("M wp-content/a?b\n", Frames::missing("wp-content/a\tb"));
+    }
 }

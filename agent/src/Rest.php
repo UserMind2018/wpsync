@@ -265,11 +265,21 @@ final class Rest
         exit;
     }
 
-    /** Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). */
-    public static function files(\WP_REST_Request $request): void
+    /**
+     * Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). Es gelten dieselben
+     * festen Ausschlüsse wie in der Dateiliste, geprüft am aufgelösten Pfad (SEC-02).
+     *
+     * @return \WP_Error|void
+     */
+    public static function files(\WP_REST_Request $request)
     {
+        $rootReal = realpath(WP_CONTENT_DIR);
+        if ($rootReal === false) {
+            // Ohne aufgelösten Root wäre der Präfixvergleich unten wirkungslos (SEC-11).
+            return new \WP_Error('wpsync_layout', 'wp-content ist nicht auflösbar.', ['status' => 500]);
+        }
         $base = wp_normalize_path(ABSPATH);
-        $root = wp_normalize_path((string) realpath(WP_CONTENT_DIR)) . '/';
+        $root = wp_normalize_path($rootReal) . '/';
         $self = wp_normalize_path(self::$pluginDir) . '/';
 
         if (function_exists('set_time_limit')) {
@@ -278,11 +288,17 @@ final class Rest
         nocache_headers();
         header('Content-Type: application/octet-stream');
         while (ob_get_level() > 0) {
-            ob_end_flush();
+            ob_end_clean(); // fremde Pufferinhalte gehören nicht in den Stream (CR-07)
         }
 
         foreach ((array) self::param($request, 'paths') as $path) {
-            $path = (string) $path;
+            if (!is_string($path)) {
+                continue;
+            }
+            if (preg_match('/[\x00-\x1f\x7f]/', $path) === 1) {
+                echo Frames::missing($path); // phpcs:ignore WordPress.Security.EscapeOutput -- realpath() würfe bei \0 (CR-07)
+                continue;
+            }
             $full = wp_normalize_path((string) realpath($base . $path));
             $ok   = strpos($path, 'wp-content/') === 0
                 && strpos($full, $root) === 0
@@ -290,19 +306,45 @@ final class Rest
                 && !is_link($base . $path)
                 && is_file($full)
                 && is_readable($full)
-                && Excludes::file(basename($full), (int) filesize($full)) === null;
-            if (!$ok) {
+                && Excludes::path(substr($full, strlen($root)), (int) filesize($full)) === null;
+            $in   = $ok ? fopen($full, 'rb') : false;
+            if ($in === false) {
                 echo Frames::missing($path); // phpcs:ignore WordPress.Security.EscapeOutput
                 continue;
             }
             clearstatcache(true, $full);
-            echo Frames::file($path, (int) filesize($full), (int) filemtime($full)); // phpcs:ignore WordPress.Security.EscapeOutput
-            readfile($full);
+            $size = (int) filesize($full);
+            echo Frames::file($path, $size, (int) filemtime($full)); // phpcs:ignore WordPress.Security.EscapeOutput
+            $sent = self::send($in, $size);
+            fclose($in);
+            if ($sent !== $size) {
+                exit; // Datei wurde währenddessen kürzer: ohne E enden, der Client bricht ab und holt neu
+            }
             echo "\n";
             flush();
         }
         echo Frames::end(); // phpcs:ignore WordPress.Security.EscapeOutput
         exit;
+    }
+
+    /**
+     * Sendet höchstens $size Bytes – wächst die Datei währenddessen, bleibt der Rahmen intakt (CR-07).
+     *
+     * @param resource $in
+     */
+    private static function send($in, int $size): int
+    {
+        $sent = 0;
+        while ($sent < $size) {
+            $chunk = fread($in, min(1048576, $size - $sent));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput
+            $sent += strlen($chunk);
+            flush();
+        }
+        return $sent;
     }
 
     /** @return list<string> */
