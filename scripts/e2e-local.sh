@@ -85,6 +85,10 @@ echo "== AC-7: scan mit aktuellem Infosheet = 1 Request"
 grep -q "^Requests: 1$" "$E2E/scan2.log" || fail "AC-7 scan needed more than one request"
 
 echo "== Erst-Pull"
+# wp-content/uploads ist gitignored und wird vom Baseline-Reset nicht erfasst – eine frühere
+# Laufzeit dieses Skripts kann hier über den AC-16-Proxy bereits 2019er-Dateien zwischengespeichert
+# haben. Ohne diesen Reset prüft AC-16 unten nur den alten Cache statt den frischen Full-Pull.
+rm -rf "$WPSYNC_SITES_DIR/$TARGET/public/wp-content/uploads"
 "$WPSYNC" pull "$TARGET" --full | tee "$E2E/pull1.log"
 
 cd "$WPSYNC_SITES_DIR/$TARGET"
