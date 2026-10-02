@@ -50,6 +50,8 @@ final class ScopeTest extends TestCase
             'bad plugin'     => [['exclude_plugins' => ['../etc']]],
             'bad year'       => [['uploads_since' => '25']],
             'not a list'     => [['exclude_themes' => 'astra']],
+            'plain_pii as string' => [['plain_pii' => 'true']],
+            'plain_pii as int'    => [['plain_pii' => 1]],
         ];
     }
 
@@ -110,5 +112,15 @@ final class ScopeTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         Scope::fromArray(['uploads_since' => "2024\n"]);
+    }
+
+    /** AC-35: Schweigt der Scope, wird anonymisiert – auch bei einem CLI, das das Feld nicht kennt. */
+    public function testAnonymizesUnlessPlainPiiIsExplicitlyRequested(): void
+    {
+        $this->assertTrue(Scope::fromArray(null)->anonymize());
+        $this->assertTrue(Scope::fromArray([])->anonymize());
+        $this->assertTrue(Scope::fromArray(['uploads_since' => '2024'])->anonymize());
+        $this->assertTrue(Scope::fromArray(['plain_pii' => false])->anonymize());
+        $this->assertFalse(Scope::fromArray(['plain_pii' => true])->anonymize());
     }
 }

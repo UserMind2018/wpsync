@@ -141,6 +141,14 @@ func RenderSummary(w io.Writer, s *agentapi.Infosheet, p *profile.Profile) {
 		}
 	}
 	fmt.Fprintf(w, "  Uploads:                   %s\n", uploads)
+	switch plain := p.PlainPII(s.Tables); {
+	case s.Env.Anon == "":
+		fmt.Fprintln(w, "  Personenbezogene Daten:    Infosheet stammt von einem Agent ohne Anonymisierung – Agent 0.3.0 installieren, dann wpsync scan --refresh")
+	case len(plain) == 0:
+		fmt.Fprintln(w, "  Personenbezogene Daten:    werden auf der Site pseudonymisiert (Benutzer, Kommentare, WooCommerce)")
+	default:
+		fmt.Fprintf(w, "  Personenbezogene Daten:    pseudonymisiert – ausser (keine Regel, kommen im KLARTEXT): %s\n", list(plain))
+	}
 	fmt.Fprintf(w, "  Geschätzter Erst-Pull:     Datenbank ≈ %s, Dateien ≈ %s\n", Bytes(db), Bytes(files))
 }
 

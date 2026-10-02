@@ -124,6 +124,8 @@ final class InventoryTest extends TestCase
         $tables = array_column($sheet['tables'], null, 'name');
         $this->assertSame('pii', $tables['wp_e_submissions_values']['class']);
         $this->assertTrue($tables['wp_posts']['essential']);
+        $this->assertTrue($tables['wp_posts']['anonymized'], 'posts carry WooCommerce order rules');
+        $this->assertFalse($tables['wp_e_submissions_values']['anonymized'], 'form entries have no rule');
 
         $plugins = array_column($sheet['plugins'], null, 'slug');
         $this->assertSame(20, $plugins['duplicator-pro']['bytes']);
@@ -152,6 +154,37 @@ final class InventoryTest extends TestCase
         $sheet = $inv->sheet($state, 200.0);
         $this->assertSame(['rows' => 2, 'bytes' => 20], $sheet['orphan_meta']);
         $this->assertSame(15, array_column($sheet['post_types'], null, 'name')['revision']['count']);
+    }
+
+    /** Ein Job, den Agent ≤ 0.2.1 begonnen hat, kennt nur den Zähl-Cursor – Dateien werden neu gezählt. */
+    public function testLegacyFileJobIsRecounted(): void
+    {
+        $inv   = new Inventory(new FakeProbe(), new SizeScan($this->dir));
+        $state = Inventory::initial(100.0);
+        while ($state['phase'] !== 'files') {
+            $state = $inv->step($state, microtime(true) - 1);
+        }
+        $fresh = $inv->step($state, microtime(true) + 60);
+
+        unset($state['data']['after']);
+        $state['cursor']          = 3;
+        $state['data']['buckets'] = ['top/backups-dup-pro' => ['files' => 1, 'bytes' => 500]];
+        $legacy = $inv->step($state, microtime(true) + 60);
+
+        $this->assertSame('done', $legacy['phase']);
+        $this->assertSame($fresh['data']['buckets'], $legacy['data']['buckets']);
+    }
+
+    public function testFileProgressCountsFiles(): void
+    {
+        $inv   = new Inventory(new FakeProbe(), new SizeScan($this->dir));
+        $state = Inventory::initial(100.0);
+        while ($state['phase'] !== 'files') {
+            $state = $inv->step($state, microtime(true) - 1);
+        }
+        $state = $inv->step($state, microtime(true) - 1);
+        $state = $inv->step($state, microtime(true) - 1);
+        $this->assertSame(2, Inventory::progress($state)['done']);
     }
 
     public function testProgress(): void

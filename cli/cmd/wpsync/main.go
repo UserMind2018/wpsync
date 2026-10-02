@@ -36,7 +36,8 @@ const usage = `wpsync – WordPress Live → Lokal
   wpsync list                          lokale Umgebungen mit Status, lokaler und Live-URL
   wpsync stop <site>… | --all          lokale Umgebung(en) stoppen (Daten bleiben erhalten)
   wpsync scan <site> [--refresh]       zeigen, was auf der Site liegt, und auswählen, was gezogen wird
-  wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen)
+  wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen,
+                                       --no-anonymize: personenbezogene Daten im Klartext)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
   wpsync version
 `
@@ -309,13 +310,14 @@ func cmdPull(args []string) error {
 	full := fs.Bool("full", false, "alles neu laden (Baseline und vorhandene Dateien ignorieren)")
 	yes := fs.Bool("yes", false, "neue Tabellen/Plugins ohne Rückfrage nach dem Preset behandeln")
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was sich geändert hat (wie wpsync status)")
+	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("Aufruf: wpsync pull <site> [--full] [--yes]")
+		return errors.New("Aufruf: wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]")
 	}
 	site, secret, err := loadSite(positional[0])
 	if err != nil {
@@ -339,6 +341,7 @@ func cmdPull(args []string) error {
 		MailguardSource: guard,
 		Full:            *full,
 		Yes:             *yes,
+		NoAnonymize:     *noAnon,
 		SaveSite:        saveProfile,
 		Out:             os.Stdout,
 		RowsPerChunk:    2000,
@@ -376,6 +379,10 @@ func pullError(err error, site *sites.Site) error {
 		return fmt.Errorf("noch kein Pull-Profil – zuerst wpsync scan %s", site.Name)
 	case errors.Is(err, pull.ErrNoInfosheet):
 		return fmt.Errorf("die Site hat noch kein Infosheet – wpsync scan %s --refresh", site.Name)
+	case errors.Is(err, pull.ErrAgentCannotAnonymize):
+		return fmt.Errorf("der wpsync-Agent auf %s kann noch nicht anonymisieren – Agent 0.3.0 installieren. Bewusst im Klartext: wpsync pull %s --no-anonymize", site.URL, site.Name)
+	case errors.Is(err, pull.ErrPlainNeedsConfirmation):
+		return errors.New("--no-anonymize zieht personenbezogene Daten im Klartext – im Terminal bestätigen oder --yes angeben")
 	}
 	return explain(err, site)
 }

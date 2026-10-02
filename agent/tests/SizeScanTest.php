@@ -52,7 +52,7 @@ final class SizeScanTest extends TestCase
 
     public function testFullScanInOnePage(): void
     {
-        $page = (new SizeScan($this->dir))->page(0, microtime(true) + 60);
+        $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
         $this->assertNull($page['next']);
         $this->assertSame(['files' => 2, 'bytes' => 15], $page['buckets']['plugins/akismet']);
         $this->assertSame(['files' => 1, 'bytes' => 3], $page['buckets']['plugins/hello']);
@@ -67,15 +67,49 @@ final class SizeScanTest extends TestCase
     public function testExpiredDeadlineStillProgressesAndAccumulates(): void
     {
         $scan   = new SizeScan($this->dir);
-        $page   = ['buckets' => [], 'large' => [], 'next' => 0];
+        $page   = ['buckets' => [], 'large' => [], 'next' => ''];
         $rounds = 0;
         do {
-            $page = $scan->page((int) $page['next'], microtime(true) - 1, $page['buckets'], $page['large']);
+            $page = $scan->page((string) $page['next'], microtime(true) - 1, $page['buckets'], $page['large']);
+            $this->assertSame(1, $page['files']);
             $rounds++;
         } while ($page['next'] !== null && $rounds < 100);
 
         $this->assertSame(9, $rounds, 'one file per page when the deadline has passed');
         $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+    }
+
+    public function testCursorIsThePathOfTheLastCountedFile(): void
+    {
+        $page = (new SizeScan($this->dir))->page('', microtime(true) - 1);
+        $this->assertSame('backups-dup-pro/site.zip', $page['next']);
+    }
+
+    public function testResumeSurvivesFilesVanishingBeforeTheCursor(): void
+    {
+        $scan = new SizeScan($this->dir);
+        $page = $scan->page('', microtime(true) - 1);
+        $page = $scan->page((string) $page['next'], microtime(true) - 1, $page['buckets'], $page['large']);
+        $this->assertSame('debug.log', $page['next']);
+
+        unlink($this->dir . '/backups-dup-pro/site.zip'); // ein Index-Cursor würde jetzt eine Datei überspringen
+        $page = $scan->page((string) $page['next'], microtime(true) + 60, $page['buckets'], $page['large']);
+
+        $this->assertNull($page['next']);
+        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+    }
+
+    public function testResumeDoesNotEnterDirectoriesBeforeTheCursor(): void
+    {
+        chmod($this->dir . '/plugins', 0000); // nicht lesbar: wer hineinläuft, verliert die Plugins nicht – er hat sie schon
+        try {
+            $page = (new SizeScan($this->dir))->page('themes/astra/style.css', microtime(true) + 60);
+        } finally {
+            chmod($this->dir . '/plugins', 0777);
+        }
+        $this->assertNull($page['next']);
+        $this->assertSame(3, $page['files']);
+        $this->assertSame(['uploads/2024', 'uploads/2025', 'uploads/other'], array_keys($page['buckets']));
     }
 
     public function testLargeFilesAreListed(): void
@@ -84,7 +118,7 @@ final class SizeScanTest extends TestCase
         ftruncate($handle, Excludes::MAX_FILE_BYTES + 1); // sparse, belegt keinen Platz
         fclose($handle);
 
-        $page = (new SizeScan($this->dir))->page(0, microtime(true) + 60);
+        $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
         $this->assertSame([['path' => 'wp-content/uploads/2025/huge.mp4', 'bytes' => Excludes::MAX_FILE_BYTES + 1]], $page['large']);
     }
 }

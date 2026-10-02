@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	"charm.land/huh/v2"
 
@@ -97,10 +98,23 @@ func tableOptions(sheet *agentapi.Infosheet, selected []string) []huh.Option[str
 	})
 	var out []huh.Option[string]
 	for _, t := range tables {
-		label := fmt.Sprintf("%-44s %-8s %9s  %s", t.Name, t.Class, Bytes(t.Bytes), t.Plugin)
+		label := tableLabel(t)
 		out = append(out, huh.NewOption(label, t.Name).Selected(slices.Contains(selected, t.Name)))
 	}
 	return out
+}
+
+// tableLabel is one line of the table checklist: name, class, size, plugin and whether a
+// pii table arrives pseudonymized or in plain text.
+func tableLabel(t agentapi.TableInfo) string {
+	note := t.Plugin
+	switch {
+	case t.Anonymized:
+		note += " · pseudonymisiert"
+	case t.Class == "pii":
+		note += " · KLARTEXT"
+	}
+	return fmt.Sprintf("%-44s %-8s %9s  %s", t.Name, t.Class, Bytes(t.Bytes), strings.TrimPrefix(note, " · "))
 }
 
 func componentOptions(items []agentapi.Component, selected []string, onlyInactive bool) []huh.Option[string] {

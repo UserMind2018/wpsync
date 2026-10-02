@@ -66,6 +66,7 @@ final class Inventory
                 'meta'       => [],
                 'buckets'    => [],
                 'large'      => [],
+                'after'      => '',
             ];
             return self::next($state, 'posts');
         }
@@ -80,10 +81,15 @@ final class Inventory
             return $to >= (int) $data['max']['postmeta'] ? self::next($state, 'files') : self::advance($state, $to);
         }
         if ($state['phase'] === 'files') {
-            $page = $this->sizes->page($cursor, $deadline, $data['buckets'], $data['large']);
+            if (!isset($data['after'])) { // Job eines Agents ≤ 0.2.1 mit Zähl-Cursor: Dateien neu zählen
+                $data   = ['buckets' => [], 'large' => [], 'after' => ''] + $data;
+                $cursor = 0;
+            }
+            $page = $this->sizes->page((string) $data['after'], $deadline, $data['buckets'], $data['large']);
             $state['data']['buckets'] = $page['buckets'];
             $state['data']['large']   = $page['large'];
-            return $page['next'] === null ? self::next($state, 'done') : self::advance($state, $page['next']);
+            $state['data']['after']   = (string) $page['next'];
+            return $page['next'] === null ? self::next($state, 'done') : self::advance($state, $cursor + $page['files']);
         }
         return $state;
     }
@@ -100,7 +106,8 @@ final class Inventory
         $tables = [];
         foreach ($d['tables'] as $t) {
             $tables[] = ['name' => (string) $t['name'], 'rows' => (int) $t['rows'], 'bytes' => (int) $t['bytes']]
-                + Classifier::table((string) $t['name'], (string) $d['prefix']);
+                + Classifier::table((string) $t['name'], (string) $d['prefix'])
+                + ['anonymized' => Anonymizer::covers((string) $t['name'], (string) $d['prefix'])];
         }
 
         $postTypes = [];
