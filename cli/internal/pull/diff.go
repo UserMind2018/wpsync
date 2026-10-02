@@ -69,3 +69,8 @@ func TableKey(mode string, s agentapi.Scope, prefix, table string) string {
 	}
 	return mode
 }
+
+// AnonKey marks a mode key as pulled pseudonymized. id is the agent's rule version plus key
+// fingerprint (Env.Anon) – when either changes, or the pull switches to plain text, the key
+// differs from the baseline and the table is reloaded (Spec 11.3).
+func AnonKey(id, key string) string { return "anon:" + id + "+" + key }

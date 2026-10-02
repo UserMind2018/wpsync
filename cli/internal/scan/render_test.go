@@ -91,3 +91,43 @@ func TestRenderSummary(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderSummaryNamesPersonalData(t *testing.T) {
+	s := renderSheet()
+	s.Env.Anon = "1.abcd1234"
+	p, _ := profile.New(s, profile.PresetNoTransactions)
+	var out bytes.Buffer
+	RenderSummary(&out, s, p)
+	if !strings.Contains(out.String(), "werden auf der Site pseudonymisiert") {
+		t.Errorf("standard preset:\n%s", out.String())
+	}
+
+	p, _ = profile.New(s, profile.PresetFull)
+	out.Reset()
+	RenderSummary(&out, s, p)
+	if !strings.Contains(out.String(), "KLARTEXT") || !strings.Contains(out.String(), "wp_e_submissions_values") {
+		t.Errorf("full preset must name uncovered pii tables:\n%s", out.String())
+	}
+
+	s.Env.Anon = ""
+	out.Reset()
+	RenderSummary(&out, s, p)
+	if !strings.Contains(out.String(), "scan --refresh") {
+		t.Errorf("sheet of an old agent must ask for a refresh:\n%s", out.String())
+	}
+}
+
+func TestTableLabel(t *testing.T) {
+	covered := tableLabel(agentapi.TableInfo{Name: "wp_wc_orders", Class: "pii", Plugin: "woocommerce", Bytes: 1 << 20, Anonymized: true})
+	plain := tableLabel(agentapi.TableInfo{Name: "wp_e_submissions_values", Class: "pii", Plugin: "elementor", Bytes: 1 << 20})
+	other := tableLabel(agentapi.TableInfo{Name: "wp_custom", Class: "unknown", Bytes: 1 << 20})
+	if !strings.Contains(covered, "woocommerce · pseudonymisiert") {
+		t.Errorf("covered = %q", covered)
+	}
+	if !strings.Contains(plain, "elementor · KLARTEXT") {
+		t.Errorf("plain = %q", plain)
+	}
+	if strings.Contains(other, "KLARTEXT") || strings.Contains(other, "·") {
+		t.Errorf("other = %q", other)
+	}
+}

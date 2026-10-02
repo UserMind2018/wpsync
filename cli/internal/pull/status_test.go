@@ -27,7 +27,7 @@ func TestStatusShowsChangesWithoutTransfer(t *testing.T) {
 			w.Write([]byte(`{"sheet":{"env":{"table_prefix":"wp_"},"tables":[{"name":"wp_posts","essential":true},{"name":"wp_options","essential":true}],
 "post_types":[],"plugins":[],"themes":[],"uploads":[],"findings":[],"orphan_meta":{}},"job":{}}`))
 		case "/wpsync/v1/delta":
-			w.Write([]byte(`{"env":{"table_prefix":"wp_"},"tables":[{"name":"wp_posts","checksum":"2"},{"name":"wp_options","checksum":"1"}],
+			w.Write([]byte(`{"env":{"table_prefix":"wp_","anon":"1.abcd1234"},"tables":[{"name":"wp_posts","checksum":"2"},{"name":"wp_options","checksum":"1"}],
 "files":[{"path":"wp-content/themes/a/style.css","size":5,"mtime":10},{"path":"wp-content/new.txt","size":1,"mtime":1}],"skipped":[],"next":null}`))
 		}
 	}))

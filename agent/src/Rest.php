@@ -19,6 +19,9 @@ final class Rest
     /** @var true|\WP_Error|null */
     private static $authResult = null;
 
+    /** @var Anonymizer|null */
+    private static $anonymizer = null;
+
     public static function register(string $pluginDir): void
     {
         self::$pluginDir = $pluginDir;
@@ -221,6 +224,7 @@ final class Rest
             'memory_limit'       => (string) ini_get('memory_limit'),
             'active_plugins'     => array_values((array) get_option('active_plugins', [])),
             'agent_version'      => WPSYNC_VERSION,
+            'anon'               => Anonymizer::id(Store::anonKey()),
         ];
     }
 
@@ -257,7 +261,7 @@ final class Rest
                 }
                 $mode = $scope->tableMode($tables[$i]);
                 if ($mode !== Scope::SKIP) {
-                    $out['tables'][] = self::tableInfo($tables[$i], $mode === Scope::FULL);
+                    $out['tables'][] = self::tableInfo($tables[$i], $mode === Scope::FULL, $scope);
                 }
             }
             $index = 0;
@@ -452,18 +456,24 @@ final class Rest
         return Store::dataTables();
     }
 
-    /** @return array{name: string, checksum: string|null, rows: int, bytes: int, primary_key: string|null} */
-    private static function tableInfo(string $table, bool $withChecksum): array
+    /**
+     * anonymized: Die Tabelle kommt mit Daten und pseudonymisiert – daran erkennt das CLI, dass es
+     * sie nach einem Wechsel von Regeln, Schlüssel oder --no-anonymize neu laden muss (Spec 11.3).
+     *
+     * @return array{name: string, checksum: string|null, rows: int, bytes: int, primary_key: string|null, anonymized: bool}
+     */
+    private static function tableInfo(string $table, bool $withData, Scope $scope): array
     {
         global $wpdb;
         $status   = (array) $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($table)), ARRAY_A);
-        $checksum = $withChecksum ? (array) $wpdb->get_row('CHECKSUM TABLE `' . $table . '`', ARRAY_A) : [];
+        $checksum = $withData ? (array) $wpdb->get_row('CHECKSUM TABLE `' . $table . '`', ARRAY_A) : [];
         return [
             'name'        => $table,
             'checksum'    => isset($checksum['Checksum']) ? (string) $checksum['Checksum'] : null,
             'rows'        => (int) ($status['Rows'] ?? 0),
             'bytes'       => (int) ($status['Data_length'] ?? 0) + (int) ($status['Index_length'] ?? 0),
             'primary_key' => self::singlePrimaryKey($table),
+            'anonymized'  => $withData && $scope->anonymize() && Anonymizer::covers($table, (string) $wpdb->base_prefix),
         ];
     }
 
@@ -498,17 +508,30 @@ final class Rest
             $filter['where'],
         ]));
         $rows = (array) $wpdb->get_results(SqlBuilder::select($table, $where, $pk, $after, $offset, $limit, $escape, $filter['join']), ARRAY_A);
+        $last = end($rows); // Cursor aus den echten Werten, bevor Spalten ersetzt werden
+        if ($scope->anonymize()) {
+            // Personenbezogene Werte verlassen den Server nur als Pseudonym (Spec 11, AC-32).
+            $rows = self::anonymizer()->rows($table, $rows);
+        }
 
         $sql  = ($after === null && $offset === 0) ? self::structureSql($table) : '';
         $sql .= SqlBuilder::inserts($table, array_map('array_values', $rows), $escape);
 
-        $last = end($rows);
         return [
             'sql'    => $sql,
             'rows'   => count($rows),
             'next'   => ($pk !== null && is_array($last)) ? (string) $last[$pk] : null,
             'keyset' => $pk !== null,
         ];
+    }
+
+    private static function anonymizer(): Anonymizer
+    {
+        global $wpdb;
+        if (self::$anonymizer === null) {
+            self::$anonymizer = new Anonymizer(Store::anonKey(), (string) $wpdb->base_prefix);
+        }
+        return self::$anonymizer;
     }
 
     /**

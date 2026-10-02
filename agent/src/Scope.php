@@ -24,6 +24,8 @@ final class Scope
     private $themes = [];
     /** @var string */
     private $uploadsSince = '';
+    /** @var bool */
+    private $plainPii = false;
 
     /**
      * @param mixed $raw JSON-Objekt aus dem Request; null oder leer = alles
@@ -56,12 +58,23 @@ final class Scope
             throw new \InvalidArgumentException('invalid uploads_since');
         }
         $scope->uploadsSince = $since;
+        $plain = $raw['plain_pii'] ?? false;
+        if (!is_bool($plain)) {
+            throw new \InvalidArgumentException('plain_pii must be a boolean');
+        }
+        $scope->plainPii = $plain;
         return $scope;
     }
 
     public function tableMode(string $table): string
     {
         return $this->tables[$table] ?? self::FULL;
+    }
+
+    /** Personenbezogene Werte werden pseudonymisiert, solange nicht ausdrücklich Klartext verlangt ist (Spec 11.3). */
+    public function anonymize(): bool
+    {
+        return !$this->plainPii;
     }
 
     /** Pfad relativ zu wp-content ohne führenden Slash; entschieden wird nur auf der obersten Ebene. */

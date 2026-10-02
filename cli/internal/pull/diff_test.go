@@ -97,3 +97,12 @@ func TestTableKey(t *testing.T) {
 		t.Errorf("without post-type filter posts stay %q, got %q", profile.ModeFull, got)
 	}
 }
+
+func TestAnonKey(t *testing.T) {
+	if got := AnonKey("1.abcd1234", profile.ModeFull); got != "anon:1.abcd1234+full" {
+		t.Errorf("AnonKey = %q", got)
+	}
+	if got := AnonKey("2.abcd1234", "filtered:revision"); got != "anon:2.abcd1234+filtered:revision" {
+		t.Errorf("AnonKey = %q", got)
+	}
+}

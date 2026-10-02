@@ -30,10 +30,26 @@ var LocalDisabledPlugins = []string{
 // DropIns from caching plugins that break a local site.
 var DropIns = []string{"advanced-cache.php", "object-cache.php"}
 
+// Local admin of an anonymized site: pulled accounts cannot log in, their hashes stay on the server (Spec 11.4).
+const (
+	LocalAdminUser     = "wpsync"
+	LocalAdminPassword = "wpsync"
+)
+
+// localAdminCode creates the local admin or resets its password and role. One wp eval, so it is
+// idempotent and neither wp_insert_user nor wp_set_password sends mail.
+const localAdminCode = `$u = get_user_by("login", "` + LocalAdminUser + `"); ` +
+	`if ($u) { wp_set_password("` + LocalAdminPassword + `", $u->ID); $u->set_role("administrator"); } ` +
+	`else { $r = wp_insert_user(["user_login" => "` + LocalAdminUser + `", "user_pass" => "` + LocalAdminPassword + `", ` +
+	`"user_email" => "wpsync@example.invalid", "role" => "administrator"]); ` +
+	`if (is_wp_error($r)) { fwrite(STDERR, $r->get_error_message()); exit(1); } }`
+
 // PostSetupOptions adapts the post-setup to the pull profile.
 type PostSetupOptions struct {
 	// ExcludedPlugins were not pulled; active ones are removed from active_plugins (AC-15).
 	ExcludedPlugins []string
+	// LocalAdmin creates the local admin – set after an anonymized pull (AC-34).
+	LocalAdmin bool
 }
 
 // PostSetup rewrites URLs, sets local constants and deactivates problematic or missing plugins.
@@ -79,6 +95,12 @@ func PostSetup(r ddev.Runner, env agentapi.Env, localURL string, o PostSetupOpti
 	}
 	if err := dropMissingPlugins(r, env, o.ExcludedPlugins, out); err != nil {
 		return err
+	}
+	if o.LocalAdmin {
+		if err := r.Run("wp", "eval", localAdminCode, "--skip-plugins", "--skip-themes"); err != nil {
+			return fmt.Errorf("lokalen Admin anlegen: %w", err)
+		}
+		fmt.Fprintf(out, "  lokaler Admin %q angelegt\n", LocalAdminUser)
 	}
 
 	// Second pass with plugins loaded: only then can WP-CLI unserialize objects of plugin classes

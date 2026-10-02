@@ -124,6 +124,8 @@ final class InventoryTest extends TestCase
         $tables = array_column($sheet['tables'], null, 'name');
         $this->assertSame('pii', $tables['wp_e_submissions_values']['class']);
         $this->assertTrue($tables['wp_posts']['essential']);
+        $this->assertTrue($tables['wp_posts']['anonymized'], 'posts carry WooCommerce order rules');
+        $this->assertFalse($tables['wp_e_submissions_values']['anonymized'], 'form entries have no rule');
 
         $plugins = array_column($sheet['plugins'], null, 'slug');
         $this->assertSame(20, $plugins['duplicator-pro']['bytes']);

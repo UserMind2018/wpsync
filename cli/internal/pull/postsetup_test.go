@@ -137,3 +137,39 @@ func TestSecondPassFailureIsOnlyAWarning(t *testing.T) {
 		t.Errorf("output = %q", out.String())
 	}
 }
+
+// AC-34: Nach anonymisiertem Pull ist kein übernommenes Konto anmeldbar – wpsync legt einen lokalen Admin an.
+func TestPostSetupCreatesLocalAdminOnlyWhenAsked(t *testing.T) {
+	env := agentapi.Env{Home: "https://kunde.de", TablePrefix: "wp_"}
+
+	r := &fakeRunner{}
+	var out bytes.Buffer
+	if err := PostSetup(r, env, "http://kunde.ddev.site", PostSetupOptions{LocalAdmin: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := r.joined()
+	for _, want := range []string{`wp eval $u = get_user_by("login", "wpsync");`, `wp_set_password("wpsync", $u->ID)`, `"role" => "administrator"`, "--skip-plugins --skip-themes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	if !strings.Contains(out.String(), "wpsync") {
+		t.Errorf("output = %q", out.String())
+	}
+
+	r = &fakeRunner{}
+	if err := PostSetup(r, env, "http://kunde.ddev.site", PostSetupOptions{}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.joined(), "get_user_by") {
+		t.Errorf("plain pulls keep the real accounts, no local admin:\n%s", r.joined())
+	}
+}
+
+func TestPostSetupFailsWhenLocalAdminCannotBeCreated(t *testing.T) {
+	r := &failingRunner{failOn: "get_user_by"}
+	err := PostSetup(r, agentapi.Env{Home: "https://kunde.de", TablePrefix: "wp_"}, "http://kunde.ddev.site", PostSetupOptions{LocalAdmin: true}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "lokalen Admin") {
+		t.Fatalf("err = %v", err)
+	}
+}

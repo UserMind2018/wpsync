@@ -160,6 +160,20 @@ func (p *Profile) presetTableMode(t agentapi.TableInfo) string {
 	return ModeFull
 }
 
+// PlainPII lists pii tables that are pulled with data although the agent has no anonymization
+// rule for them – best effort must stay visible (Konzept 5.1a). Sorted.
+func (p *Profile) PlainPII(tables []agentapi.TableInfo) []string {
+	modes := p.TableModes(tables)
+	var out []string
+	for _, t := range tables {
+		if t.Class == "pii" && !t.Anonymized && modes[t.Name] == ModeFull {
+			out = append(out, t.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ExcludedPostTypes lists post types whose rows stay on the server (sorted).
 func (p *Profile) ExcludedPostTypes(types []agentapi.PostType) []string {
 	out := slices.Clone(p.PostTypes.Exclude)

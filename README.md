@@ -127,7 +127,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
 | `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. |
-| `wpsync pull <site> [--full] [--yes] [--dry-run]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`). |
+| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`). `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync version` | Version der CLI. |
 
@@ -148,8 +148,8 @@ aktuelle Infosheet aufgelöst.
 | `nur-content` | zusätzlich `unknown` | wie Standard | nur aktive | wie Standard |
 
 Die Kern-Tabellen `posts`, `postmeta`, `terms`, `term_taxonomy`, `term_relationships`,
-`termmeta`, `options`, `users` und `usermeta` kommen **immer mit Daten**. `users`/`usermeta`
-enthalten damit personenbezogene Daten – eine Anonymisierung ist noch nicht eingebaut.
+`termmeta`, `options`, `users` und `usermeta` kommen **immer mit Daten** – personenbezogene
+Werte darin pseudonymisiert, siehe [Anonymisierung](#anonymisierung).
 
 ### Regeln
 
@@ -189,6 +189,36 @@ profile:
     tables: [wp_comments, wp_posts]
 ```
 
+### Anonymisierung
+
+Personenbezogene Daten werden **auf der Site** ersetzt, bevor sie den Server verlassen – in jedem
+Preset, ohne Einstellung im Profil.
+
+| Bereich | Was ersetzt wird |
+|---|---|
+| Benutzer (`users`, `usermeta`) | Login, Nicename, E-Mail, Anzeigename, Vor-/Nachname, Website, Passwort-Hash, Sitzungen, Application Passwords, Rechnungs- und Lieferadresse |
+| Kommentare | Autor, E-Mail, URL, IP, User-Agent; der Text von WooCommerce-Bestellnotizen |
+| Einstellungen | `admin_email`, `new_admin_email` |
+| WooCommerce | Adressen, E-Mail, Telefon, IP, Kundennotiz, Order-Key, Transaktions-ID in HPOS-Tabellen **und** klassischer Bestell-Postmeta; Customer-Lookup; Sessions, API-Keys, Payment-Tokens, Webhook-Secrets |
+
+- **Deterministisch:** Dieselbe Person bekommt überall und bei jedem Pull dasselbe Pseudonym
+  (`user-3f2a…@example.invalid`), Bestellungen bleiben ihrem Kunden zugeordnet. Der Schlüssel dafür
+  liegt nur auf der Site.
+- **Unverändert:** IDs, Datumswerte, Beträge, Land und Bundesland, Rollen, Kommentartexte.
+- **Login lokal:** Kein übernommenes Konto ist anmeldbar. Jeder Pull legt den Admin
+  **`wpsync` / `wpsync`** an und nennt ihn am Ende.
+- **PII-Tabellen** (Bestellungen, Formular-Einträge) bleiben im Standard-Preset ohne Daten. Wer sie
+  im Scan anhakt, bekommt sie pseudonymisiert, **wenn eine Regel existiert**. Für
+  Formular-Plugins gibt es keine – `scan` und `pull` weisen solche Tabellen als `KLARTEXT` aus.
+- **Klartext:** `wpsync pull <site> --no-anonymize` – nur für diesen einen Pull, mit Rückfrage.
+  Der nächste Pull ohne das Flag lädt die betroffenen Tabellen wieder pseudonymisiert.
+
+Grenzen: Erkannt wird nur, wofür es eine Regel gibt. Metadaten von Zahlungs- oder
+Membership-Plugins, Freitext in Beiträgen, Zugangsdaten in Plugin-Optionen und hochgeladene
+Dateien bleiben, wie sie sind. Autoren heissen lokal „Nutzer ab12cd".
+
+Voraussetzung: Agent ≥ 0.3.0. Gegen einen älteren Agent bricht `pull` ab, statt Klartext zu ziehen.
+
 ### Uploads-Proxy
 
 Nicht gezogene Upload-Jahre fehlen lokal nicht sichtbar: nginx im DDEV-Container holt eine
@@ -205,7 +235,8 @@ einmal) und legt sie lokal ab.
 3. **Delta-Check** gegen die Baseline – seitenweise, nur für den Profil-Umfang.
 4. **Dateien:** nur neue und geänderte. Ein abgebrochener Download wird fortgesetzt.
 5. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
-   eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle.
+   eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
+   pseudonymisiert an.
 6. **Post-Setup:**
    - Search-Replace der Live-URL (Klartext und JSON-escaped), danach ein zweiter Durchlauf
      mit geladenen Plugins für plugin-serialisierte Objekte (z. B. Borlabs Cookie)
@@ -213,6 +244,7 @@ einmal) und legt sie lokal ab.
    - Mail-, Security-, Zugriffsschutz- und Caching-Plugins sowie abgewählte Plugins deaktivieren
    - Drop-ins `advanced-cache.php` und `object-cache.php` entfernen
    - Uploads-Proxy einrichten
+   - lokalen Admin `wpsync` anlegen bzw. dessen Passwort zurücksetzen
 7. **Mailguard-Pflichtprüfung:** Ist im Container kein aktiver `wp_mail`-Filter nachweisbar,
    bricht der Pull ab und das Projekt wird gestoppt.
 8. **Baseline** speichern und Git-Commit im Site-Ordner.
@@ -229,7 +261,9 @@ Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
   Nicht signierte Requests bekommen `401`.
 - **Widerruf:** Werkzeuge → wpsync → Gerät widerrufen. Danach ist das Secret wertlos.
 - **Read-only:** Der Agent liest Dateien und Datenbank; er schreibt nur in eigene
-  `wpsync_*`-Tabellen und -Optionen.
+  `wpsync_*`-Tabellen und -Optionen (Pairings, Infosheet, Schlüssel der Pseudonyme).
+- **Datenminimierung:** Personenbezogene Daten verlassen den Server pseudonymisiert –
+  auch dann, wenn ein älteres CLI nichts dazu sagt. Klartext nur mit `--no-anonymize`.
 - **Transport:** Der Agent antwortet nur über HTTPS. Für lokale Umgebungen:
   `define('WPSYNC_ALLOW_HTTP', true);` in `wp-config.php` und `wpsync pair … --insecure`.
 - **Feste Ausschlüsse (serverseitig, für Liste und Abruf):** eigene und fremde

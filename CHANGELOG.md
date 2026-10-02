@@ -3,7 +3,23 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unveröffentlicht] · Agent 0.2.2
+## [Unveröffentlicht] · Agent 0.3.0
+
+**Agent und CLI gemeinsam aktualisieren.** Der neue Agent pseudonymisiert auch für ein älteres
+CLI – dort gibt es dann keinen lokalen Admin, und kein übernommenes Konto ist anmeldbar.
+
+### Neu
+- **Anonymisierung:** Personenbezogene Daten werden auf der Site pseudonymisiert, bevor sie den
+  Server verlassen – Benutzer, Kommentare, `admin_email` und WooCommerce (HPOS, klassische
+  Bestell-Postmeta, Customer-Lookup, Sessions, API-Keys, Payment-Tokens). Deterministisch: dieselbe
+  Person bekommt in jeder Tabelle und bei jedem Pull dasselbe Pseudonym
+- Lokaler Admin `wpsync` / `wpsync` nach jedem anonymisierten Pull
+- `wpsync pull --no-anonymize` zieht Klartext – mit Rückfrage, ohne Terminal zusätzlich `--yes`
+- `scan` und `pull` nennen PII-Tabellen, die mit Daten gezogen werden und keine Regel haben
+
+### Geändert
+- Der erste Pull nach dem Update lädt `users`, `usermeta`, `options`, `posts` und `postmeta` einmal neu
+- `pull` und `status` brechen gegen einen Agent vor 0.3.0 ab, statt Klartext zu ziehen
 
 ### Behoben
 - `wpsync scan` wurde auf Sites mit vielen Dateien unter `wp-content` nie fertig: Der Größenscan
