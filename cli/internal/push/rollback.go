@@ -98,6 +98,12 @@ func Rollback(o Options, pushID string) error {
 		if jerr != nil {
 			return fmt.Errorf("der Agent antwortet nicht (%v) und %w – im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, jerr)
 		}
+		// The journal is writable from the containers; the key goes only to the site paired in the
+		// configuration.
+		if !onSite(o.Site.URL, j.RescueURL) {
+			return fmt.Errorf("der Agent antwortet nicht (%v) und das Journal zu Push %s nennt eine Rescue-URL ausserhalb von %s (%s) – "+
+				"rescue.php wird nicht aufgerufen; im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, pushID, o.Site.URL, agentapi.Printable(j.RescueURL))
+		}
 		fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php")
 		if rerr := RescueRollback(o.HTTP, j.RescueURL, pushID, RescueKey(o.Secret, pushID, j.Salt)); rerr != nil {
 			return fmt.Errorf("Rollback über rescue.php fehlgeschlagen: %w", rerr)

@@ -45,6 +45,9 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - Health-Seiten des Agenten ruft `push` nur auf der gekoppelten Site ab (gleiches Schema, gleicher
   Host mit Port), `health_urls` der Site-Konfiguration nur über http(s); Weiterleitungen nur auf
   denselben Host. Andere Seiten werden mit Hinweis verworfen.
+- `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
+  Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
+  des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.
 
 ## [Unveröffentlicht]
 

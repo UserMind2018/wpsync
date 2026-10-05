@@ -14,7 +14,7 @@ func TestApplyAndRevertBaseline(t *testing.T) {
 	b.Files["wp-content/plugins/xy/keep.php"] = baseline.FileStamp{Size: 3, MTime: 3}
 	b.Files["wp-content/uploads/a.jpg"] = baseline.FileStamp{Size: 4, MTime: 4}
 
-	j := NewJournal("p_20261005_0123456789ab", "https://kunde.de/rescue.php", "salt", b, []string{"plugins/x", "plugins/neu"})
+	j := NewJournal("p_20261005_0123456789ab", "https://kunde.de/rescue.php", testSalt, b, []string{"plugins/x", "plugins/neu"})
 	if len(j.Units["plugins/x"]) != 2 || len(j.Units["plugins/neu"]) != 0 {
 		t.Fatalf("journal units = %v", j.Units)
 	}
@@ -46,13 +46,13 @@ func TestJournalRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	b := baseline.New("https://kunde.de")
 	b.Files["wp-content/themes/t/style.css"] = baseline.FileStamp{Size: 1, MTime: 1}
-	j := NewJournal("p_20261005_0123456789ab", "https://kunde.de/rescue.php", "salt", b, []string{"themes/t"})
+	j := NewJournal("p_20261005_0123456789ab", "https://kunde.de/rescue.php", testSalt, b, []string{"themes/t"})
 	j.Applied = true
 	if err := SaveJournal(dir, j); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadJournal(dir, "p_20261005_0123456789ab")
-	if err != nil || !got.Applied || got.Salt != "salt" || got.Units["themes/t"]["wp-content/themes/t/style.css"].Size != 1 {
+	if err != nil || !got.Applied || got.Salt != testSalt || got.Units["themes/t"]["wp-content/themes/t/style.css"].Size != 1 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	if _, err := LoadJournal(dir, "p_20261005_ffffffffffff"); err == nil {
@@ -63,5 +63,12 @@ func TestJournalRoundTrip(t *testing.T) {
 	}
 	if id := LatestJournal(dir); id != "p_20261005_0123456789ab" {
 		t.Errorf("LatestJournal = %q", id)
+	}
+}
+
+func TestSaveJournalRefusesASaltOfAnotherFormat(t *testing.T) {
+	j := NewJournal(testID, "https://kunde.de/rescue.php", "salt", baseline.New("https://kunde.de"), nil)
+	if err := SaveJournal(t.TempDir(), j); err == nil {
+		t.Error("a salt the agent never produces was accepted")
 	}
 }

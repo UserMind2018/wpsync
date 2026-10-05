@@ -14,7 +14,11 @@ import (
 	"github.com/usermind/wpsync/internal/baseline"
 )
 
-var pushIDRe = regexp.MustCompile(`^p_[0-9]{8}_[a-f0-9]{12}$`)
+var (
+	pushIDRe = regexp.MustCompile(`^p_[0-9]{8}_[a-f0-9]{12}$`)
+	// saltRe: the agent draws 16 random bytes per push (Push.php).
+	saltRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
+)
 
 // ShowID returns a push ID from the server for display: as is if it has the agent's format,
 // otherwise quoted by agentapi.Printable, so a hostile site cannot steer the terminal.
@@ -90,6 +94,9 @@ func SaveJournal(siteDir string, j *Journal) error {
 	if !pushIDRe.MatchString(j.PushID) {
 		return fmt.Errorf("invalid push id %q", j.PushID)
 	}
+	if !saltRe.MatchString(j.Salt) {
+		return fmt.Errorf("der Agent nennt einen ungültigen Rescue-Salt %s", agentapi.Printable(j.Salt))
+	}
 	if err := os.MkdirAll(journalDir(siteDir), 0o700); err != nil {
 		return err
 	}
@@ -104,7 +111,9 @@ func SaveJournal(siteDir string, j *Journal) error {
 	return os.Rename(p+".tmp", p)
 }
 
-// LoadJournal reads the journal of a push made from this machine.
+// LoadJournal reads the journal of a push made from this machine. The journal lies in the site
+// folder, which code in the local containers can write: push ID and salt must have the agent's
+// format, and the rescue URL is checked against the site configuration before use (Rollback).
 func LoadJournal(siteDir, pushID string) (*Journal, error) {
 	if !pushIDRe.MatchString(pushID) {
 		return nil, fmt.Errorf("ungültige Push-ID %q", pushID)
@@ -114,8 +123,8 @@ func LoadJournal(siteDir, pushID string) (*Journal, error) {
 		return nil, fmt.Errorf("zu Push %s gibt es auf diesem Rechner kein Journal", pushID)
 	}
 	var j Journal
-	if err := json.Unmarshal(data, &j); err != nil {
-		return nil, err
+	if err := json.Unmarshal(data, &j); err != nil || j.PushID != pushID || !saltRe.MatchString(j.Salt) {
+		return nil, fmt.Errorf("das Journal zu Push %s ist beschädigt", pushID)
 	}
 	return &j, nil
 }

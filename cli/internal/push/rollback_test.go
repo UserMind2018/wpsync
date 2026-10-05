@@ -1,6 +1,11 @@
 package push
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,7 +64,7 @@ func TestRollbackFallsBackToTheRescueScript(t *testing.T) {
 	if got := strings.Join(f.routes, " "); got != "rollback rescue" {
 		t.Errorf("routes = %s", got)
 	}
-	if f.rescueKey != RescueKey("secret", testID, "salt") {
+	if f.rescueKey != RescueKey("secret", testID, testSalt) {
 		t.Errorf("rescue key = %q", f.rescueKey)
 	}
 }
@@ -134,6 +139,75 @@ func TestPushesQuotesServerStrings(t *testing.T) {
 	for _, want := range []string{`"p_\x1b[2J"`, `"mac\x1b[31m"`, `"odd\a"`, `"plugins/\x1b]0;x"`} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("push log misses %s:\n%s", want, out)
+		}
+	}
+}
+
+// tamper rewrites the journal of testID the way code in a local container could.
+func tamper(t *testing.T, siteDir string, change func(map[string]any)) {
+	t.Helper()
+	p := filepath.Join(siteDir, ".wpsync", "pushes", testID+".json")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var j map[string]any
+	if err := json.Unmarshal(data, &j); err != nil {
+		t.Fatal(err)
+	}
+	change(j)
+	data, _ = json.Marshal(j)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Das Journal liegt im Site-Ordner, den Container beschreiben können: der Rollback-Schlüssel
+// geht nur an rescue.php der gekoppelten Site aus der Site-Konfiguration.
+func TestRollbackChecksTheRescueURLOfTheJournal(t *testing.T) {
+	leaked := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = true
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer elsewhere.Close()
+
+	for _, rescue := range []string{elsewhere.URL + "/rescue.php", "https" + strings.TrimPrefix(elsewhere.URL, "http") + "/rescue.php", "ftp://x/rescue.php", ""} {
+		f, o, siteDir := pushed(t)
+		f.rollback = 500
+		tamper(t, siteDir, func(j map[string]any) { j["rescue_url"] = rescue })
+
+		err := Rollback(o, testID)
+		if err == nil || !strings.Contains(err.Error(), "Rescue-URL") || !strings.Contains(err.Error(), "Journal") {
+			t.Errorf("rescue %q: err = %v", rescue, err)
+		}
+		if got := strings.Join(f.routes, " "); got != "rollback" {
+			t.Errorf("rescue %q: routes = %s", rescue, got)
+		}
+	}
+	if leaked {
+		t.Error("the rollback key went to a host outside the paired site")
+	}
+}
+
+// Auch Salt und Push-ID des Journals fliessen in den Aufruf von rescue.php; sie müssen das
+// Format des Agenten haben und zum verlangten Push passen.
+func TestRollbackRefusesATamperedJournal(t *testing.T) {
+	cases := map[string]func(map[string]any){
+		"salt":    func(j map[string]any) { j["salt"] = "x&action=ping" },
+		"no salt": func(j map[string]any) { delete(j, "salt") },
+		"push id": func(j map[string]any) { j["push_id"] = "p_20261005_ffffffffffff" },
+	}
+	for name, change := range cases {
+		f, o, siteDir := pushed(t)
+		f.rollback = 500
+		tamper(t, siteDir, change)
+
+		if err := Rollback(o, testID); err == nil || !strings.Contains(err.Error(), "Journal") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if got := strings.Join(f.routes, " "); got != "rollback" {
+			t.Errorf("%s: rescue.php was called: %s", name, got)
 		}
 	}
 }

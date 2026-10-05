@@ -18,7 +18,10 @@ import (
 	"github.com/usermind/wpsync/internal/sites"
 )
 
-const testID = "p_20261005_0123456789ab"
+const (
+	testID   = "p_20261005_0123456789ab"
+	testSalt = "00112233445566778899aabbccddeeff"
+)
 
 // fakeSite plays agent, frontend and rescue.php of one site.
 type fakeSite struct {
@@ -117,7 +120,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			res.Units = append(res.Units, plan)
 		}
 		if !req.Dry {
-			res.PushID, res.Rescue.Salt = testID, "salt"
+			res.PushID, res.Rescue.Salt = testID, testSalt
 			f.uploaded, f.committed, f.rolledBack = map[string]string{}, false, false
 		}
 		json.NewEncoder(w).Encode(res)
@@ -243,7 +246,7 @@ func TestRunPushesChangedUnitAndUpdatesTheBaseline(t *testing.T) {
 		t.Errorf("still changed after the push: %v", units)
 	}
 	j, err := LoadJournal(siteDir, testID)
-	if err != nil || !j.Applied || j.Salt != "salt" || j.Units["plugins/x"]["wp-content/plugins/x/main.php"].MTime != 1700000000 {
+	if err != nil || !j.Applied || j.Salt != testSalt || j.Units["plugins/x"]["wp-content/plugins/x/main.php"].MTime != 1700000000 {
 		t.Errorf("journal = %+v, %v", j, err)
 	}
 	if len(commits) != 1 || !strings.Contains(commits[0], testID) {
@@ -516,7 +519,7 @@ func TestRunRollsBackWhenTheSiteGetsWorse(t *testing.T) {
 	if got := strings.Join(f.routes, " "); got != "begin begin upload commit rescue" {
 		t.Errorf("routes = %s", got)
 	}
-	if f.rescueKey != RescueKey("secret", testID, "salt") {
+	if f.rescueKey != RescueKey("secret", testID, testSalt) {
 		t.Errorf("rescue key = %q", f.rescueKey)
 	}
 	base, _ := baseline.Load(siteDir)
