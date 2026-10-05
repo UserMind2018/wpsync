@@ -1,5 +1,7 @@
 package agentapi
 
+import "fmt"
+
 // PushStamp identifies a file version on the server, as the baseline stores it.
 type PushStamp struct {
 	Size  int64 `json:"size"`
@@ -130,6 +132,10 @@ func (c *Client) PushCommit(pushID string) (map[string]map[string]PushStamp, err
 		}
 		if res.Next == nil {
 			return res.Stamps, nil
+		}
+		// Each call places at least one file; a cursor that does not move would loop forever.
+		if cursor != nil && (res.Next.U < cursor.U || (res.Next.U == cursor.U && res.Next.I <= cursor.I)) {
+			return nil, fmt.Errorf("push commit: agent cursor did not advance (%d/%d)", res.Next.U, res.Next.I)
 		}
 		cursor = res.Next
 	}
