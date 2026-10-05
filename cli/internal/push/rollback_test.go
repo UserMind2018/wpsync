@@ -120,3 +120,20 @@ func TestConfirmPending(t *testing.T) {
 		t.Errorf("routes = %s\n%s", got, out)
 	}
 }
+
+func TestPushesQuotesServerStrings(t *testing.T) {
+	f := newFakeSite(t)
+	f.list = `{"pushes":[{"push_id":"p_\u001b[2J","device":"mac\u001b[31m","target":"live","status":"odd\u0007","units":[{"path":"plugins/\u001b]0;x","files":1,"uploaded":1}],"created":1791158400}]}`
+	o, _, out := localSite(t, f)
+	if err := Pushes(o); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\x07") {
+		t.Errorf("raw control characters in the push log:\n%q", out)
+	}
+	for _, want := range []string{`"p_\x1b[2J"`, `"mac\x1b[31m"`, `"odd\a"`, `"plugins/\x1b]0;x"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("push log misses %s:\n%s", want, out)
+		}
+	}
+}

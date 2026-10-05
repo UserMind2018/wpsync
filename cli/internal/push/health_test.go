@@ -100,3 +100,10 @@ func TestHealthURLsMergesAndDeduplicates(t *testing.T) {
 		}
 	}
 }
+
+func TestWorseQuotesTheURL(t *testing.T) {
+	got := Worse([]Probe{{URL: "https://x.example/\x1b[2J", Status: 200}}, []Probe{{URL: "https://x.example/\x1b[2J", Status: 500}})
+	if len(got) != 1 || strings.Contains(got[0], "\x1b") || !strings.Contains(got[0], `"https://x.example/\x1b[2J"`) {
+		t.Errorf("worse = %q", got)
+	}
+}

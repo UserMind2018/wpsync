@@ -37,7 +37,7 @@ func Pushes(o Options) error {
 	for _, r := range records {
 		status := statusLabel[r.Status]
 		if status == "" {
-			status = r.Status
+			status = agentapi.Printable(r.Status)
 		}
 		if r.Forced {
 			status += " (--force)"
@@ -47,9 +47,14 @@ func Pushes(o Options) error {
 		}
 		var units []string
 		for _, u := range r.Units {
-			units = append(units, u.Path)
+			if ValidUnit(u.Path) {
+				units = append(units, u.Path)
+			} else {
+				units = append(units, agentapi.Printable(u.Path))
+			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.PushID, time.Unix(r.Created, 0).Format("02.01.2006 15:04"), r.Device, status, strings.Join(units, ", "))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
+			agentapi.Printable(r.Device), status, strings.Join(units, ", "))
 	}
 	return w.Flush()
 }

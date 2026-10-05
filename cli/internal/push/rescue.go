@@ -32,7 +32,7 @@ func RescueAllowed(siteURL, rescueURL string) error {
 	site, err1 := url.Parse(siteURL)
 	rescue, err2 := url.Parse(rescueURL)
 	if err1 != nil || err2 != nil || rescue.Host == "" || !strings.EqualFold(site.Host, rescue.Host) || site.Scheme != rescue.Scheme {
-		return fmt.Errorf("der Agent nennt eine Rescue-URL ausserhalb der gekoppelten Site: %q", rescueURL)
+		return fmt.Errorf("der Agent nennt eine Rescue-URL ausserhalb der gekoppelten Site: %s", agentapi.Printable(rescueURL))
 	}
 	return nil
 }
@@ -75,7 +75,7 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 		if by, _ := body["by"].(string); body["error"] == "superseded" && pushIDRe.MatchString(by) {
 			return nil, fmt.Errorf("HTTP %d: superseded – zuerst den späteren Push %s zurückrollen", resp.StatusCode, by)
 		}
-		return nil, fmt.Errorf("HTTP %d: %v", resp.StatusCode, body["error"])
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, agentapi.Printable(fmt.Sprint(body["error"])))
 	}
 	return body, nil
 }

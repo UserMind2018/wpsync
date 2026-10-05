@@ -34,6 +34,7 @@ type fakeSite struct {
 	window    bool
 	pending   bool
 	conflicts []string
+	list      string // answer of /push/list; empty: one confirmed push
 	readonly  bool
 	broken    bool // the frontend fails after the swap
 	confirm   int  // HTTP status of /push/confirm
@@ -159,6 +160,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.status(w, f.rollback)
 	case "/wpsync/v1/push/list":
+		if f.list != "" {
+			w.Write([]byte(f.list))
+			return
+		}
 		w.Write([]byte(`{"pushes":[{"push_id":"` + testID + `","device":"mac","target":"live","status":"confirmed","units":[{"path":"plugins/x","files":2,"uploaded":1}],"created":1791158400}]}`))
 	default:
 		f.t.Errorf("unexpected route %s", route)
@@ -458,7 +463,7 @@ func TestRunAsksSeparatelyForAVersionChange(t *testing.T) {
 	if err := Run(o); !errors.Is(err, ErrVersionChange) {
 		t.Fatalf("--yes alone must not be enough: %v", err)
 	}
-	if !strings.Contains(out.String(), "1.0 → 1.1") {
+	if !strings.Contains(out.String(), `"1.0" → "1.1"`) {
 		t.Errorf("version change not shown:\n%s", out)
 	}
 
@@ -631,5 +636,45 @@ func TestDefaultCommitUsesSnapshotRepoOutsideTheSite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(localgit.GitDir(root, "kunde"), "HEAD")); err != nil {
 		t.Fatalf("snapshot repo missing: %v", err)
+	}
+}
+
+// Strings the site chooses reach the terminal only through agentapi.Printable (as on main for
+// table names and paths): no escape sequence from a conflict path or version gets through.
+func TestPlanQuotesServerStrings(t *testing.T) {
+	f := newFakeSite(t)
+	f.conflicts = []string{"inc/\x1b[2Jevil.php"}
+	f.versions = map[string]string{"plugins/x": "1.0\x1b]0;title\x07"}
+	o, _, out := localSite(t, f)
+	o.DryRun = true
+	if err := Run(o); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\x07") {
+		t.Errorf("raw control characters in the plan:\n%q", out)
+	}
+	for _, want := range []string{`"inc/\x1b[2Jevil.php"`, `"1.0\x1b]0;title\a"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan misses %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestPendingErrorQuotesServerStrings(t *testing.T) {
+	msg := (&PendingError{PushID: "p_\x1b[2J", Device: "mac\x1b[31m"}).Error()
+	if strings.Contains(msg, "\x1b") {
+		t.Errorf("raw escape in %q", msg)
+	}
+	if ok := (&PendingError{PushID: testID, Device: "mac"}).Error(); !strings.Contains(ok, testID) {
+		t.Errorf("valid push id not shown as is: %q", ok)
+	}
+}
+
+func TestShowID(t *testing.T) {
+	if got := ShowID(testID); got != testID {
+		t.Errorf("ShowID(valid) = %q", got)
+	}
+	if got := ShowID("p_1\nx"); got != `"p_1\nx"` {
+		t.Errorf("ShowID(invalid) = %q", got)
 	}
 }

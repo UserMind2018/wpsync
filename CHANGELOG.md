@@ -39,6 +39,9 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 ### Sicherheit
 - Der Header `X-Wpsync-Timestamp` muss aus 1–10 Ziffern bestehen; Werte wie `<ts>abc`,
   ` <ts>` oder `+<ts>` lehnt der Agent mit 401 ab (SEC-129).
+- Angaben der Site in den Ausgaben von `push`, `pushes` und `rollback` (Pfade, Versionen, Gerät,
+  Push-ID, Health-URLs, Fehler von `rescue.php`) erscheinen wie bei `pull` maskiert in
+  Anführungszeichen; Steuerzeichen erreichen das Terminal nicht.
 
 ## [Unveröffentlicht]
 

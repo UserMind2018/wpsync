@@ -507,7 +507,7 @@ func pushError(err error, site *sites.Site) error {
 	case errors.Is(err, push.ErrRescueUnreachable):
 		return fmt.Errorf("%w – ohne Rückweg wird nicht gepusht. Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe unter wp-content/plugins/?", err)
 	case errors.As(err, &pending):
-		return fmt.Errorf("%w.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, pending.PushID, site.Name, pending.PushID)
+		return fmt.Errorf("%w.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, push.ShowID(pending.PushID), site.Name, push.ShowID(pending.PushID))
 	case errors.As(err, &rolled):
 		if len(rolled.StillWorse) > 0 {
 			return fmt.Errorf("%w.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; "))

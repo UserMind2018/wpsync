@@ -284,7 +284,7 @@ if src ddev wp plugin is-active e2e-new 2>/dev/null; then fail "AC-58 new plugin
 echo "== AC-62: Versionswechsel braucht eine eigene Bestätigung"
 printf '<?php\n/* Plugin Name: E2E New\n * Version: 1.1 */\n' > public/wp-content/plugins/e2e-new/e2e-new.php
 if "$WPSYNC" push "$TARGET" code plugins/e2e-new --yes >"$E2E/push5.log" 2>&1; then fail "AC-62 version change with --yes alone"; fi
-grep -q "1.0 → 1.1" "$E2E/push5.log" || fail "AC-62 version change not shown"
+grep -qF '"1.0" → "1.1"' "$E2E/push5.log" || fail "AC-62 version change not shown"
 "$WPSYNC" push "$TARGET" code plugins/e2e-new --yes --allow-version-change >/dev/null
 
 echo "== AC-63/AC-64: Syntaxfehler in aktivem Plugin wird automatisch zurückgerollt"

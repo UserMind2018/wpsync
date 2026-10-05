@@ -90,13 +90,13 @@ func Worse(before, after []Probe) []string {
 		b := before[i]
 		switch {
 		case a.Status == 0 && b.Status != 0:
-			out = append(out, fmt.Sprintf("%s antwortet nicht mehr (vorher HTTP %d)", a.URL, b.Status))
+			out = append(out, fmt.Sprintf("%s antwortet nicht mehr (vorher HTTP %d)", agentapi.Printable(a.URL), b.Status))
 		case a.Status >= 500 && b.Status != 0 && b.Status < 500:
-			out = append(out, fmt.Sprintf("%s liefert HTTP %d (vorher %d)", a.URL, a.Status, b.Status))
+			out = append(out, fmt.Sprintf("%s liefert HTTP %d (vorher %d)", agentapi.Printable(a.URL), a.Status, b.Status))
 		case a.Marker && !b.Marker:
-			out = append(out, fmt.Sprintf("%s zeigt eine Fehlermeldung von WordPress oder PHP", a.URL))
+			out = append(out, fmt.Sprintf("%s zeigt eine Fehlermeldung von WordPress oder PHP", agentapi.Printable(a.URL)))
 		case a.Empty && !b.Empty && a.Status != 0:
-			out = append(out, fmt.Sprintf("%s ist eine leere Seite", a.URL))
+			out = append(out, fmt.Sprintf("%s ist eine leere Seite", agentapi.Printable(a.URL)))
 		}
 	}
 	return out

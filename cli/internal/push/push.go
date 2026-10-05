@@ -67,7 +67,7 @@ var (
 type PendingError struct{ PushID, Device string }
 
 func (e *PendingError) Error() string {
-	return fmt.Sprintf("Push %s (von %s) ist getauscht, aber nicht bestätigt", e.PushID, e.Device)
+	return fmt.Sprintf("Push %s (von %s) ist getauscht, aber nicht bestätigt", ShowID(e.PushID), agentapi.Printable(e.Device))
 }
 
 // SkippedNewError: nothing to push because the only candidates were new units,
@@ -363,7 +363,7 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 		case !p.Exists:
 			line += " (neu, bleibt auf der Site inaktiv)"
 		case u.Version != p.Version:
-			line += fmt.Sprintf(" (Version %s → %s)", orDash(p.Version), orDash(u.Version))
+			line += fmt.Sprintf(" (Version %s → %s)", showVersion(p.Version), showVersion(u.Version))
 			versionChange = true
 		}
 		fmt.Fprintln(out, line)
@@ -377,7 +377,7 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 			sort.Strings(p.Conflicts)
 			fmt.Fprintln(out, "  ! auf dem Server geändert seit dem letzten Pull (erst wpsync pull, oder bewusst --force):")
 			for _, rel := range p.Conflicts {
-				fmt.Fprintf(out, "      %s\n", rel)
+				fmt.Fprintf(out, "      %s\n", agentapi.Printable(rel))
 			}
 		}
 		if !p.Writable {
@@ -388,11 +388,13 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 	return conflict, readonly, versionChange
 }
 
-func orDash(v string) string {
+// showVersion quotes a plugin or theme version for display; it comes from the server or from
+// code the site delivered.
+func showVersion(v string) string {
 	if v == "" {
 		return "–"
 	}
-	return v
+	return agentapi.Printable(v)
 }
 
 // upload sends the needed files of one unit, at most ChunkBytes of raw data per request;
@@ -411,7 +413,7 @@ func upload(o Options, pushID string, index int, docroot string, u *Unit, need [
 	for _, rel := range need {
 		local, ok := u.Files[rel]
 		if !ok {
-			return fmt.Errorf("der Agent verlangt %s/%s, das nicht im Manifest steht", u.Path, rel)
+			return fmt.Errorf("der Agent verlangt %s/%s, das nicht im Manifest steht", u.Path, agentapi.Printable(rel))
 		}
 		data, err := os.ReadFile(u.file(docroot, rel))
 		if err != nil {

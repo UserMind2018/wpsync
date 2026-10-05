@@ -16,6 +16,15 @@ import (
 
 var pushIDRe = regexp.MustCompile(`^p_[0-9]{8}_[a-f0-9]{12}$`)
 
+// ShowID returns a push ID from the server for display: as is if it has the agent's format,
+// otherwise quoted by agentapi.Printable, so a hostile site cannot steer the terminal.
+func ShowID(id string) string {
+	if pushIDRe.MatchString(id) {
+		return id
+	}
+	return agentapi.Printable(id)
+}
+
 // Journal remembers what this machine needs to undo a push: the baseline entries of the units
 // before the push and how to reach rescue.php (U9). It lives in .wpsync/pushes/<id>.json and is
 // not versioned.
