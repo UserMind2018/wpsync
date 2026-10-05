@@ -22,6 +22,9 @@ final class Rest
     /** @var Anonymizer|null */
     private static $anonymizer = null;
 
+    /** @var string Key-ID des authentifizierten Aufrufers – Pushes gehören einem Pairing. */
+    private static $keyId = '';
+
     public static function register(string $pluginDir): void
     {
         self::$pluginDir = $pluginDir;
@@ -43,6 +46,12 @@ final class Rest
             'db-bundle'         => 'dbBundle',
             'db'                => 'dbChunk',
             'files'             => 'files',
+            'push/begin'        => 'pushBegin',
+            'push/upload'       => 'pushUpload',
+            'push/commit'       => 'pushCommit',
+            'push/confirm'      => 'pushConfirm',
+            'push/rollback'     => 'pushRollback',
+            'push/list'         => 'pushList',
         ];
         foreach ($signed as $route => $method) {
             register_rest_route(self::NS, '/' . $route, [
@@ -113,6 +122,7 @@ final class Rest
             return new \WP_Error('wpsync_auth', 'nonce reused', ['status' => 401]);
         }
         Store::touchPairing($keyId);
+        self::$keyId = $keyId;
         return true;
     }
 
@@ -208,6 +218,52 @@ final class Rest
         return new \WP_REST_Response(Infosheet::run($seconds));
     }
 
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pushBegin(\WP_REST_Request $request)
+    {
+        return Push::begin(self::json($request), self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pushUpload(\WP_REST_Request $request)
+    {
+        return Push::upload(self::json($request), self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pushCommit(\WP_REST_Request $request)
+    {
+        return Push::commit(self::json($request), self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pushConfirm(\WP_REST_Request $request)
+    {
+        return Push::confirm(self::json($request), self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function pushRollback(\WP_REST_Request $request)
+    {
+        return Push::rollback(self::json($request), self::$keyId);
+    }
+
+    public static function pushList(): \WP_REST_Response
+    {
+        return Push::index();
+    }
+
+    /**
+     * Der ganze signierte JSON-Body (SEC-07: nie der Query-String).
+     *
+     * @return array<string, mixed>
+     */
+    private static function json(\WP_REST_Request $request): array
+    {
+        $json = $request->get_json_params();
+        return is_array($json) ? $json : [];
+    }
+
     /** @return array<string, mixed> */
     public static function env(): array
     {
@@ -225,6 +281,7 @@ final class Rest
             'active_plugins'     => array_values((array) get_option('active_plugins', [])),
             'agent_version'      => WPSYNC_VERSION,
             'anon'               => Anonymizer::id(Store::anonKey()),
+            'health_urls'        => Push::healthUrls(),
         ];
     }
 
