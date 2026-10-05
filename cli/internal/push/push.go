@@ -172,8 +172,11 @@ func Run(o Options) error {
 	if base.Empty() {
 		return ErrNoBaseline
 	}
-	all, deleted, err := Scan(docroot, base)
+	all, deleted, links, err := scan(docroot, base)
 	if err != nil {
+		return err
+	}
+	if err := namedLinks(docroot, links, o.Units, o.Out); err != nil {
 		return err
 	}
 	units, err := selectUnits(all, o.Units, o.Out)
@@ -329,6 +332,27 @@ func Run(o Options) error {
 	return nil
 }
 
+// namedLinks refuses a named unit that is a symlink; without names it lists the skipped ones (U19).
+func namedLinks(docroot string, links, only []string, out io.Writer) error {
+	for _, link := range links {
+		if len(only) == 0 {
+			fmt.Fprintf(out, "  übersprungen: %s – symbolischer Link, wird nie gepusht\n", link)
+			continue
+		}
+		for _, name := range only {
+			if unitName(name) == link {
+				return fmt.Errorf("%s %w, Push abgebrochen", showDir(docroot, "wp-content/"+link), ErrSymlink)
+			}
+		}
+	}
+	return nil
+}
+
+// unitName normalises a unit named on the command line ("wp-content/plugins/x/" → "plugins/x").
+func unitName(name string) string {
+	return strings.Trim(strings.TrimPrefix(filepath.ToSlash(name), "wp-content/"), "/")
+}
+
 // selectUnits narrows the changed units to the ones named on the command line.
 func selectUnits(changed []Unit, only []string, out io.Writer) ([]Unit, error) {
 	if len(only) == 0 {
@@ -336,7 +360,7 @@ func selectUnits(changed []Unit, only []string, out io.Writer) ([]Unit, error) {
 	}
 	var picked []Unit
 	for _, name := range only {
-		name = strings.Trim(strings.TrimPrefix(filepath.ToSlash(name), "wp-content/"), "/")
+		name = unitName(name)
 		if !ValidUnit(name) {
 			return nil, fmt.Errorf("%q ist keine pushbare Einheit – erlaubt: plugins/<slug>, themes/<slug>, mu-plugins", name)
 		}

@@ -4,7 +4,6 @@ package push
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -99,6 +98,12 @@ func Ignored(unit, rel string, size int64) bool {
 // units with local changes and the units that exist in the baseline but no longer on disk.
 // A pull sets every file's mtime to the source's, so a differing size or mtime means a local edit.
 func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []string, err error) {
+	units, deleted, _, err = scan(docroot, base)
+	return units, deleted, err
+}
+
+// scan is Scan plus the units that are symlinks: they are never read and never pushed (U19).
+func scan(docroot string, base *baseline.Baseline) (units []Unit, deleted, links []string, err error) {
 	known := map[string]map[string]baseline.FileStamp{}
 	for path, stamp := range base.Files {
 		if unit, rel, ok := UnitOf(path); ok {
@@ -109,41 +114,44 @@ func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []stri
 		}
 	}
 
-	// Every directory from the site folder down to a unit must be real: a symlink there would push
-	// another site's files (M1). Inside a unit, symlinks are skipped and never followed.
+	// Every directory from the site folder down to plugins, themes and mu-plugins must be real: a
+	// symlink there would push another site's files (M1). A unit that is a symlink is skipped and
+	// never read (U19); inside a unit, symlinks are skipped and never followed.
 	local := map[string]bool{}
+	linked := map[string]bool{}
 	for _, rel := range []string{".", "wp-content"} {
 		if _, ok, err := realDir(docroot, rel); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		} else if !ok {
-			return nil, sortedKeys(known), nil
+			return nil, sortedKeys(known), nil, nil
 		}
 	}
 	for _, kind := range []string{"plugins", "themes"} {
 		_, ok, err := realDir(docroot, "wp-content/"+kind)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if !ok {
 			continue
 		}
 		entries, err := os.ReadDir(filepath.Join(docroot, "wp-content", kind))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, e := range entries {
 			unit := kind + "/" + e.Name()
 			switch {
 			case !ValidUnit(unit):
 			case e.Type()&fs.ModeSymlink != 0:
-				return nil, nil, fmt.Errorf("%s %w, Push abgebrochen", showDir(docroot, "wp-content/"+unit), ErrSymlink)
+				linked[unit] = true
+				links = append(links, unit)
 			case e.IsDir():
 				local[unit] = true
 			}
 		}
 	}
 	if _, ok, err := realDir(docroot, "wp-content/"+muPlugins); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	} else if ok {
 		local[muPlugins] = true
 	}
@@ -151,7 +159,7 @@ func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []stri
 	for unit := range local {
 		u, err := scanUnit(docroot, unit, known[unit])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(u.Changed) > 0 && len(u.Files) > 0 {
 			sort.Strings(u.Changed)
@@ -159,13 +167,14 @@ func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []stri
 		}
 	}
 	for unit := range known {
-		if !local[unit] {
+		if !local[unit] && !linked[unit] {
 			deleted = append(deleted, unit)
 		}
 	}
 	sort.Slice(units, func(i, j int) bool { return units[i].Path < units[j].Path })
 	sort.Strings(deleted)
-	return units, deleted, nil
+	sort.Strings(links)
+	return units, deleted, links, nil
 }
 
 func sortedKeys(m map[string]map[string]baseline.FileStamp) []string {

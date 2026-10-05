@@ -48,9 +48,10 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
   Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
   des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.
-- `push` bricht ab, wenn `public`, `wp-content`, `plugins`/`themes`/`mu-plugins` oder eine Einheit
-  ein Symlink ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan,
-  bricht der Push vor dem Tausch ab.
+- `push` bricht ab, wenn `public`, `wp-content` oder `plugins`/`themes`/`mu-plugins` ein Symlink
+  ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan, bricht der
+  Push vor dem Tausch ab. Ist eine Einheit selbst ein Symlink (z. B. `plugins/x`), überspringt
+  `push` sie mit Hinweis und liest sie nie; ausdrücklich genannt bricht der Push ab (U19).
 - Fehlermeldungen des Agenten (Code, Text, Weiterleitungsziel) erreichen das Terminal ohne
   Steuer- und Bidi-Zeichen; Umlaute bleiben lesbar. Gilt zentral für alle Befehle.
 - Dateinamen mit C1- oder Bidi-Steuerzeichen pusht die CLI nicht und lehnt der Agent ab; die

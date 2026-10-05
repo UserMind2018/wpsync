@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	// ErrSymlink: a directory between the site folder and a unit is a symlink. Code in the local
-	// containers can create one and point it at another site, whose files would then go live (M1).
+	// ErrSymlink: a directory between the site folder and a unit, or a named unit, is a symlink.
+	// Code in the local containers can create one and point it at another site, whose files would
+	// then go live (M1). Unnamed units that are symlinks are only skipped (U19).
 	ErrSymlink = errors.New("ist ein symbolischer Link – wpsync pusht nur aus echten Verzeichnissen der Site")
 	// ErrChanged: a file or directory is no longer the one the scan saw.
 	ErrChanged = errors.New("hat sich während des Pushs geändert")

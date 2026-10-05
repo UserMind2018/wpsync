@@ -46,16 +46,15 @@ func replaceWithLink(t *testing.T, path, target string) {
 	}
 }
 
-// M1: a symlink anywhere between the site folder and a unit would push another site's files.
+// M1: a symlink anywhere between the site folder and the unit directories would push another
+// site's files.
 func TestRunRefusesSymlinksOnTheWayToTheUnits(t *testing.T) {
 	cases := map[string]string{
-		"public":                        "public",
-		"public/wp-content":             "public/wp-content",
-		"public/wp-content/plugins":     "public/wp-content/plugins",
-		"public/wp-content/themes":      "public/wp-content/themes",
-		"public/wp-content/mu-plugins":  "public/wp-content/mu-plugins",
-		"public/wp-content/plugins/x":   "public/wp-content/plugins/x",
-		"public/wp-content/plugins/neu": "public/wp-content/plugins/x",
+		"public":                       "public",
+		"public/wp-content":            "public/wp-content",
+		"public/wp-content/plugins":    "public/wp-content/plugins",
+		"public/wp-content/themes":     "public/wp-content/themes",
+		"public/wp-content/mu-plugins": "public/wp-content/mu-plugins",
 	}
 	for link, target := range cases {
 		t.Run(link, func(t *testing.T) {
@@ -76,6 +75,70 @@ func TestRunRefusesSymlinksOnTheWayToTheUnits(t *testing.T) {
 			}
 			if len(f.routes) != 0 || len(f.uploaded) != 0 {
 				t.Errorf("no request may leave before the scan is clean: %v", f.routes)
+			}
+		})
+	}
+}
+
+// U19: a symlink as a unit is skipped with a hint when nothing is named; it is never read.
+func TestRunSkipsUnitsThatAreSymlinks(t *testing.T) {
+	cases := map[string]struct {
+		link, target string
+		err          error // what Run returns: the link was the only candidate, or the rest is pushed
+	}{
+		"changed unit": {"plugins/x", "plugins/x", ErrNothing},
+		"new unit":     {"plugins/neu", "plugins/x", nil},
+		"theme":        {"themes/t", "themes/t", nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeSite(t)
+			o, siteDir, out := localSite(t, f)
+			other := otherSite(t, siteDir)
+			replaceWithLink(t, filepath.Join(siteDir, "public/wp-content", c.link), filepath.Join(other, "public/wp-content", c.target))
+
+			err := Run(o)
+			if c.err == nil && err != nil || c.err != nil && !errors.Is(err, c.err) {
+				t.Fatalf("err = %v\n%s", err, out)
+			}
+			if !strings.Contains(out.String(), "übersprungen: "+c.link+" – symbolischer Link, wird nie gepusht") {
+				t.Errorf("no hint about the skipped link:\n%s", out)
+			}
+			if strings.Contains(out.String(), c.link+" fehlt lokal") {
+				t.Errorf("a linked unit is not missing:\n%s", out)
+			}
+			for _, b := range f.begins {
+				for _, u := range b.Units {
+					if u.Path == c.link {
+						t.Errorf("the linked unit went to the agent: %+v", u)
+					}
+				}
+			}
+			for _, data := range f.uploaded {
+				if strings.Contains(data, "SECRET") || strings.Contains(data, "other site") {
+					t.Fatal("content of the other site was uploaded")
+				}
+			}
+		})
+	}
+}
+
+// U19: a named unit that is a symlink stops the push before any request.
+func TestRunRefusesANamedUnitThatIsASymlink(t *testing.T) {
+	for _, named := range [][]string{{"plugins/neu"}, {"plugins/x", "wp-content/plugins/neu/"}} {
+		t.Run(strings.Join(named, ","), func(t *testing.T) {
+			f := newFakeSite(t)
+			o, siteDir, out := localSite(t, f)
+			other := otherSite(t, siteDir)
+			replaceWithLink(t, filepath.Join(siteDir, "public/wp-content/plugins/neu"), filepath.Join(other, "public/wp-content/plugins/x"))
+			o.Units = named
+
+			err := Run(o)
+			if !errors.Is(err, ErrSymlink) || !strings.Contains(err.Error(), "public/wp-content/plugins/neu") {
+				t.Fatalf("err = %v\n%s", err, out)
+			}
+			if len(f.routes) != 0 {
+				t.Errorf("no request may leave: %v", f.routes)
 			}
 		})
 	}

@@ -288,6 +288,11 @@ Das schützt vor alten lokalen Kopien, etwa von Plugins, die ein Pull-Profil aus
 neues Plugin geht nur mit ausdrücklicher Nennung raus: `wpsync push <site> code plugins/<slug>`.
 Liegt ein gleichnamiges Verzeichnis schon auf der Site, ist das ein Konflikt.
 
+**Symlinks.** Ist eine Einheit selbst ein symbolischer Link (etwa ein lokal verlinktes
+Entwicklungs-Plugin), überspringt die CLI sie mit Hinweis und liest sie nie; ausdrücklich genannt
+bricht der Push ab. Ist `public`, `wp-content`, `plugins`, `themes` oder `mu-plugins` ein Symlink,
+bricht jeder Push ab.
+
 **Ablauf.**
 
 1. Probelauf: Der Agent meldet pro Einheit, welche Dateien er braucht, ob sich die Einheit auf
