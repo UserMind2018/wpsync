@@ -16,7 +16,7 @@ defined('ABSPATH') || exit;
 final class Anonymizer
 {
     /** Erhöhen, wenn sich Regeln ändern – das CLI lädt die betroffenen Tabellen dann neu (Spec 11.3). */
-    public const RULES_VERSION = 1;
+    public const RULES_VERSION = 2;
 
     /** Kein Hash: höchstens 32 Zeichen vergleicht WordPress mit md5(), das nie mit „!“ beginnt. */
     public const NO_LOGIN = '!wpsync-anonymized';
@@ -186,12 +186,14 @@ final class Anonymizer
         ] + self::address('billing_') + self::address('shipping_');
 
         $orderMeta = [
-            '_customer_ip_address'    => 'ip',
-            '_customer_user_agent'    => 'fixed:',
-            '_order_key'              => 'tag:wc_order_',
-            '_transaction_id'         => 'fixed:',
-            '_billing_address_index'  => 'fixed:',
-            '_shipping_address_index' => 'fixed:',
+            '_customer_ip_address'             => 'ip',
+            '_customer_user_agent'             => 'fixed:',
+            '_order_key'                       => 'tag:wc_order_',
+            '_transaction_id'                  => 'fixed:',
+            '_billing_address_index'           => 'fixed:',
+            '_shipping_address_index'          => 'fixed:',
+            // Order Attribution: dieselbe Angabe wie _customer_user_agent, auch ohne HPOS
+            '_wc_order_attribution_user_agent' => 'fixed:',
         ] + self::address('_billing_') + self::address('_shipping_');
 
         $rules = [

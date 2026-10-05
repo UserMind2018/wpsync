@@ -200,6 +200,10 @@ final class AnonymizerTest extends TestCase
         $this->assertMatchesRegularExpression('/^Vorname [0-9a-f]{6}\z/', $first['meta_value']);
         $this->assertSame('0.0.0.0', $this->one('wp_postmeta', ['meta_key' => '_customer_ip_address', 'meta_value' => '203.0.113.7'])['meta_value']);
         $this->assertSame('', $this->one('wp_postmeta', ['meta_key' => '_billing_address_index', 'meta_value' => 'Erika Mustermann Köln'])['meta_value']);
+        // Order Attribution schreibt den User-Agent ein zweites Mal – in HPOS und in klassischer Postmeta.
+        foreach (['wp_postmeta', 'wp_wc_orders_meta'] as $table) {
+            $this->assertSame('', $this->one($table, ['meta_key' => '_wc_order_attribution_user_agent', 'meta_value' => 'Mozilla/5.0'])['meta_value'], $table);
+        }
 
         foreach ([['_billing_period', 'month'], ['_billing_country', 'DE'], ['_shipping_state', 'NW'], ['_edit_lock', '1700000000:1'], ['_elementor_data', '[]']] as $kv) {
             $row = ['meta_key' => $kv[0], 'meta_value' => $kv[1]];
