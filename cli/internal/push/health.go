@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -23,27 +25,55 @@ type Probe struct {
 // A fatal often comes with HTTP 200 and WordPress' "critical error" page.
 var markers = []string{"wp-die-message", "critical error", "kritischen Fehler", "Fatal error", "Parse error"}
 
-// HealthURLs merges the pages the agent names with the ones from the site configuration.
-func HealthURLs(agent, site []string) []string {
-	var out []string
+// HealthURLs merges the pages the agent names with the ones from the site configuration. The
+// site is not trusted: a page it names must lie on the paired site itself (same scheme and host
+// as for rescue.php). Pages from the configuration are the user's choice, but only over http(s).
+// dropped lists what is not requested, for a hint.
+func HealthURLs(siteURL string, agent, site []string) (urls, dropped []string) {
 	seen := map[string]bool{}
-	for _, u := range append(append([]string{}, agent...), site...) {
-		if u != "" && !seen[u] {
+	add := func(u string, ok bool) {
+		switch {
+		case u == "" || seen[u]:
+		case !ok:
+			dropped = append(dropped, u)
+		default:
 			seen[u] = true
-			out = append(out, u)
+			urls = append(urls, u)
 		}
 	}
-	return out
+	for _, u := range agent {
+		add(u, onSite(siteURL, u))
+	}
+	for _, u := range site {
+		add(u, webURL(u))
+	}
+	return urls, dropped
 }
 
-// Check requests every URL once, with pause between two requests.
+func webURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// Check requests every URL once, with pause between two requests. A redirect is followed only on
+// the host of the page itself; any other answers as the 3xx it is.
 func Check(hc *http.Client, urls []string, pause func()) []Probe {
+	sameHost := *hc
+	sameHost.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
 	probes := make([]Probe, len(urls))
 	for i, u := range urls {
 		if i > 0 {
 			pause()
 		}
-		probes[i] = probe(hc, u)
+		probes[i] = probe(&sameHost, u)
 	}
 	return probes
 }

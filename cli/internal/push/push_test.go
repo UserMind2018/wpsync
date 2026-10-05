@@ -36,10 +36,11 @@ type fakeSite struct {
 	conflicts []string
 	list      string // answer of /push/list; empty: one confirmed push
 	readonly  bool
-	broken    bool // the frontend fails after the swap
-	confirm   int  // HTTP status of /push/confirm
-	rollback  int  // HTTP status of /push/rollback
-	rescue    int  // HTTP status of rescue.php for a rollback
+	broken    bool     // the frontend fails after the swap
+	confirm   int      // HTTP status of /push/confirm
+	rollback  int      // HTTP status of /push/rollback
+	rescue    int      // HTTP status of rescue.php for a rollback
+	health    []string // extra pages the agent names for the health check
 
 	committed  bool
 	rolledBack bool
@@ -92,7 +93,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		f.begins = append(f.begins, req)
 		res := agentapi.PushBegin{
 			AgentVersion: f.version, WindowOpen: f.window,
-			HealthURLs: []string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"},
+			HealthURLs: append([]string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"}, f.health...),
 			Rescue:     agentapi.PushRescue{URL: f.srv.URL + "/rescue.php"},
 		}
 		if f.pending {
@@ -676,5 +677,28 @@ func TestShowID(t *testing.T) {
 	}
 	if got := ShowID("p_1\nx"); got != `"p_1\nx"` {
 		t.Errorf("ShowID(invalid) = %q", got)
+	}
+}
+
+// Die Site ist nicht vertrauenswürdig: eine Seite auf einem fremden Host ruft der Push nie ab.
+func TestRunSkipsHealthURLsOutsideTheSite(t *testing.T) {
+	hits := 0
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("<html>fremd</html>"))
+	}))
+	defer elsewhere.Close()
+	f := newFakeSite(t)
+	f.health = []string{elsewhere.URL + "/intern"}
+	o, _, out := localSite(t, f)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if hits != 0 {
+		t.Errorf("the push requested a page on another host %d times", hits)
+	}
+	if !strings.Contains(out.String(), elsewhere.URL+"/intern") || !strings.Contains(out.String(), "verworfen") {
+		t.Errorf("no hint about the dropped page:\n%s", out)
 	}
 }

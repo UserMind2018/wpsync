@@ -42,6 +42,9 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - Angaben der Site in den Ausgaben von `push`, `pushes` und `rollback` (Pfade, Versionen, Gerät,
   Push-ID, Health-URLs, Fehler von `rescue.php`) erscheinen wie bei `pull` maskiert in
   Anführungszeichen; Steuerzeichen erreichen das Terminal nicht.
+- Health-Seiten des Agenten ruft `push` nur auf der gekoppelten Site ab (gleiches Schema, gleicher
+  Host mit Port), `health_urls` der Site-Konfiguration nur über http(s); Weiterleitungen nur auf
+  denselben Host. Andere Seiten werden mit Hinweis verworfen.
 
 ## [Unveröffentlicht]
 

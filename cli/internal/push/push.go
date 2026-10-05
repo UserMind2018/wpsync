@@ -262,7 +262,10 @@ func Run(o Options) error {
 	if err := RescuePing(o.HTTP, plan.Rescue.URL); err != nil {
 		return err
 	}
-	urls := HealthURLs(plan.HealthURLs, o.Site.HealthURLs)
+	urls, dropped := HealthURLs(o.Site.URL, plan.HealthURLs, o.Site.HealthURLs)
+	for _, u := range dropped {
+		fmt.Fprintf(o.Out, "  ! Health-Seite %s verworfen – nur http(s) und beim Agenten nur Seiten der gekoppelten Site\n", agentapi.Printable(u))
+	}
 	before := Check(o.HTTP, urls, o.pause)
 
 	req.Dry = false

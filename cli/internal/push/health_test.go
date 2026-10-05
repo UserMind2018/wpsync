@@ -89,15 +89,92 @@ func TestWorse(t *testing.T) {
 }
 
 func TestHealthURLsMergesAndDeduplicates(t *testing.T) {
-	got := HealthURLs([]string{"https://kunde.de/", "https://kunde.de/wp-login.php"}, []string{"https://kunde.de/kasse/", "https://kunde.de/", ""})
+	got, dropped := HealthURLs("https://kunde.de", []string{"https://kunde.de/", "https://kunde.de/wp-login.php"}, []string{"https://kunde.de/kasse/", "https://kunde.de/", ""})
 	want := []string{"https://kunde.de/", "https://kunde.de/wp-login.php", "https://kunde.de/kasse/"}
-	if len(got) != len(want) {
-		t.Fatalf("urls = %v", got)
+	if len(got) != len(want) || len(dropped) != 0 {
+		t.Fatalf("urls = %v, dropped = %v", got, dropped)
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("urls[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// Die Site ist nicht vertrauenswürdig: Seiten, die der Agent nennt, liegen auf der gekoppelten
+// Site selbst – sonst spräche der Mac fremde Hosts an.
+func TestHealthURLsDropsAgentURLsOutsideTheSite(t *testing.T) {
+	agent := []string{
+		"https://kunde.de/",
+		"http://kunde.de/",               // downgrade
+		"https://evil.example/",          // other host
+		"https://kunde.de.evil.example/", // suffix trick
+		"https://kunde.de:8443/",         // other port
+		"http://169.254.169.254/latest/", // metadata service
+		"file:///etc/passwd",             // other scheme
+		"/relative",                      // no host
+		"https://KUNDE.de/wp-login.php",  // host case does not matter
+	}
+	got, dropped := HealthURLs("https://kunde.de", agent, nil)
+	if strings.Join(got, " ") != "https://kunde.de/ https://KUNDE.de/wp-login.php" {
+		t.Errorf("urls = %v", got)
+	}
+	if len(dropped) != 7 {
+		t.Errorf("dropped = %v", dropped)
+	}
+
+	// A source paired over http (local DDEV) keeps its http pages.
+	got, dropped = HealthURLs("http://src.ddev.site", []string{"http://src.ddev.site/", "https://src.ddev.site/"}, nil)
+	if strings.Join(got, " ") != "http://src.ddev.site/" || len(dropped) != 1 {
+		t.Errorf("http site: urls = %v, dropped = %v", got, dropped)
+	}
+}
+
+// Seiten aus der eigenen Site-Konfiguration darf der User bewusst auch woanders hin zeigen
+// lassen, aber nur über http(s).
+func TestHealthURLsChecksTheSchemeOfConfiguredURLs(t *testing.T) {
+	got, dropped := HealthURLs("https://kunde.de", nil, []string{"https://cdn.kunde.de/status", "http://kunde.de/alt", "file:///etc/passwd", "gopher://kunde.de/", "kunde.de/ohne-schema"})
+	if strings.Join(got, " ") != "https://cdn.kunde.de/status http://kunde.de/alt" {
+		t.Errorf("urls = %v", got)
+	}
+	if len(dropped) != 3 {
+		t.Errorf("dropped = %v", dropped)
+	}
+}
+
+// Eine Weiterleitung auf einen anderen Host wird nicht verfolgt; die Seite zählt als 3xx.
+func TestCheckFollowsRedirectsOnlyOnTheSameHost(t *testing.T) {
+	visited := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		visited = true
+		w.Write([]byte("<html>fremd</html>"))
+	}))
+	defer elsewhere.Close()
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/away":
+			http.Redirect(w, r, elsewhere.URL+"/", http.StatusFound)
+		case "/here":
+			http.Redirect(w, r, "/ok", http.StatusFound)
+		default:
+			w.Write([]byte("<html>ok</html>"))
+		}
+	}))
+	defer site.Close()
+
+	hc := site.Client()
+	probes := Check(hc, []string{site.URL + "/away", site.URL + "/here"}, func() {})
+	if probes[0].Status != http.StatusFound {
+		t.Errorf("redirect to another host: %+v, want the 302 itself", probes[0])
+	}
+	if probes[1].Status != http.StatusOK || probes[1].Empty {
+		t.Errorf("redirect on the same host: %+v, want it followed", probes[1])
+	}
+	if visited {
+		t.Error("the health check followed a redirect to another host")
+	}
+	if hc.CheckRedirect != nil {
+		t.Error("the caller's client must stay unchanged")
 	}
 }
 

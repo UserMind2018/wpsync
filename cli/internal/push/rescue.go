@@ -29,12 +29,18 @@ func RescueKey(secret, pushID, salt string) string {
 // RescueAllowed accepts a rescue URL only on the paired site itself; the key must not travel
 // in plain text unless the site itself was paired over http (local test sources).
 func RescueAllowed(siteURL, rescueURL string) error {
-	site, err1 := url.Parse(siteURL)
-	rescue, err2 := url.Parse(rescueURL)
-	if err1 != nil || err2 != nil || rescue.Host == "" || !strings.EqualFold(site.Host, rescue.Host) || site.Scheme != rescue.Scheme {
+	if !onSite(siteURL, rescueURL) {
 		return fmt.Errorf("der Agent nennt eine Rescue-URL ausserhalb der gekoppelten Site: %s", agentapi.Printable(rescueURL))
 	}
 	return nil
+}
+
+// onSite: rawURL has the scheme and host (with port) of the paired site. http passes only when
+// the site itself was paired over http.
+func onSite(siteURL, rawURL string) bool {
+	site, err1 := url.Parse(siteURL)
+	u, err2 := url.Parse(rawURL)
+	return err1 == nil && err2 == nil && u.Host != "" && strings.EqualFold(site.Host, u.Host) && site.Scheme == u.Scheme
 }
 
 // RescuePing checks that rescue.php answers without WordPress.
