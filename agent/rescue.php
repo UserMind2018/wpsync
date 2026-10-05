@@ -21,6 +21,11 @@ require __DIR__ . '/src/PushSwap.php';
 require __DIR__ . '/src/PushRescue.php';
 
 // Standardlayout wp-content/plugins/wpsync-agent/ – /push/begin lehnt jedes andere ab.
-list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::handle(dirname(__DIR__, 2), $_POST, time());
+try {
+    list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::handle(dirname(__DIR__, 2), $_POST, time());
+} catch (\Throwable $e) {
+    // z. B. rescue.json nicht schreibbar: als JSON antworten statt mit leerem 500.
+    list($wpsync_status, $wpsync_body) = [500, ['ok' => false, 'error' => 'rescue failed']];
+}
 http_response_code($wpsync_status);
 echo json_encode($wpsync_body);
