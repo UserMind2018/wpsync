@@ -70,6 +70,16 @@ func (e *PendingError) Error() string {
 	return fmt.Sprintf("Push %s (von %s) ist getauscht, aber nicht bestätigt", e.PushID, e.Device)
 }
 
+// SkippedNewError: nothing to push because the only candidates were new units,
+// which go out only when named (U14). It matches ErrNothing.
+type SkippedNewError struct{ Units []string }
+
+func (e *SkippedNewError) Error() string {
+	return fmt.Sprintf("%v – neu und nicht genannt: %s", ErrNothing, strings.Join(e.Units, ", "))
+}
+
+func (e *SkippedNewError) Unwrap() error { return ErrNothing }
+
 // RolledBackError: the push made the site worse and was taken back.
 type RolledBackError struct {
 	PushID     string
@@ -171,7 +181,26 @@ func Run(o Options) error {
 	for _, unit := range deleted {
 		fmt.Fprintf(o.Out, "  Hinweis: %s fehlt lokal – ein Push löscht nie, auf der Site bleibt es bestehen.\n", unit)
 	}
+	var skipped []string
+	if len(o.Units) == 0 {
+		// Without named units, units missing from the baseline stay local – whether the
+		// site has them or not. They are either stale copies outside the pull profile or
+		// something new that should go out on purpose (U14).
+		var kept []Unit
+		for _, u := range units {
+			if u.New {
+				fmt.Fprintf(o.Out, "  übersprungen: %s – neu, nur mit ausdrücklicher Nennung: wpsync push %s code %s\n", u.Path, o.Site.Name, u.Path)
+				skipped = append(skipped, u.Path)
+				continue
+			}
+			kept = append(kept, u)
+		}
+		units = kept
+	}
 	if len(units) == 0 {
+		if len(skipped) > 0 {
+			return &SkippedNewError{Units: skipped}
+		}
 		return ErrNothing
 	}
 	req := agentapi.PushBeginRequest{Target: "live", Force: o.Force, Dry: true}
@@ -194,23 +223,6 @@ func Run(o Options) error {
 	}
 	if len(plan.Units) != len(units) {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
-	}
-	if len(o.Units) == 0 {
-		// Without explicit units, copies that were never pulled are left alone (U14).
-		var kept []Unit
-		var keptPlans []agentapi.PushUnitPlan
-		var keptReqs []agentapi.PushUnit
-		for i, u := range units {
-			if u.New && plan.Units[i].Exists {
-				fmt.Fprintf(o.Out, "  übersprungen: %s liegt auf der Site, wurde von diesem Rechner aber nie gezogen (nicht im Pull-Profil).\n", u.Path)
-				continue
-			}
-			kept, keptPlans, keptReqs = append(kept, u), append(keptPlans, plan.Units[i]), append(keptReqs, req.Units[i])
-		}
-		units, plan.Units, req.Units = kept, keptPlans, keptReqs
-		if len(units) == 0 {
-			return ErrNothing
-		}
 	}
 	conflict, readonly, versionChange := printPlan(o.Out, units, plan)
 	if readonly {

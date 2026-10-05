@@ -309,6 +309,63 @@ func TestRunSkipsUnitsThatWereNeverPulled(t *testing.T) {
 	}
 }
 
+// U14: eine lokal neue Einheit geht nur mit ausdrücklicher Nennung auf die Site,
+// auch wenn es sie dort noch nicht gibt.
+func TestRunPushesNewUnitsOnlyWhenNamed(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/neu/neu.php", "<?php // new", 1800000000)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "übersprungen: plugins/neu") {
+		t.Errorf("no hint about the skipped new unit:\n%s", out)
+	}
+	for i, b := range f.begins {
+		if len(b.Units) != 1 || b.Units[0].Path != "plugins/x" {
+			t.Errorf("begin %d sent units %+v – a new unit must not even reach the dry run", i, b.Units)
+		}
+	}
+
+	f.begins, f.routes = nil, nil
+	o.Units = []string{"plugins/neu"}
+	out.Reset()
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := f.begins[1].Units; len(got) != 1 || got[0].Path != "plugins/neu" {
+		t.Errorf("pushed units = %+v", got)
+	}
+	if !strings.Contains(f.uploaded["neu.php"], "// new") {
+		t.Errorf("uploaded = %v", f.uploaded)
+	}
+}
+
+func TestRunWithOnlyNewUnitsSaysToNameThem(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	docroot := filepath.Join(siteDir, "public")
+	write(t, docroot, "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.0 */", 1700000000)
+	write(t, docroot, "plugins/neu/neu.php", "<?php // new", 1800000000)
+	write(t, docroot, "themes/neu/style.css", "/* Theme Name: Neu */", 1800000000)
+
+	err := Run(o)
+	if !errors.Is(err, ErrNothing) {
+		t.Fatalf("err = %v", err)
+	}
+	var skipped *SkippedNewError
+	if !errors.As(err, &skipped) || strings.Join(skipped.Units, " ") != "plugins/neu themes/neu" {
+		t.Fatalf("err = %#v – it must name the skipped new units", err)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("skipped new units must not cost a request: %v", f.routes)
+	}
+	if !strings.Contains(out.String(), "übersprungen: themes/neu") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
 func TestRunDryRunStopsAfterThePlan(t *testing.T) {
 	f := newFakeSite(t)
 	f.window = false

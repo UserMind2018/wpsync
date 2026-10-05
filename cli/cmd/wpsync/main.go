@@ -43,7 +43,8 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync trust <site>                  eigene Änderungen in .ddev ansehen und freigeben
                                        (ohne Terminal: --fingerprint <fp> aus der Anzeige)
   wpsync push <site> code [einheit…]   lokal geänderte Plugins/Themes/mu-plugins auf die Site bringen
-                                       (braucht ein offenes Push-Fenster; --dry-run, --force, --yes)
+                                       (braucht ein offenes Push-Fenster; --dry-run, --force, --yes;
+                                       lokal neue Einheiten nur, wenn sie genannt werden)
   wpsync pushes <site>                 Protokoll der Pushes (--confirm <id>: hängenden Push bestätigen)
   wpsync rollback <site> [push-id]     letzten bzw. einen bestimmten Push zurücknehmen
   wpsync version
@@ -481,12 +482,16 @@ func cmdRollback(args []string) error {
 func pushError(err error, site *sites.Site) error {
 	var pending *push.PendingError
 	var rolled *push.RolledBackError
+	var skipped *push.SkippedNewError
 	var apiErr *agentapi.APIError
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, push.ErrNoBaseline):
 		return fmt.Errorf("für %s gibt es noch keinen Pull – zuerst wpsync pull %s", site.Name, site.Name)
+	case errors.As(err, &skipped):
+		return fmt.Errorf("nichts gepusht – lokal neu sind nur %s; neue Einheiten gehen nur mit ausdrücklicher Nennung auf die Site: wpsync push %s code <einheit>",
+			strings.Join(skipped.Units, ", "), site.Name)
 	case errors.Is(err, push.ErrNothing):
 		return fmt.Errorf("nichts zu pushen – lokal ist nichts geändert seit dem letzten Pull von %s", site.Name)
 	case errors.Is(err, push.ErrWindowClosed):

@@ -271,6 +271,11 @@ cmp -s "$PLUGIN" "$SRC_PLUGIN" || fail "AC-57 --force did not push"
 echo "== AC-58: neue Einheit wird angelegt und bleibt inaktiv"
 mkdir -p public/wp-content/plugins/e2e-new
 printf '<?php\n/* Plugin Name: E2E New\n * Version: 1.0 */\n' > public/wp-content/plugins/e2e-new/e2e-new.php
+if "$WPSYNC" push "$TARGET" code --yes >"$E2E/push4-unnamed.log" 2>&1; then fail "U14 pushed a new unit that was not named"; fi
+cat "$E2E/push4-unnamed.log"
+grep -q "übersprungen: plugins/e2e-new" "$E2E/push4-unnamed.log" || fail "U14 no hint about the skipped new unit"
+grep -q "wpsync push $TARGET code plugins/e2e-new" "$E2E/push4-unnamed.log" || fail "U14 does not say how to push the new unit"
+if [ -e "$E2E/source/public/wp-content/plugins/e2e-new" ]; then fail "U14 unnamed new unit reached the source"; fi
 "$WPSYNC" push "$TARGET" code plugins/e2e-new --yes | tee "$E2E/push4.log"
 grep -q "neu, bleibt auf der Site inaktiv" "$E2E/push4.log" || fail "AC-58 no hint for the new unit"
 [ -f "$E2E/source/public/wp-content/plugins/e2e-new/e2e-new.php" ] || fail "AC-58 new unit missing on the source"
