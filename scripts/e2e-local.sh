@@ -77,6 +77,9 @@ ddev wp eval 'WpSync\Push::uninstall(); global $wpdb; $wpdb->query("DELETE FROM 
 rm -rf public/wp-content/plugins/e2e-new
 # Auch die lokale Kopie: der Pull entfernt lokale Extra-Verzeichnisse nicht, ein Push nähme sie als neue Einheit mit.
 rm -rf "$WPSYNC_SITES_DIR/$TARGET/public/wp-content/plugins/e2e-new"
+# Ein Lauf mit einem Agent vor 0.4.0 (z. B. von main) liefert den Push-Arbeitsordner einer früheren
+# 2a-Quelle mit aus; der Pull entfernt ihn lokal nie wieder, AC-71 prüft aber nur diesen Lauf.
+rm -rf "$WPSYNC_SITES_DIR/$TARGET/public/wp-content/"wpsync-push-*
 CODE="$(ddev wp wpsync pair-code | tail -1)"
 SOURCE_URL="$(http_url)"
 
