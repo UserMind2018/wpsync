@@ -39,6 +39,7 @@ func (f *fakeRunner) joined() string {
 func TestPostSetup(t *testing.T) {
 	r := &fakeRunner{}
 	env := agentapi.Env{
+		TablePrefix:   "wp_",
 		Home:          "https://www.kunde.de",
 		SiteURL:       "https://www.kunde.de",
 		ActivePlugins: []string{"wp-mail-smtp/wp_mail_smtp.php", "elementor/elementor.php", "password-protected/password-protected.php"},

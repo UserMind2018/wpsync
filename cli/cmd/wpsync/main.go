@@ -39,6 +39,8 @@ const usage = `wpsync – WordPress Live → Lokal
   wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen,
                                        --no-anonymize: personenbezogene Daten im Klartext)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
+  wpsync trust <site>                  eigene Änderungen in .ddev ansehen und freigeben
+                                       (ohne Terminal: --fingerprint <fp> aus der Anzeige)
   wpsync version
 `
 
@@ -67,6 +69,8 @@ func main() {
 		err = cmdPull(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "trust":
+		err = cmdTrust(os.Args[2:])
 	case "version":
 		fmt.Println("wpsync " + agentapi.Version)
 	default:
@@ -200,7 +204,7 @@ func localEnvs() ([]localenv.Env, error) {
 	if err != nil {
 		return nil, err
 	}
-	return localenv.List(&ddev.Exec{}, root, paired)
+	return localenv.List(&ddev.Exec{Dir: globalDir}, root, paired)
 }
 
 func cmdList() error {
@@ -241,8 +245,15 @@ func cmdStop(args []string) error {
 	if err != nil {
 		return err
 	}
-	n, err := localenv.Stop(&ddev.Exec{Stdout: os.Stdout, Stderr: os.Stderr}, envs, names, *all)
+	guard, err := newStopGuard()
 	if err != nil {
+		return err
+	}
+	n, err := localenv.Stop(&ddev.Exec{Dir: globalDir, Stdout: os.Stdout, Stderr: os.Stderr}, envs, names, *all, guard)
+	if err != nil {
+		if n > 0 {
+			fmt.Printf("%d Umgebung(en) gestoppt.\n", n)
+		}
 		return err
 	}
 	switch n {
@@ -334,11 +345,16 @@ func cmdPull(args []string) error {
 	if err != nil {
 		return fmt.Errorf("local-mailguard nicht verfügbar – ohne Mail-Schutz kein Pull: %w", err)
 	}
+	state, err := ddevStore(root)
+	if err != nil {
+		return err
+	}
 	opts := pull.Options{
 		Site:            *site,
 		Secret:          secret,
 		SitesRoot:       root,
 		MailguardSource: guard,
+		DDEVState:       state,
 		Full:            *full,
 		Yes:             *yes,
 		NoAnonymize:     *noAnon,

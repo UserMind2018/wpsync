@@ -3,6 +3,62 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unveröffentlicht]
+
+**Nur CLI, Agent unverändert.**
+
+### Sicherheit
+- Der DB-Import führte Client-Kommandos aus dem Dump der Site aus: Eine Zeile `\! …` lief als
+  Shell-Kommando im db-Container, `source` las Dateien, `LOAD DATA LOCAL` und `INTO OUTFILE`
+  griffen auf Dateien zu. Der Import läuft jetzt mit `--binary-mode --local-infile=0` und als
+  DDEV-Nutzer `db` statt `root`. Solche Zeilen brechen den Pull mit „Datenbank-Import
+  abgebrochen“ ab, statt ausgeführt zu werden. Bei MySQL-Sites erscheint pro Import die
+  Client-Warnung zum Passwort auf der Kommandozeile (DDEVs Standard-Passwort, unkritisch)
+- `pull` und `status` brechen ab, wenn die Site einen Tabellennamen mit unzulässigen Zeichen
+  liefert (erlaubt: Buchstaben, Ziffern, `_`, `$`, höchstens 64 Zeichen). Bisher wurde der Name
+  ungeprüft zum Dateinamen; eine manipulierte Site konnte so Dateien ausserhalb des
+  Projektordners schreiben. Zu tun ist nichts – erscheint die Meldung, nennt sie den Ausweg
+  über `tables.overrides`
+- `pull` und `status` brechen ab, wenn die Site einen Tabellenpräfix oder eine WordPress- bzw.
+  Website-Adresse in unerwarteter Form meldet. Diese Angaben gehen als Argumente an WP-CLI, das
+  einen Wert mit `--` am Anfang als eigene Option liest; eine manipulierte Site konnte so PHP-Code
+  im web-Container ausführen, bevor die Dateien geladen waren. Zu tun ist nichts, ausser die
+  Meldung erscheint – dann die Angaben auf der Site prüfen. Sites mit leerem Tabellenpräfix
+  bekommen jetzt eine klare Meldung statt einer lokal unbrauchbaren Kopie
+- **Code der Site konnte den Mac erreichen:** web- und db-Container konnten in `.ddev` schreiben,
+  etwa eine `config.*.yaml` mit `exec-host`-Hook, die DDEV beim nächsten Aufruf als dein Benutzer
+  auf dem Mac ausführte. Jetzt ist `.ddev` in beiden Containern schreibgeschützt (neue Datei
+  `.ddev/docker-compose.wpsync-hardening.yaml`; Snapshots funktionieren weiter), und `wpsync`
+  prüft vor jedem ddev-Aufruf die Dateien, die DDEV auf dem Mac auswertet, gegen den zuletzt
+  geprüften Stand. Bei einer Abweichung läuft kein ddev-Befehl. `wpsync list` ruft DDEV ohne
+  Hooks auf, `wpsync stop` hält eine abweichende Site ohne ddev an
+- **Code der Site konnte den Mac über das interne Git erreichen:** Das Schnappschuss-Repo lag als
+  `.git` im Site-Ordner, den der web-Container beschreiben kann. Ein dort angelegter Hook, ein
+  `core.fsmonitor`- oder Filter-Eintrag lief beim Auto-Commit am Ende desselben Pulls als dein
+  Benutzer auf dem Mac. Das Repo liegt jetzt unter `~/wpsync-sites/.wpsync-git/<site>.git`,
+  ausserhalb jedes Containers; `wpsync` ruft git nur noch mit ausdrücklichem Repo und Arbeitsbaum
+  und ohne deine globale git-Config auf. Ein `.git` im Site-Ordner wird nicht mehr benutzt, sondern
+  bei jedem Pull gemeldet. Ordner mit eigenem `.git` (z. B. ein Plugin als Git-Checkout) lässt der
+  Schnappschuss aus und meldet sie: Ab dem zweiten Pull hätte git darin sonst deren Config und Hooks
+  ausgeführt. Ein solches Repo ohne Commit lässt den Schnappschuss auch nicht mehr scheitern
+
+### Geändert
+- Das bisherige `.git` im Site-Ordner verschiebt der erste Pull nach dem Update unverändert nach
+  `~/wpsync-sites/.wpsync-git/<site>.alt-<datum>.git`, ohne darin git auszuführen. Die Historie
+  beginnt neu; `git log` im Site-Ordner zeigt nichts mehr (Historie: siehe README › Lokale Ablage)
+
+### Neu
+- `wpsync trust <site>`: Abweichungen in `.ddev` ansehen (Hooks, Host-Kommandos und Mounts
+  hervorgehoben) und freigeben; ohne Terminal nur mit `--fingerprint`, nie über `--yes`
+
+**Zu tun nach dem Update:** CLI aktualisieren. Der erste Pull jeder bestehenden Site stoppt
+deren Container ohne ddev, fragt einmal nach der Übernahme des heutigen `.ddev` (ohne Terminal:
+`wpsync trust <site>`) und startet DDEV neu. Eigene Anpassungen in `.ddev` (Add-ons,
+`config.local.yaml`, eigene Compose-Dateien) später jeweils einmal mit `wpsync trust` freigeben.
+Braucht das `docker`-CLI. Das verschobene alte Git-Repo (`.wpsync-git/<site>.alt-<datum>.git`)
+wird nicht mehr gebraucht und darf gelöscht werden – nicht mit git öffnen, die Site konnte es
+verändern.
+
 ## [0.1.8] – 2026-10-05 · Agent 0.3.1
 
 **Agent auf allen gekoppelten Sites aktualisieren.** Die CLI ist bis auf die Versionsnummer unverändert.

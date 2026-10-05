@@ -54,6 +54,10 @@ type PostSetupOptions struct {
 
 // PostSetup rewrites URLs, sets local constants and deactivates problematic or missing plugins.
 func PostSetup(r ddev.Runner, env agentapi.Env, localURL string, o PostSetupOptions, out io.Writer) error {
+	// Checked here as well as after /delta: home, siteurl and the prefix become `wp` arguments.
+	if err := env.CheckArgs(); err != nil {
+		return err
+	}
 	sources := []string{env.Home}
 	if env.SiteURL != "" && env.SiteURL != env.Home {
 		sources = append(sources, env.SiteURL)

@@ -125,10 +125,11 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync pair <url> <code> [--name n] [--device d] [--insecure]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). Nur über `https://`; `--insecure` erlaubt `http://` für lokale Testumgebungen. |
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
-| `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
+| `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
 | `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. |
 | `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`). `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
+| `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
 | `wpsync version` | Version der CLI. |
 
 ---
@@ -230,14 +231,20 @@ einmal) und legt sie lokal ab.
 ## Was beim Pull passiert
 
 1. **Infosheet** holen und mit dem Profil abgleichen.
-2. **Erstlauf:** DDEV-Projekt mit PHP- und DB-Version der Quelle, WordPress-Core in exakt der
-   Version der Site, `wp-config.php` von der Site, local-mailguard eingebunden.
-3. **Delta-Check** gegen die Baseline – seitenweise, nur für den Profil-Umfang.
-4. **Dateien:** nur neue und geänderte. Ein abgebrochener Download wird fortgesetzt.
-5. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
+2. **`.ddev` prüfen**, bevor irgendein ddev-Befehl läuft: Container, die `.ddev` noch beschreiben
+   können, werden ohne ddev per `docker` gestoppt; die Dateien, die DDEV auf dem Mac auswertet,
+   müssen dem geprüften Stand entsprechen, sonst Abbruch. Dieselbe Prüfung läuft vor jedem
+   weiteren ddev-Aufruf des Pulls. wpsync-eigene Compose-Dateien (Mailguard, Härtung) werden auf
+   den erwarteten Inhalt gebracht; dann startet DDEV neu.
+3. **Erstlauf:** DDEV-Projekt mit PHP- und DB-Version der Quelle, WordPress-Core in exakt der
+   Version der Site, `wp-config.php` von der Site, local-mailguard eingebunden, `.ddev` in den
+   Containern schreibgeschützt.
+4. **Delta-Check** gegen die Baseline – seitenweise, nur für den Profil-Umfang.
+5. **Dateien:** nur neue und geänderte. Ein abgebrochener Download wird fortgesetzt.
+6. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
    eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
    pseudonymisiert an.
-6. **Post-Setup:**
+7. **Post-Setup:**
    - Search-Replace der Live-URL (Klartext und JSON-escaped), danach ein zweiter Durchlauf
      mit geladenen Plugins für plugin-serialisierte Objekte (z. B. Borlabs Cookie)
    - `WP_ENVIRONMENT_TYPE=local`, `DISABLE_WP_CRON`
@@ -245,9 +252,9 @@ einmal) und legt sie lokal ab.
    - Drop-ins `advanced-cache.php` und `object-cache.php` entfernen
    - Uploads-Proxy einrichten
    - lokalen Admin `wpsync` anlegen bzw. dessen Passwort zurücksetzen
-7. **Mailguard-Pflichtprüfung:** Ist im Container kein aktiver `wp_mail`-Filter nachweisbar,
+8. **Mailguard-Pflichtprüfung:** Ist im Container kein aktiver `wp_mail`-Filter nachweisbar,
    bricht der Pull ab und das Projekt wird gestoppt.
-8. **Baseline** speichern und Git-Commit im Site-Ordner.
+9. **Baseline** speichern und Schnappschuss ins interne Git neben dem Site-Ordner.
 
 Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
 
@@ -259,6 +266,12 @@ Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
 - **Secret:** liegt lokal nur in der macOS-Keychain (`service=wpsync:<site>`), nie in einer Datei.
 - **Signatur:** jeder Request ist per HMAC signiert, mit Zeitstempel und Nonce gegen Replays.
   Nicht signierte Requests bekommen `401`.
+- **Antworten der Site:** Die Signatur schützt den Request, nicht die Antwort. Das CLI prüft
+  deshalb Tabellennamen, die die Site liefert (Buchstaben, Ziffern, `_`, `$`, höchstens
+  64 Zeichen), den Tabellenpräfix (Buchstaben, Ziffern, `_`) und die Adressen der Site
+  (`http(s)`-URL), und bricht `pull` und `status` bei anderen Werten ab, bevor lokal etwas
+  geschrieben wird. Präfix und Adressen gehen als Argumente an WP-CLI, das einen Wert mit `--`
+  am Anfang als eigene Option liest.
 - **Widerruf:** Werkzeuge → wpsync → Gerät widerrufen. Danach ist das Secret wertlos.
 - **Read-only:** Der Agent liest Dateien und Datenbank; er schreibt nur in eigene
   `wpsync_*`-Tabellen und -Optionen (Pairings, Infosheet, Schlüssel der Pseudonyme).
@@ -273,8 +286,34 @@ Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
   Plugins und Themes, Archive direkt unter `wp-content`, Dateien > 256 MB.
 - **Zugriffsschutz:** Nur wpsync-Routen passieren das Plugin „Password Protected" – ohne
   Signatur-Header ausschliesslich der Namespace-Index und `/pair`.
+- **Datenbank-Import:** Der Dump der Site wird nur als SQL importiert. Client-Kommandos
+  (`\!`, `source`, `tee` …) und `LOAD DATA LOCAL` sind abgeschaltet, und der Import läuft als
+  DDEV-Nutzer `db` ohne Dateirechte statt als `root`. Enthält der Dump solche Zeilen, bricht der
+  Import ab. Bei MySQL-Sites meldet der Client dabei jedes Mal „Using a password on the command
+  line interface can be insecure“ – das ist DDEVs öffentliches Standard-Passwort, kein Fehler.
 - **Keine Mails lokal:** Ohne aktiven local-mailguard läuft kein Pull. Grund: Ein Prod-Dump
   bringt oft SMTP-Plugins mit echten Zugangsdaten mit.
+- **Code der Site läuft lokal:** `wp-config.php`, Plugins, Themes und das SQL der Site laufen
+  auf deinem Mac – nur durch DDEV/Docker isoliert. Eine kompromittierte Site kann im Container
+  alles, was dort möglich ist. Damit sie von dort nicht auf den Mac kommt:
+  - `.ddev` ist im web- und im db-Container schreibgeschützt (eigene Compose-Datei
+    `docker-compose.wpsync-hardening.yaml`); beschreibbar bleibt nur `db_snapshots/`. Nach jedem
+    Start prüft `wpsync` die Mounts und bricht ab, wenn der Schutz nicht greift.
+  - Vor jedem ddev-Aufruf prüft `wpsync` die Dateien in `.ddev`, die DDEV auf dem Mac auswertet
+    (`config*.yaml`, `docker-compose.*.yaml`, `commands/`, `.env*`, `providers/`,
+    `share-providers/`), gegen den zuletzt geprüften Stand. Weicht etwas ab, läuft kein
+    ddev-Befehl. Eigene Anpassungen gibst du mit `wpsync trust <site>` frei.
+  - `wpsync list` ruft DDEV ohne Hooks auf; `wpsync stop` hält eine abweichende Site ohne ddev an.
+  - `wpsync` führt im Site-Ordner kein git aus. Das interne Repo liegt ausserhalb, in
+    `~/wpsync-sites/.wpsync-git/`, wo kein Container hinkommt; ein `.git` im Site-Ordner wird
+    nicht benutzt, sondern gemeldet.
+
+  Nicht abgedeckt: ddev-Befehle, die du selbst im Site-Ordner aufrufst (dort wirkt nur der
+  Schreibschutz), und Schwachstellen in Docker selbst. Einer Site, der du nicht traust, gibst du
+  keine eigenen `.ddev`-Anpassungen frei. Leg im Site-Ordner kein eigenes Git-Repo an und lass
+  git dort nicht ungeprüft laufen – auch nicht über Shell-Prompt oder IDE: Die Site kann jedes
+  `.git` darin (auch in Unterordnern) beschreiben, und git führt dessen Hooks und Config auf dem
+  Mac aus.
 
 ### Mail-Riegel
 
@@ -311,21 +350,37 @@ welche Datei genutzt wird.
 
 ```
 ~/.config/wpsync/sites/<site>.yaml   Site-Konfiguration und Profil (kein Secret)
+~/.config/wpsync/ddev-state/<site>.json
+                                     geprüfter Stand von .ddev (Prüfsummen, nur für dich lesbar)
 ~/wpsync-sites/<site>/
-├── .ddev/                           DDEV-Konfiguration inkl. Mailguard-Mount
+├── .ddev/                           DDEV-Konfiguration inkl. Mailguard-Mount und Härtung
+│                                    (in den Containern schreibgeschützt)
 ├── public/                          WordPress
 ├── .wpsync/
 │   ├── baseline.json                Stand des letzten Pulls
 │   └── db/pull.sql                  letzter Dump (wird beim nächsten Pull ersetzt)
-└── .git/                            internes Repo, Auto-Commit nach jedem Pull
+└── .gitignore                       Umfang des Schnappschusses (von wpsync geschrieben)
+~/wpsync-sites/.wpsync-git/
+├── <site>.git/                      internes Repo, Auto-Commit nach jedem Pull (nur für dich lesbar)
+└── <site>.alt-<datum>.git/          früheres .git aus dem Site-Ordner, beim Update verschoben
 ```
 
 Das interne Git versioniert `public/wp-content` ohne Uploads, Cache und Upgrade-Ordner, dazu
-die Baseline – keine DB-Dumps.
+die Baseline – keine DB-Dumps. Es liegt bewusst nicht im Site-Ordner (siehe
+[Sicherheit](#sicherheit)). Ordner mit einem eigenen `.git` (etwa ein Plugin, das jemand als
+Git-Checkout abgelegt hat) fehlen im Schnappschuss: git würde darin mit deren Config und Hooks
+arbeiten. Historie ansehen:
+
+```bash
+git --git-dir ~/wpsync-sites/.wpsync-git/<site>.git log --stat
+```
+
+Bis CLI 0.1.8 lag das Repo als `.git` im Site-Ordner. Der erste Pull nach dem Update verschiebt
+es unverändert nach `.wpsync-git/<site>.alt-<datum>.git`; die Historie beginnt neu.
 
 | Umgebungsvariable | Standard | Wofür |
 |---|---|---|
-| `WPSYNC_CONFIG_DIR` | `~/.config/wpsync` | Ablage der Site-Konfigurationen |
+| `WPSYNC_CONFIG_DIR` | `~/.config/wpsync` | Ablage der Site-Konfigurationen und des geprüften `.ddev`-Stands; darf nicht im Sites-Ordner liegen |
 | `WPSYNC_SITES_DIR` | `~/wpsync-sites` | Ablage der lokalen Projekte |
 | `WPSYNC_MAILGUARD` | – | eigener Mail-Riegel statt des mitgelieferten (siehe [Mail-Riegel](#mail-riegel)) |
 
@@ -342,6 +397,17 @@ die Baseline – keine DB-Dumps.
 | „Der Server antwortet nicht mehr – vermutlich eine IP-Sperre“ | fail2ban/WAF hat gesperrt. Genannte IP entsperren und whitelisten, `User-Agent: wpsync/*` freigeben, ggf. `rps` senken |
 | Infosheet veraltet / fehlt | WP-Cron ist auf der Site aus → `wpsync scan <site> --refresh` |
 | Pull bricht mit Mailguard-Fehler ab | `wpsync doctor` zeigt, welche Datei gesucht wird – meist zeigt `WPSYNC_MAILGUARD` ins Leere. Hat die Site eigene Mail-Wege außerhalb von `wp_mail`, greift der Riegel dort nicht |
+| „Datenbank-Import abgebrochen“ | Der lokale Client hat eine Zeile des Dumps abgelehnt – die Meldung darüber nennt sie. Ein Client-Kommando (`\!`, `source`) oder ein Dateizugriff im Dump deutet auf eine manipulierte Site hin; ein Rechtefehler auf eine Tabelle mit Optionen, die mehr als den Nutzer `db` brauchen. Die lokale Datenbank kann unvollständig sein. Der Fehler wiederholt sich bei jedem Pull, bis sich die Tabelle auf der Site ändert |
+| „die Site liefert Tabellennamen mit unzulässigen Zeichen“ | Ein Tabellenname enthält etwas anderes als Buchstaben, Ziffern, `_` oder `$`. Gehört die Tabelle zur Site: im Profil `tables.overrides: <name>: skip` setzen und erneut ziehen (die Tabelle fehlt dann lokal; ist sie neuer als der letzte Scan, vorher `wpsync scan <site> --refresh`). Auf einer sonst unauffälligen Site ist so ein Name ein Grund, auf dem Server nachzusehen |
+| „die Site meldet Angaben in unzulässiger Form“ | Die Site meldet einen unzulässigen Tabellenpräfix (anderes als Buchstaben, Ziffern, `_`, auch: leer) oder eine Adresse, die keine `http(s)`-URL ist – die Meldung nennt das Feld. Auf der Site `$table_prefix` in `wp-config.php` bzw. WordPress- und Website-Adresse unter Einstellungen → Allgemein prüfen. Ist dort alles unauffällig, ist das ein Grund, die Site zu untersuchen |
+| „.ddev von … weicht vom geprüften Stand ab“ | Eine Datei, die DDEV auf dem Mac auswertet, ist neu, geändert oder fehlt – die Meldung nennt sie. Es wurde kein ddev-Befehl ausgeführt. Stammt die Änderung von dir (eigene `config.local.yaml`, Add-on, Compose-Datei): `wpsync trust <site>` zeigt sie mit Hooks und Mounts an und gibt sie frei. Kennst du sie nicht, Datei ansehen und entfernen – die Site könnte manipuliert sein |
+| „noch kein geprüfter Stand für .ddev“ | Erster Pull einer bestehenden Site nach dem Update. Im Terminal fragt der Pull einmal nach der Übernahme, sonst `wpsync trust <site>`. Traust du der Site nicht: `wpsync stop <site>` (hält sie ohne ddev an), den Ordner `.ddev` der Site löschen und `wpsync pull <site> --full` – wpsync legt `.ddev` frisch an und lädt alles neu. Eigene Anpassungen in `.ddev` gehen dabei verloren |
+| „Vor dem ersten Pull … liegt schon ein .ddev mit Inhalt“ | Im Site-Ordner liegt ein `.ddev` ohne `config.yaml`. Ordner `.ddev` entfernen und erneut ziehen |
+| „ein DDEV-Container kann .ddev weiterhin beschreiben“ | Eine eigene `docker-compose.*.yaml` (z. B. von einem Add-on) mountet `.ddev` oder den Site-Ordner erneut beschreibbar. wpsync hat die Container gestoppt; Mount anpassen, dann `wpsync trust <site>` |
+| „… .git liegt im Site-Ordner – nicht von wpsync angelegt und nicht benutzt“ | Im Site-Ordner ist (wieder) ein `.git` aufgetaucht – von dir, einem Werkzeug oder der Site selbst. wpsync benutzt es nicht, der Pull läuft weiter. Kennst du es nicht, **nicht** mit git öffnen, sondern löschen: Es kann Hooks oder Config enthalten, die beim nächsten git-Aufruf auf dem Mac laufen |
+| „… hat ein eigenes .git – der Ordner fehlt im Schnappschuss“ | Ein Ordner unterhalb des Site-Ordners (meist ein Plugin oder Theme) enthält ein `.git`. wpsync lässt ihn im internen Git aus und führt darin nichts aus; der Pull läuft weiter, WordPress nutzt den Ordner normal. Stammt das `.git` nicht von dir, nicht mit git öffnen, sondern löschen – beim nächsten Pull ist der Ordner wieder im Schnappschuss |
+| „Bisheriges Site-Git verschoben nach …“ | Einmalig beim ersten Pull nach dem Update: Das alte Repo aus dem Site-Ordner liegt jetzt unter `.wpsync-git/<site>.alt-<datum>.git`. Es wird nicht mehr gebraucht und darf gelöscht werden; nicht mit git öffnen, die Site konnte es verändern |
+| „bisheriges Git-Repo … ließ sich nicht aus dem Site-Ordner verschieben“ | Meist liegt der Site-Ordner auf einem anderen Volume als `.wpsync-git` oder es fehlen Rechte. Es wurde kein git ausgeführt. `.git` im Site-Ordner von Hand löschen oder wegräumen und erneut ziehen |
 | Bilder fehlen lokal | Jahr liegt vor `uploads.since`; der Proxy lädt beim ersten Aufruf nach. Dauerhaft: `since` im Profil anpassen und erneut ziehen |
 
 ---
@@ -377,7 +443,7 @@ cli/
     ├── baseline/          Stand des letzten Pulls
     ├── ddev/              DDEV-Projekt, Uploads-Proxy
     ├── keychain/          macOS-Keychain
-    ├── localgit/          internes Site-Git
+    ├── localgit/          internes Site-Git (ausserhalb des Site-Ordners)
     ├── mailguard/         mitgelieferter Mail-Riegel (mu-plugin) und Auswahl
     ├── profile/           Presets, Profil-Auflösung, Scope
     ├── pull/              Delta, Dateien, DB, Post-Setup, Status

@@ -65,7 +65,7 @@ func TestListReportsDDEVError(t *testing.T) {
 func TestStopSelected(t *testing.T) {
 	envs := []Env{{Name: "a", Status: StatusRunning}, {Name: "b", Status: StatusPaused}, {Name: "c", Status: StatusStopped}}
 	d := &fakeDDEV{}
-	n, err := Stop(d, envs, []string{"a", "b", "c"}, false)
+	n, err := Stop(d, envs, []string{"a", "b", "c"}, false, nil)
 	if err != nil || n != 2 {
 		t.Fatalf("Stop = %d, %v", n, err)
 	}
@@ -77,7 +77,7 @@ func TestStopSelected(t *testing.T) {
 func TestStopAllOnlyRunning(t *testing.T) {
 	envs := []Env{{Name: "a", Status: StatusRunning}, {Name: "b", Status: StatusPaused}, {Name: "c", Status: StatusStopped}, {Name: "d", Status: StatusMissing}}
 	d := &fakeDDEV{}
-	n, err := Stop(d, envs, nil, true)
+	n, err := Stop(d, envs, nil, true, nil)
 	if err != nil || n != 1 {
 		t.Fatalf("Stop = %d, %v", n, err)
 	}
@@ -88,7 +88,7 @@ func TestStopAllOnlyRunning(t *testing.T) {
 
 func TestStopUnknownSiteFailsBeforeStopping(t *testing.T) {
 	d := &fakeDDEV{}
-	_, err := Stop(d, []Env{{Name: "a", Status: StatusRunning}}, []string{"a", "fremd"}, false)
+	_, err := Stop(d, []Env{{Name: "a", Status: StatusRunning}}, []string{"a", "fremd"}, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "fremd") || len(d.stopped) != 0 {
 		t.Fatalf("err = %v, calls = %v", err, d.stopped)
 	}

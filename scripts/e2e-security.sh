@@ -46,7 +46,8 @@ cleanup() {
   SQL "DROP VIEW IF EXISTS e2e_v;
        DROP TABLE IF EXISTS e2e_zweit_options, e2e_zweit_posts, e2e_zweit_postmeta, e2e_zweit_wpsync_pairings, e2e_x_wpsync_state;
        DELETE FROM e2e_wpsync_pairings WHERE device LIKE 'sec-%' OR device LIKE 'aaaa%';
-       DELETE FROM e2e_wpsync_state WHERE name IN ('pairing_code', 'pair_last');" >/dev/null 2>&1
+       DELETE FROM e2e_wpsync_state WHERE name IN ('pairing_code', 'pair_last');
+       DELETE FROM e2e_options WHERE option_name = 'e2e_sec102_bytes';" >/dev/null 2>&1
 }
 
 [ -f "$E2E/source/.ddev/config.yaml" ] || { echo "Quelle fehlt – zuerst scripts/e2e-local.sh ausführen"; exit 1; }
@@ -140,6 +141,350 @@ check SEC-09 "10 anonyme Requests, 0 CREATE TABLE" "$(($(ddl) - before))" 0
 
 echo "== SEC-13: Direktaufruf"
 check SEC-13 "src/WpProbe.php gibt nichts aus" "$(curl -s "$URL/wp-content/plugins/wpsync-agent/src/WpProbe.php" | grep -c 'wpsync-agent')" 0
+
+echo "== SEC-102: Dump wird nur als SQL importiert"
+# Präpariert die lokale Tabellendatei des Ziels aus e2e-local.sh (ersetzt eine bösartige Site;
+# der .done-Marker bleibt gültig, pull --full importiert die Datei ohne sie neu zu laden).
+export WPSYNC_CONFIG_DIR="$E2E/config"
+export WPSYNC_SITES_DIR="$E2E/sites"
+WPSYNC="$ROOT/cli/bin/wpsync"
+TARGET=wpsync-e2e-target
+T="$WPSYNC_SITES_DIR/$TARGET"
+TBL="$T/.wpsync/db/tables/e2e_options"
+SEC102_TMP=""
+tsql() { (cd "$T" && ddev mysql -N -e "$1"); }
+in_db() { (cd "$T" && ddev exec -s db sh -c "test -e '$1' && echo da || echo fehlt"); }
+baseline_hash() { shasum -a 256 "$T/.wpsync/baseline.json" 2>/dev/null | cut -d' ' -f1; }
+snap_count() { git --git-dir="$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git" rev-list --count HEAD 2>/dev/null; } # nie git im Site-Ordner (SEC-131)
+yn() { if "$@"; then echo ja; else echo nein; fi; }
+sec102_restore() { # präparierte Datei + .done löschen, Ziel per pull --full neu aufbauen
+  [ -n "$SEC102_TMP" ] || return 0
+  rm -rf "$SEC102_TMP"
+  SEC102_TMP=""
+  rm -f "$TBL.sql" "$TBL.done" "$T/.ddev/sec102-outfile"
+  tsql "DROP TABLE IF EXISTS sec102_load, sec102_sourced" >/dev/null 2>&1
+  (cd "$T" && ddev exec -s db sh -c 'rm -f /tmp/wpsync-sec102-*') >/dev/null 2>&1
+  "$WPSYNC" pull "$TARGET" --full --yes >"$E2E/sec102-restore.log" 2>&1 \
+    || echo "WARN SEC-102: Ziel nicht wiederhergestellt – scripts/e2e-local.sh erneut ausführen (Log: $E2E/sec102-restore.log)"
+}
+sec102_case() { # sec102_case <ac> <beschreibung> <angehängte zeilen>
+  local base git out rc
+  cp "$SEC102_TMP/orig.sql" "$TBL.sql"
+  printf '%s\n' "$3" >>"$TBL.sql"
+  tsql "DROP TABLE IF EXISTS sec102_load, sec102_sourced" >/dev/null 2>&1
+  base="$(baseline_hash)"
+  git="$(snap_count)"
+  out="$("$WPSYNC" pull "$TARGET" --full --yes 2>&1)"
+  rc=$?
+  check "$1" "$2: Pull scheitert" "$([ "$rc" -ne 0 ] && echo ja || echo nein)" ja
+  check AC-10 "$2: Meldung nennt den Datenbank-Import" "$(yn grep -q 'Datenbank-Import abgebrochen' <<<"$out")" ja
+  check AC-10 "$2: kein ✓ Fertig" "$(yn grep -q '✓ Fertig' <<<"$out")" nein
+  check AC-10 "$2: baseline.json unverändert" "$(baseline_hash)" "$base"
+  check AC-10 "$2: kein Schnappschuss-Commit" "$(snap_count)" "$git"
+}
+
+if [ ! -f "$TBL.sql" ] || [ ! -f "$TBL.done" ]; then
+  check SEC-102 "Ziel aus scripts/e2e-local.sh vorhanden" nein ja
+else
+  (cd "$ROOT/cli" && go build -o bin/wpsync ./cmd/wpsync) || exit 1
+  (cd "$T" && ddev start -y >/dev/null) || exit 1
+  # Vorlauf: .done-Marker passen danach zur aktuellen Prüfsumme (Agent-Neuinstallation ändert e2e_options)
+  "$WPSYNC" pull "$TARGET" --yes >"$E2E/sec102-pre.log" 2>&1
+  check SEC-102 "Vorlauf-Pull gelingt" "$(yn grep -q '✓ Fertig' "$E2E/sec102-pre.log")" ja
+  SEC102_TMP="$(mktemp -d)"
+  cp "$TBL.sql" "$SEC102_TMP/orig.sql"
+  trap 'cleanup; sec102_restore' EXIT
+  (cd "$T" && ddev exec -s db sh -c 'rm -f /tmp/wpsync-sec102-*') >/dev/null
+  rm -f "$T/.ddev/sec102-outfile"
+  for m in a b c data; do
+    check SEC-102 "Marker /tmp/wpsync-sec102-$m fehlt vorab" "$(in_db "/tmp/wpsync-sec102-$m")" fehlt
+  done
+
+  sec102_case AC-3 '\! am Zeilenanfang' '\! touch /tmp/wpsync-sec102-a'
+  check AC-3 "\\! führt nichts aus" "$(in_db /tmp/wpsync-sec102-a)" fehlt
+
+  sec102_case AC-4 '\! mitten in einer Anweisung' $'SELECT 1 \\! touch /tmp/wpsync-sec102-b\n;'
+  check AC-4 "\\! mitten in der Anweisung führt nichts aus" "$(in_db /tmp/wpsync-sec102-b)" fehlt
+
+  sec102_case AC-4 'system' 'system touch /tmp/wpsync-sec102-c'
+  check AC-4 "system führt nichts aus" "$(in_db /tmp/wpsync-sec102-c)" fehlt
+
+  (cd "$T" && ddev exec -s db sh -c "printf 'CREATE TABLE sec102_sourced(i int);\n' > /tmp/wpsync-sec102-src.sql") || exit 1
+  sourced() { tsql "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'db' AND table_name = 'sec102_sourced'"; }
+  sec102_case AC-5 'source' 'source /tmp/wpsync-sec102-src.sql'
+  check AC-5 "source liest keine Datei" "$(sourced)" 0
+  sec102_case AC-5 '\.' '\. /tmp/wpsync-sec102-src.sql'
+  check AC-5 "\\. liest keine Datei" "$(sourced)" 0
+
+  sec102_case AC-6 'LOAD DATA LOCAL INFILE' $'CREATE TABLE IF NOT EXISTS sec102_load (l TEXT);\nLOAD DATA LOCAL INFILE \'/etc/hostname\' INTO TABLE sec102_load;'
+  check AC-6 "LOAD DATA LOCAL liest nichts ein" "$(tsql 'SELECT COUNT(*) FROM sec102_load')" 0
+
+  sec102_case AC-7 'INTO OUTFILE' "SELECT 'x' INTO OUTFILE '/mnt/ddev_config/sec102-outfile';"
+  check AC-7 "INTO OUTFILE legt keine Datei in .ddev/ an" "$(yn test -e "$T/.ddev/sec102-outfile")" nein
+  sec102_case AC-7 'LOAD DATA INFILE' $'CREATE TABLE IF NOT EXISTS sec102_load (l TEXT);\nLOAD DATA INFILE \'/etc/hostname\' INTO TABLE sec102_load;'
+  check AC-7 "LOAD DATA INFILE liest nichts ein" "$(tsql 'SELECT COUNT(*) FROM sec102_load')" 0
+
+  echo "== SEC-102 AC-9: Byte-Treue eines ehrlichen Dumps"
+  # a NUL CRLF \ ' " 😀 LF, dazu Textzeilen, die als Client-Direktive gelesen würden
+  HEXVAL="$(printf '%s' "6100" "0D0A" "5C" "27" "22" "F09F9880" "0A" \
+    "$(printf '%s' '\! touch /tmp/wpsync-sec102-data' | xxd -p | tr -d '\n')" "0A" \
+    "$(printf '%s' 'source /etc/passwd' | xxd -p | tr -d '\n')" "0A" | tr a-f A-F)"
+  SQL "INSERT INTO e2e_options (option_name, option_value, autoload) VALUES ('e2e_sec102_bytes', UNHEX('$HEXVAL'), 'no')
+       ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)" || exit 1
+  check AC-9 "Fixture in der Quelle" "$(SQL "SELECT HEX(option_value) FROM e2e_options WHERE option_name = 'e2e_sec102_bytes'")" "$HEXVAL"
+  sec102_restore
+  check AC-9 "regulärer Pull gelingt" "$(yn grep -q '✓ Fertig' "$E2E/sec102-restore.log")" ja
+  check AC-9 "Wert kommt byte-gleich an" "$(tsql "SELECT HEX(option_value) FROM e2e_options WHERE option_name = 'e2e_sec102_bytes'")" "$HEXVAL"
+  check AC-9 "Textzeile im Wert führt nichts aus" "$(in_db /tmp/wpsync-sec102-data)" fehlt
+  tsql "DELETE FROM e2e_options WHERE option_name = 'e2e_sec102_bytes'" >/dev/null 2>&1
+fi
+
+echo "== SEC-101: .ddev ist aus den Containern nicht beschreibbar, Abweichungen stoppen wpsync"
+# Die Container können .ddev nach der Härtung nicht mehr schreiben – Hook-, Kommando- und
+# Markerdateien legt der Test deshalb vom Host aus an (wie bei einer vorher manipulierten Site).
+# Der Test ruft nie `wpsync trust` auf; der geprüfte Stand des Ziels bleibt also unverändert.
+WEB="ddev-$TARGET-web"
+DB="ddev-$TARGET-db"
+HELPER=sec101-ac5-helper
+SEC101_TMP=""
+in_web() { docker exec -u "$(id -u):$(id -g)" "$WEB" sh -c "$1" >/dev/null 2>&1; }
+in_web_root() { docker exec "$WEB" sh -c "$1" >/dev/null 2>&1; }
+in_db_root() { docker exec "$DB" sh -c "$1" >/dev/null 2>&1; }
+container_exists() { docker inspect "$1" >/dev/null 2>&1; }
+sec101_files() { # alles, was der Test in .ddev anlegt
+  docker rm -f "$HELPER" >/dev/null 2>&1
+  rm -f "$T/.ddev/config.audit.yaml" "$T/.ddev/commands/host/x" "$T/.ddev/commands/host/wp" \
+    "$T/.ddev/sec101-x" "$T/.ddev/sec101-root" "$T/.ddev/config.sec101loop.yaml"
+  rm -rf "$T/.ddev/db_snapshots/sec101-"*
+}
+sec101_restore() { # Dateien entfernen, falls ein Schreibversuch doch gelang: Stand wiederherstellen
+  [ -n "$SEC101_TMP" ] || return 0
+  [ -d "$T/.ddev2" ] && [ ! -e "$T/.ddev" ] && mv "$T/.ddev2" "$T/.ddev"
+  [ -f "$T/.ddev/config.yaml" ] || cp "$SEC101_TMP/config.yaml" "$T/.ddev/config.yaml"
+  cp "$SEC101_TMP/docker-compose.mailguard.yaml" "$T/.ddev/docker-compose.mailguard.yaml"
+  sec101_files
+  rm -f "$T/.ddev/db_snapshots/sec101-w"
+  tsql "DELETE FROM e2e_options WHERE option_name = 'e2e_sec101_snap'" >/dev/null 2>&1
+  rm -rf "$SEC101_TMP"
+  SEC101_TMP=""
+  # Abgebrochene Pulls und `wpsync stop` lassen das Ziel gestoppt zurück – ein regulärer Pull startet es.
+  "$WPSYNC" pull "$TARGET" --yes >"$E2E/sec101-restore.log" 2>&1 \
+    || echo "WARN SEC-101: Ziel nicht wiederhergestellt – scripts/e2e-local.sh erneut ausführen (Log: $E2E/sec101-restore.log)"
+}
+sec101_pull() { # sec101_pull <ac> <beschreibung> <datei in .ddev>
+  local out rc
+  out="$("$WPSYNC" pull "$TARGET" --yes </dev/null 2>&1)"
+  rc=$?
+  check "$1" "$2: Pull scheitert" "$([ "$rc" -ne 0 ] && echo ja || echo nein)" ja
+  check "$1" "$2: Meldung nennt $3" "$(yn grep -qF "$3" <<<"$out")" ja
+  check "$1" "$2: Meldung sagt, dass nichts ausgeführt wurde" "$(yn grep -q 'kein ddev-Befehl ausgeführt' <<<"$out")" ja
+  check "$1" "$2: kein ✓ Fertig" "$(yn grep -q '✓ Fertig' <<<"$out")" nein
+}
+hooks_to() { # Hook-Datei, deren Hooks bei jedem ddev-Aufruf eine Markerdatei auf dem Host anlegen
+  printf 'hooks:\n'
+  for h in pre-start post-start pre-exec post-exec pre-describe pre-stop pre-snapshot; do
+    printf '  %s:\n    - exec-host: touch "%s"\n' "$h" "$1"
+  done
+}
+
+if [ ! -f "$T/.ddev/config.yaml" ] || [ ! -f "$WPSYNC_CONFIG_DIR/ddev-state/$TARGET.json" ]; then
+  check SEC-101 "Ziel aus scripts/e2e-local.sh mit geprüftem .ddev-Stand vorhanden" nein ja
+else
+  (cd "$ROOT/cli" && go build -o bin/wpsync ./cmd/wpsync) || exit 1
+  "$WPSYNC" pull "$TARGET" --yes >"$E2E/sec101-pre.log" 2>&1
+  check SEC-101 "Vorlauf-Pull gelingt (Container gehärtet)" "$(yn grep -q '✓ Fertig' "$E2E/sec101-pre.log")" ja
+  check AC-4 "Härtungsdatei liegt in .ddev" "$(yn test -f "$T/.ddev/docker-compose.wpsync-hardening.yaml")" ja
+  # Sicherung erst nach dem Vorlauf: der darf wpsyncs eigene Dateien neu schreiben (AC-4).
+  SEC101_TMP="$(mktemp -d)"
+  MARK="$SEC101_TMP/marker"
+  cp "$T/.ddev/config.yaml" "$T/.ddev/docker-compose.mailguard.yaml" "$SEC101_TMP/"
+  trap 'cleanup; sec102_restore; sec101_restore' EXIT
+
+  echo "-- AC-1: web-Container"
+  check AC-1 "touch /var/www/html/.ddev/x scheitert" "$(yn in_web 'touch /var/www/html/.ddev/sec101-x')" nein
+  check AC-1 "touch /mnt/ddev_config/x scheitert" "$(yn in_web 'touch /mnt/ddev_config/sec101-x')" nein
+  check AC-1 "touch als root scheitert" "$(yn in_web_root 'touch /var/www/html/.ddev/sec101-root')" nein
+  check AC-1 "rm .ddev/config.yaml scheitert" "$(yn in_web 'rm -f /var/www/html/.ddev/config.yaml')" nein
+  check AC-1 "mv .ddev .ddev2 scheitert" "$(yn in_web 'mv /var/www/html/.ddev /var/www/html/.ddev2')" nein
+  check AC-1 "Hook-Datei schreiben scheitert" "$(yn in_web 'printf "hooks: {}\n" > /var/www/html/.ddev/config.audit.yaml')" nein
+  check AC-1 "remount rw scheitert" "$(yn in_web_root 'mount -o remount,rw /var/www/html/.ddev')" nein
+  check AC-1 "keine der Dateien ist auf dem Host angekommen" \
+    "$(ls "$T/.ddev/sec101-x" "$T/.ddev/sec101-root" "$T/.ddev/config.audit.yaml" "$T/.ddev2" 2>/dev/null | wc -l | tr -d ' ')" 0
+  check AC-1 "config.yaml unverändert" "$(yn cmp -s "$T/.ddev/config.yaml" "$SEC101_TMP/config.yaml")" ja
+  check AC-1 "Rest von /var/www/html bleibt schreibbar" "$(yn in_web 'touch /var/www/html/.wpsync/sec101-w && rm /var/www/html/.wpsync/sec101-w')" ja
+  check AC-3 "Mailguard-Datei bleibt ro" "$(yn in_web_root 'touch /var/www/html/public/wp-content/mu-plugins/00-local-mailguard.php')" nein
+  T_URL="$(cd "$T" && ddev describe -j | python3 -c 'import json,sys; print(json.load(sys.stdin)["raw"]["httpurl"])')"
+  check AC-1 "Site antwortet mit 200" "$(code "$T_URL/")" 200
+
+  echo "-- AC-2: db-Container"
+  check AC-2 "touch /mnt/ddev_config/x scheitert" "$(yn in_db_root 'touch /mnt/ddev_config/sec101-x')" nein
+  check AC-2 "config.x.yaml anlegen scheitert" "$(yn in_db_root 'printf "hooks: {}\n" > /mnt/ddev_config/config.audit.yaml')" nein
+  check AC-2 "mv /mnt/ddev_config/db_snapshots scheitert" "$(yn in_db_root 'mv /mnt/ddev_config/db_snapshots /mnt/ddev_config/sec101-moved')" nein
+  check AC-2 "/mnt/snapshots bleibt schreibbar" "$(yn in_db_root 'touch /mnt/snapshots/sec101-w && rm /mnt/snapshots/sec101-w')" ja
+  check AC-2 "/mnt/ddev_config/db_snapshots bleibt schreibbar (D3)" "$(yn in_db_root 'touch /mnt/ddev_config/db_snapshots/sec101-w && rm /mnt/ddev_config/db_snapshots/sec101-w')" ja
+  check AC-2 "nichts davon auf dem Host" "$(ls "$T/.ddev/sec101-x" "$T/.ddev/config.audit.yaml" "$T/.ddev/sec101-moved" 2>/dev/null | wc -l | tr -d ' ')" 0
+  # ddev snapshot meldet einen Schreibfehler mit Exit 0 – Erfolg zählt nur über die Datei auf dem Host.
+  tsql "INSERT INTO e2e_options (option_name, option_value, autoload) VALUES ('e2e_sec101_snap', 'vorher', 'no')
+        ON DUPLICATE KEY UPDATE option_value = 'vorher'" >/dev/null || exit 1
+  (cd "$T" && ddev snapshot --name sec101-snap >/dev/null 2>&1)
+  check AC-2 "ddev snapshot legt die Datei auf dem Host ab" "$(ls "$T/.ddev/db_snapshots/" 2>/dev/null | grep -c '^sec101-snap')" 1
+  tsql "UPDATE e2e_options SET option_value = 'nachher' WHERE option_name = 'e2e_sec101_snap'" >/dev/null
+  (cd "$T" && ddev snapshot restore sec101-snap >/dev/null 2>&1)
+  check AC-2 "ddev snapshot restore stellt den Wert wieder her" \
+    "$(tsql "SELECT option_value FROM e2e_options WHERE option_name = 'e2e_sec101_snap'")" vorher
+  check AC-2 "nach dem Restore bleibt /mnt/ddev_config ro" "$(yn in_db_root 'touch /mnt/ddev_config/sec101-x')" nein
+  tsql "DELETE FROM e2e_options WHERE option_name = 'e2e_sec101_snap'" >/dev/null 2>&1
+  rm -rf "$T/.ddev/db_snapshots/sec101-"*
+
+  echo "-- AC-5: Container mit beschreibbarem .ddev wird ohne ddev gestoppt"
+  # Ein Hilfscontainer im Compose-Projekt ddev-<target> (wie ein Add-on-Service, ohne
+  # com.ddev.approot → checkOwner lässt ihn durch) mountet .ddev rw und schreibt in einer Schleife
+  # eine Hook-Datei. Erwartet: wpsync stoppt und entfernt alle Projekt-Container per docker, bevor
+  # ddev läuft; die Datei liegt dann schon in .ddev, die Prüfung bricht mit ihr als Abweichung ab.
+  hooks_to "$MARK" >"$SEC101_TMP/loop.yaml"
+  docker run -d --init --name "$HELPER" -u "$(id -u):$(id -g)" \
+    --label "com.docker.compose.project=ddev-$TARGET" --label com.docker.compose.service=sec101-helper \
+    -v "$T/.ddev:/ddev" -v "$SEC101_TMP/loop.yaml:/src/loop.yaml:ro" \
+    --entrypoint sh "$(docker inspect -f '{{.Config.Image}}' "$WEB")" \
+    -c 'while :; do cp /src/loop.yaml /ddev/config.sec101loop.yaml; sleep 0.2; done' >/dev/null || exit 1
+  for _ in $(seq 50); do [ -f "$T/.ddev/config.sec101loop.yaml" ] && break; sleep 0.2; done
+  check AC-5 "Hilfscontainer schreibt in .ddev (Voraussetzung)" "$(yn test -f "$T/.ddev/config.sec101loop.yaml")" ja
+  out="$("$WPSYNC" pull "$TARGET" --yes </dev/null 2>&1)"
+  rc=$?
+  check AC-5 "Pull bricht ab" "$([ "$rc" -ne 0 ] && echo ja || echo nein)" ja
+  check AC-5 "Meldung: Container ohne ddev gestoppt" "$(yn grep -q 'ohne ddev gestoppt' <<<"$out")" ja
+  check AC-5 "Meldung nennt config.sec101loop.yaml" "$(yn grep -qF config.sec101loop.yaml <<<"$out")" ja
+  check AC-5 "Hilfscontainer entfernt (docker rm)" "$(yn container_exists "$HELPER")" nein
+  check AC-5 "web-Container entfernt" "$(yn container_exists "$WEB")" nein
+  check AC-5 "kein Marker vom Host-Hook" "$(yn test -e "$MARK")" nein
+  check AC-5 "Hook-Datei nicht im geprüften Stand" \
+    "$(yn grep -q sec101loop "$WPSYNC_CONFIG_DIR/ddev-state/$TARGET.json")" nein
+  rm -f "$T/.ddev/config.sec101loop.yaml"
+  sleep 1
+  check AC-5 "Schleife schreibt nicht mehr" "$(yn test -e "$T/.ddev/config.sec101loop.yaml")" nein
+
+  echo "-- AC-10: PoC wird nicht mehr ausgeführt"
+  hooks_to "$MARK" >"$T/.ddev/config.audit.yaml"
+  sec101_pull AC-10 "config.audit.yaml mit exec-host" config.audit.yaml
+  check AC-10 "config.audit.yaml: kein Marker auf dem Host" "$(yn test -e "$MARK")" nein
+  rm -f "$T/.ddev/config.audit.yaml"
+
+  mkdir -p "$T/.ddev/commands/host"
+  # x wie im Finding; wp überdeckt `ddev wp` und liefe auf dem Host, sobald wpsync ddev wp aufruft.
+  for cmd in x wp; do
+    printf '#!/bin/sh\n## Description: sec101\ntouch "%s"\n' "$MARK" >"$T/.ddev/commands/host/$cmd"
+    chmod +x "$T/.ddev/commands/host/$cmd"
+    sec101_pull AC-10 "commands/host/$cmd" "commands/host/$cmd"
+    check AC-10 "commands/host/$cmd: kein Marker auf dem Host" "$(yn test -e "$MARK")" nein
+    rm -f "$T/.ddev/commands/host/$cmd"
+  done
+
+  # Geänderte wpsync-eigene Datei: macht .ddev im web-Container wieder beschreibbar.
+  printf '      - ".:/var/www/html/.ddev"\n' >>"$T/.ddev/docker-compose.mailguard.yaml"
+  sec101_pull AC-10 "geänderte docker-compose.mailguard.yaml" docker-compose.mailguard.yaml
+  check AC-10 "Mailguard-Compose: Datei nicht still repariert" \
+    "$(yn cmp -s "$T/.ddev/docker-compose.mailguard.yaml" "$SEC101_TMP/docker-compose.mailguard.yaml")" nein
+  cp "$SEC101_TMP/docker-compose.mailguard.yaml" "$T/.ddev/docker-compose.mailguard.yaml"
+
+  # wpsync stop prüft nur laufende Sites – nach AC-5 und den abgebrochenen Pulls ist das Ziel aus.
+  "$WPSYNC" pull "$TARGET" --yes >"$E2E/sec101-stop-pre.log" 2>&1
+  check AC-10 "wpsync stop: Ziel läuft vor dem Test" "$(yn grep -q '✓ Fertig' "$E2E/sec101-stop-pre.log")" ja
+  hooks_to "$MARK" >"$T/.ddev/config.audit.yaml"
+  out="$("$WPSYNC" stop "$TARGET" </dev/null 2>&1)"
+  rc=$?
+  check AC-10 "wpsync stop: endet ≠ 0" "$([ "$rc" -ne 0 ] && echo ja || echo nein)" ja
+  check AC-10 "wpsync stop: Meldung nennt config.audit.yaml" "$(yn grep -qF config.audit.yaml <<<"$out")" ja
+  check AC-10 "wpsync stop: kein Marker auf dem Host (pre-stop lief nicht)" "$(yn test -e "$MARK")" nein
+  rm -f "$T/.ddev/config.audit.yaml"
+
+  sec101_restore
+  check AC-9 "Pull nach dem Aufräumen gelingt ohne Fehlalarm (auch nach snapshot restore)" \
+    "$(yn grep -q '✓ Fertig' "$E2E/sec101-restore.log")" ja
+fi
+
+echo "== SEC-131: .git im Site-Ordner führt beim Schnappschuss nichts auf dem Host aus"
+# Code im web-Container legt ein Repo mit pre-commit-Hook und core.fsmonitor an; beide Nutzlasten
+# zeigen auf Host-Pfade, weil git sie auf dem Host ausführen würde. Der Test ruft nie git im Site-Ordner auf.
+SEC131_MARK="$E2E/sec131.marker"
+SEC131_ARMED=""
+SEC131_EMBED="$T/public/wp-content/plugins/sec131embed"
+sec131_restore() { # vom Container angelegte Repos und Marker entfernen
+  [ -n "$SEC131_ARMED" ] || return 0
+  SEC131_ARMED=""
+  rm -rf "$T/.git" "$SEC131_EMBED" "$SEC131_MARK"
+}
+sec131_plant_embed() { # eingebettetes Repo mit Commit; git im Container ist der Angreifer-Schritt
+  docker exec -u "$(id -u):$(id -g)" -e M="$SEC131_MARK" -e F="$SEC131_EMBED/.git/fsm" "$WEB" sh -c '
+    d=/var/www/html/public/wp-content/plugins/sec131embed
+    mkdir -p "$d" && cd "$d" && printf "sec131\n" > readme.txt &&
+    git init -q -b main && git add readme.txt &&
+    git -c user.name=x -c user.email=x@sec131.example commit -q -m embed &&
+    git config core.fsmonitor "$F" &&
+    printf "#!/bin/sh\necho embed-fsm >> \"%s\"\n" "$M" > .git/fsm &&
+    printf "#!/bin/sh\necho embed-hook >> \"%s\"\n" "$M" > .git/hooks/post-index-change &&
+    chmod +x .git/fsm .git/hooks/post-index-change' >/dev/null 2>&1
+}
+sec131_plant() { # minimales Repo, damit auch ein git mit Repo-Suche es als Repo erkennt
+  docker exec -u "$(id -u):$(id -g)" -e M="$SEC131_MARK" -e F="$T/.git/fsm" "$WEB" sh -c '
+    g=/var/www/html/.git
+    mkdir -p "$g/hooks" "$g/objects" "$g/refs/heads" &&
+    printf "ref: refs/heads/main\n" > "$g/HEAD" &&
+    printf "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = %s\n" "$F" > "$g/config" &&
+    printf "#!/bin/sh\necho hook >> \"%s\"\n" "$M" > "$g/hooks/pre-commit" &&
+    printf "#!/bin/sh\necho fsm >> \"%s\"\n" "$M" > "$g/fsm" &&
+    chmod +x "$g/hooks/pre-commit" "$g/fsm"' >/dev/null 2>&1
+}
+
+if [ ! -f "$T/.ddev/config.yaml" ] || [ ! -f "$WPSYNC_CONFIG_DIR/ddev-state/$TARGET.json" ]; then
+  check SEC-131 "Ziel aus scripts/e2e-local.sh mit geprüftem .ddev-Stand vorhanden" nein ja
+elif [ -e "$T/.git" ] && [ ! -e "$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git" ]; then
+  # Bestands-.git, das noch nicht verschoben wurde – nicht anfassen, das erledigt der nächste e2e-local-Lauf.
+  check SEC-131 "Ziel ohne unverschobenes Bestands-.git (scripts/e2e-local.sh ausführen)" nein ja
+else
+  (cd "$ROOT/cli" && go build -o bin/wpsync ./cmd/wpsync) || exit 1
+  "$WPSYNC" pull "$TARGET" --yes </dev/null >"$E2E/sec131-pre.log" 2>&1
+  check SEC-131 "Vorlauf-Pull gelingt" "$(yn grep -q '✓ Fertig' "$E2E/sec131-pre.log")" ja
+  check AC-1 "Schnappschuss-Repo liegt neben dem Site-Ordner" "$(yn test -d "$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git")" ja
+  check AC-1 "kein .git im Site-Ordner" "$(yn test -e "$T/.git")" nein
+  SEC131_ARMED=1
+  trap 'cleanup; sec102_restore; sec101_restore; sec131_restore' EXIT
+  rm -f "$SEC131_MARK"
+
+  echo "-- AC-5: Hook und fsmonitor aus dem web-Container"
+  sec131_plant
+  check AC-5 "Container schreibt .git/hooks/pre-commit (ausführbar)" "$(yn test -x "$T/.git/hooks/pre-commit")" ja
+  check AC-5 "Container schreibt core.fsmonitor in .git/config" "$(yn grep -q fsmonitor "$T/.git/config")" ja
+  before="$(snap_count)"
+  out="$("$WPSYNC" pull "$TARGET" --yes </dev/null 2>&1)"
+  rc=$?
+  check AC-5 "Pull endet mit 0" "$rc" 0
+  check AC-5 "✓ Fertig" "$(yn grep -q '✓ Fertig' <<<"$out")" ja
+  check AC-5 "kein Marker auf dem Host" "$(yn test -e "$SEC131_MARK")" nein
+  check AC-5 "Schnappschuss-Commit im externen Repo" "$(snap_count)" "$((before + 1))"
+  check AC-7 "Warnung nennt .git im Site-Ordner" "$(yn grep -qF "$T/.git" <<<"$out")" ja
+  check AC-7 "Warnung: nicht von wpsync angelegt" "$(yn grep -q 'nicht von wpsync angelegt' <<<"$out")" ja
+  sec131_restore
+
+  echo "-- eingebettetes Repo unter plugins/ (greift erst ab dem zweiten Pull)"
+  SEC131_ARMED=1
+  sec131_plant_embed
+  check SEC-131 "Container legt plugins/sec131embed mit Commit an" "$(yn test -f "$SEC131_EMBED/.git/HEAD" -a -d "$SEC131_EMBED/.git/objects")" ja
+  check SEC-131 "post-index-change und fsmonitor ausführbar" \
+    "$(yn test -x "$SEC131_EMBED/.git/hooks/post-index-change" -a -x "$SEC131_EMBED/.git/fsm")" ja
+  for i in 1 2; do
+    printf 'v%s\n' "$i" >>"$SEC131_EMBED/readme.txt"
+    out="$("$WPSYNC" pull "$TARGET" --yes </dev/null 2>&1)"
+    rc=$?
+    check SEC-131 "eingebettet, Pull $i endet mit 0" "$rc" 0
+    check SEC-131 "eingebettet, Pull $i: Ordner liegt noch da (Fall greift)" "$(yn test -d "$SEC131_EMBED/.git")" ja
+    check SEC-131 "eingebettet, Pull $i: Warnung „hat ein eigenes .git“" \
+      "$(yn grep -qF 'plugins/sec131embed hat ein eigenes .git' <<<"$out")" ja
+    check SEC-131 "eingebettet, Pull $i: kein Marker auf dem Host" "$(yn test -e "$SEC131_MARK")" nein
+    check SEC-131 "eingebettet, Pull $i: nicht im Schnappschuss" \
+      "$(git --git-dir="$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git" ls-files | grep -c 'plugins/sec131embed')" 0
+  done
+  sec131_restore
+fi
 
 if [ "$FAILED" = 0 ]; then
   echo "SECURITY E2E OK"

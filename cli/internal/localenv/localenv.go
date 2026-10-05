@@ -4,11 +4,13 @@ package localenv
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/usermind/wpsync/internal/ddev"
 	"github.com/usermind/wpsync/internal/sites"
 )
 
@@ -43,7 +45,9 @@ type ddevProject struct {
 
 // List merges the DDEV projects below sitesRoot with the paired sites, sorted by name.
 func List(d DDEV, sitesRoot string, paired []sites.Site) ([]Env, error) {
-	out, err := d.Output("list", "-j")
+	// ddev list runs the pre-describe hooks of every running project – without --skip-hooks a
+	// hook a site wrote into its .ddev would run on the Mac (no project check covers this call).
+	out, err := d.Output("list", "-j", "--skip-hooks")
 	if err != nil {
 		return nil, fmt.Errorf("list ddev projects: %w", err)
 	}
@@ -82,9 +86,18 @@ func inside(root, path string) bool {
 	return err == nil && rel != "." && !strings.HasPrefix(rel, "..")
 }
 
+// Guard checks a site's .ddev before ddev may stop it. `ddev stop` runs the project's pre-stop
+// hooks on the Mac; a site that fails the check is halted through docker instead (Halt).
+type Guard interface {
+	Check(name string) error
+	Halt(name string) error
+}
+
 // Stop stops the named environments (running or paused), or with all=true every running one.
-// Unknown names fail before anything is stopped. Returns how many were stopped.
-func Stop(d DDEV, envs []Env, names []string, all bool) (int, error) {
+// Unknown names fail before anything is stopped. With a guard, sites whose .ddev is not trusted
+// are halted without ddev; a deviating one is reported as an error after the others were stopped.
+// Returns how many were stopped.
+func Stop(d DDEV, envs []Env, names []string, all bool, g Guard) (int, error) {
 	known := map[string]Env{}
 	for _, e := range envs {
 		known[e.Name] = e
@@ -110,10 +123,36 @@ func Stop(d DDEV, envs []Env, names []string, all bool) (int, error) {
 	if len(targets) == 0 {
 		return 0, nil
 	}
-	if err := d.Run(append([]string{"stop"}, targets...)...); err != nil {
-		return 0, err
+	checked, halted := targets, 0
+	var failed []string
+	if g != nil {
+		checked = nil
+		for _, n := range targets {
+			err := g.Check(n)
+			if err == nil {
+				checked = append(checked, n)
+				continue
+			}
+			if haltErr := g.Halt(n); haltErr != nil {
+				failed = append(failed, fmt.Sprintf("%v\n%s nicht gestoppt: %v", err, n, haltErr))
+				continue
+			}
+			halted++
+			if !errors.Is(err, ddev.ErrNotAdopted) {
+				failed = append(failed, fmt.Sprintf("%v\n%s wurde ohne ddev angehalten (docker stop).", err, n))
+			}
+		}
 	}
-	return len(targets), nil
+	if len(checked) > 0 {
+		if err := d.Run(append([]string{"stop"}, checked...)...); err != nil {
+			return halted, err
+		}
+	}
+	stopped := halted + len(checked)
+	if len(failed) > 0 {
+		return stopped, errors.New(strings.Join(failed, "\n\n"))
+	}
+	return stopped, nil
 }
 
 func active(status string) bool { return status != StatusStopped && status != StatusMissing }
