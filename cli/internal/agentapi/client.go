@@ -174,10 +174,12 @@ func (c *Client) wrapBody(resp *http.Response, route string) (*http.Response, er
 	return resp, nil
 }
 
+// readAPIError reads a non-200 answer. Code and message come from the site; they are cleaned here,
+// once for every caller, so no error output can steer the terminal (M3).
 func readAPIError(resp *http.Response) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return &APIError{Status: resp.StatusCode, Code: "redirect", Message: resp.Header.Get("Location")}
+		return &APIError{Status: resp.StatusCode, Code: "redirect", Message: CleanText(resp.Header.Get("Location"))}
 	}
 	var body io.Reader = resp.Body
 	if resp.Header.Get("Content-Encoding") == "gzip" {
@@ -191,9 +193,9 @@ func readAPIError(resp *http.Response) error {
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
-		return &APIError{Status: resp.StatusCode, Code: wpErr.Code, Message: wpErr.Message}
+		return &APIError{Status: resp.StatusCode, Code: CleanText(wpErr.Code), Message: CleanText(wpErr.Message)}
 	}
-	return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(data))}
+	return &APIError{Status: resp.StatusCode, Message: CleanText(strings.TrimSpace(string(data)))}
 }
 
 func isConnectionFailure(err error) bool {

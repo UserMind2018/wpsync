@@ -51,6 +51,8 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - `push` bricht ab, wenn `public`, `wp-content`, `plugins`/`themes`/`mu-plugins` oder eine Einheit
   ein Symlink ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan,
   bricht der Push vor dem Tausch ab.
+- Fehlermeldungen des Agenten (Code, Text, Weiterleitungsziel) erreichen das Terminal ohne
+  Steuer- und Bidi-Zeichen; Umlaute bleiben lesbar. Gilt zentral für alle Befehle.
 
 ## [Unveröffentlicht]
 

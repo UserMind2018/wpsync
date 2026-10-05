@@ -121,6 +121,39 @@ func TestAPIErrorFromWordPressJSON(t *testing.T) {
 	}
 }
 
+// M3: the agent's message reaches the terminal without control characters, umlauts stay.
+func TestAPIErrorMessageIsCleaned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"code":"wpsync_push_\u001b[31m","message":"Zurückrollen nicht möglich \u001b]52;c;ZWNobyBoaQ==\u0007 \u202e"}`))
+	}))
+	defer srv.Close()
+	c, _ := newTestClient(srv.URL)
+	_, err := c.Ping()
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v", err)
+	}
+	if apiErr.Message != "Zurückrollen nicht möglich \ufffd]52;c;ZWNobyBoaQ==\ufffd \ufffd" || apiErr.Code != "wpsync_push_\ufffd[31m" {
+		t.Errorf("message = %q, code = %q", apiErr.Message, apiErr.Code)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07\u202e") {
+		t.Errorf("Error() = %q", err.Error())
+	}
+
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Fatal error \x1b[2J\xc2\x9b"))
+	}))
+	defer plain.Close()
+	c, _ = newTestClient(plain.URL)
+	c.Sleep = func(time.Duration) {}
+	_, err = c.Ping()
+	if !errors.As(err, &apiErr) || strings.ContainsAny(apiErr.Message, "\x1b\u009b") {
+		t.Errorf("err = %q", err)
+	}
+}
+
 func TestRedirectIsNotFollowed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://www.example.invalid/", http.StatusMovedPermanently)
