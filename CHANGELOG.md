@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unveröffentlicht] · Agent 0.3.0
+## [0.1.7] – 2026-10-05 · Agent 0.3.0
 
 **Agent und CLI gemeinsam aktualisieren.** Der neue Agent pseudonymisiert auch für ein älteres
 CLI – dort gibt es dann keinen lokalen Admin, und kein übernommenes Konto ist anmeldbar.
