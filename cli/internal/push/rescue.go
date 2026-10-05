@@ -58,7 +58,10 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", agentapi.UserAgent())
-	resp, err := hc.Do(req)
+	// The key travels in the body; a 307/308 would resend it to any host. Never follow.
+	noRedirect := *hc
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := noRedirect.Do(req)
 	if err != nil {
 		return nil, err
 	}

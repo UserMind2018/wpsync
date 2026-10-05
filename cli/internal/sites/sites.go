@@ -22,6 +22,8 @@ type Site struct {
 	KeyID   string           `yaml:"key_id"`
 	RPS     float64          `yaml:"rps"`
 	Profile *profile.Profile `yaml:"profile,omitempty"`
+	// HealthURLs are checked before and after a push, in addition to the pages the agent names.
+	HealthURLs []string `yaml:"health_urls,omitempty"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)

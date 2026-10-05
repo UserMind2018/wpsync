@@ -172,3 +172,32 @@ func TestRescueAllowed(t *testing.T) {
 		}
 	}
 }
+
+// Der Schlüssel steht im POST-Body. Ein 307/308 schickte ihn sonst unverändert an jedes Ziel,
+// auch an einen fremden Host – RescueAllowed prüft nur die erste URL.
+func TestRescueDoesNotFollowRedirects(t *testing.T) {
+	leaked := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = true
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer elsewhere.Close()
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/rescue.php", http.StatusTemporaryRedirect)
+	}))
+	defer site.Close()
+
+	hc := site.Client()
+	if err := RescueRollback(hc, site.URL+"/rescue.php", "p_20261005_0123456789ab", "key"); err == nil {
+		t.Error("a redirect must not count as a rollback")
+	}
+	if err := RescuePing(hc, site.URL+"/rescue.php"); err == nil {
+		t.Error("a redirect must not count as a reachable rescue.php")
+	}
+	if leaked {
+		t.Error("the rescue request followed the redirect")
+	}
+	if hc.CheckRedirect != nil {
+		t.Error("the caller's client must stay unchanged")
+	}
+}
