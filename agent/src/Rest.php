@@ -104,12 +104,16 @@ final class Rest
             return new \WP_Error('wpsync_unpaired', 'unknown or revoked pairing', ['status' => 401]);
         }
 
-        $nonce = (string) $request->get_header('x-wpsync-nonce');
+        $nonce     = (string) $request->get_header('x-wpsync-nonce');
+        $timestamp = Signature::timestamp((string) $request->get_header('x-wpsync-timestamp'));
+        if ($timestamp === null) {
+            return new \WP_Error('wpsync_auth', 'invalid timestamp', ['status' => 401]);
+        }
         $error = Signature::check(
             $secret,
             $request->get_method(),
             $request->get_route(),
-            (int) $request->get_header('x-wpsync-timestamp'),
+            $timestamp,
             $nonce,
             $request->get_body(),
             (string) $request->get_header('x-wpsync-signature'),

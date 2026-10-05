@@ -36,6 +36,10 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
   Ordner `wp-content/wpsync-push-<zufall>/`. Alles davon bleibt bei Pull und Scan auf dem Server.
 - Das Plugin-ZIP enthält zusätzlich `rescue.php`.
 
+### Sicherheit
+- Der Header `X-Wpsync-Timestamp` muss aus 1–10 Ziffern bestehen; Werte wie `<ts>abc`,
+  ` <ts>` oder `+<ts>` lehnt der Agent mit 401 ab (SEC-129).
+
 ## [Unveröffentlicht]
 
 **Nur CLI, Agent unverändert.**

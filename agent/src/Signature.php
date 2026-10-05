@@ -16,6 +16,12 @@ final class Signature
         return implode("\n", [$method, $route, (string) $timestamp, $nonce, hash('sha256', $body)]);
     }
 
+    /** Header X-Wpsync-Timestamp: nur Ziffern, höchstens 10 (SEC-129). */
+    public static function timestamp(string $header): ?int
+    {
+        return preg_match('/^\d{1,10}\z/', $header) ? (int) $header : null;
+    }
+
     public static function sign(string $secret, string $payload): string
     {
         return hash_hmac('sha256', $payload, $secret);
