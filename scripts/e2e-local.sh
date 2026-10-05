@@ -72,6 +72,11 @@ cp "$ROOT/agent/dist/wpsync-agent.zip" public/wpsync-agent.zip
 ddev wp plugin install /var/www/html/public/wpsync-agent.zip --force --activate
 rm public/wpsync-agent.zip
 ddev wp eval 'WpSync\Store::setState("infosheet", null); WpSync\Store::setState("infosheet_job", null);'
+# 2a: Reste früherer Läufe – offene Pushes würden jeden neuen blockieren, e2e-new wäre nicht mehr neu.
+ddev wp eval 'WpSync\Push::uninstall(); global $wpdb; $wpdb->query("DELETE FROM " . WpSync\Store::table("pushes")); WpSync\Store::setState("push_lock", null);'
+rm -rf public/wp-content/plugins/e2e-new
+# Auch die lokale Kopie: der Pull entfernt lokale Extra-Verzeichnisse nicht, ein Push nähme sie als neue Einheit mit.
+rm -rf "$WPSYNC_SITES_DIR/$TARGET/public/wp-content/plugins/e2e-new"
 CODE="$(ddev wp wpsync pair-code | tail -1)"
 SOURCE_URL="$(http_url)"
 
@@ -211,5 +216,86 @@ again="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID
 [ "$again" = "$ERIKA_PSEUDO" ] || fail "AC-33 pseudonym changed from '$ERIKA_PSEUDO' to '$again'"
 if grep -rqi "kunde-echt" .wpsync/db; then fail "AC-38 plain dump still on disk after the anonymized pull"; fi
 ddev wp user check-password wpsync wpsync || fail "AC-34 local admin lost after re-anonymizing"
+
+echo "== 2a: Push Code"
+KEY_ID="$(awk '/^key_id:/ { print $2 }' "$WPSYNC_CONFIG_DIR/sites/$TARGET.yaml")"
+src() { (cd "$E2E/source" && "$@"); }
+window() { src ddev wp eval "WpSync\\Store::setPushUntil('$KEY_ID', $1);" >/dev/null; }
+PLUGIN=public/wp-content/plugins/e2e-objects/e2e-objects.php
+SRC_PLUGIN="$E2E/source/$PLUGIN"
+home_status() { curl -s -o /dev/null -w '%{http_code}' "$SOURCE_URL/"; }
+HOME_BEFORE="$(home_status)"
+
+echo "== AC-50: ohne Push-Fenster kein Push"
+printf '\n// push %s\n' "$(date +%s)" >> "$PLUGIN"
+window 0
+if "$WPSYNC" push "$TARGET" code --yes >"$E2E/push0.log" 2>&1; then fail "AC-50 pushed without a window"; fi
+grep -q "Push-Fenster ist geschlossen" "$E2E/push0.log" || fail "AC-50 no hint about the window"
+if grep -q "// push" "$SRC_PLUGIN"; then fail "AC-50 source changed without a window"; fi
+"$WPSYNC" push "$TARGET" code --dry-run | tee "$E2E/push-dry.log"
+grep -q "plugins/e2e-objects – 1 von 1 Dateien" "$E2E/push-dry.log" || fail "dry run does not show the plan"
+
+echo "== AC-54: Push bringt genau den lokalen Stand auf die Site"
+window "time() + 900"
+"$WPSYNC" push "$TARGET" code --yes | tee "$E2E/push1.log"
+cmp -s "$PLUGIN" "$SRC_PLUGIN" || fail "AC-54 file differs after the push"
+requests="$(grep -o '– [0-9]* Requests' "$E2E/push1.log" | grep -o '[0-9]*')"
+[ "$requests" -le 5 ] || fail "push used $requests signed requests"
+PUSH_ID="$(grep -o 'p_[0-9]\{8\}_[a-f0-9]\{12\}' "$E2E/push1.log" | head -1)"
+[ "$(home_status)" = "$HOME_BEFORE" ] || fail "source answers differently after the push"
+[ "$("${SNAP[@]}" log --oneline | grep -c "push $PUSH_ID")" = "1" ] || fail "push not recorded in the internal git"
+
+echo "== AC-56: Folge-Pull überträgt die gepushten Dateien nicht"
+"$WPSYNC" pull "$TARGET" --yes | tee "$E2E/pull5.log"
+grep -q "Dateien: 0 neu/geändert" "$E2E/pull5.log" || fail "AC-56 pull transferred files after the push"
+
+echo "== AC-71: Arbeitsordner und Protokoll verlassen den Server nicht"
+if find public/wp-content -maxdepth 1 -name 'wpsync-push-*' | grep -q .; then fail "AC-71 push work dir was pulled"; fi
+[ "$(ddev mysql -N -e "SHOW TABLES LIKE '%wpsync%'" | wc -l | tr -d ' ')" = "0" ] || fail "AC-71 wpsync tables were pulled"
+
+echo "== AC-55: rollback stellt den alten Stand her"
+"$WPSYNC" rollback "$TARGET" | tee "$E2E/rollback1.log"
+if grep -q "// push" "$SRC_PLUGIN"; then fail "AC-55 source still has the pushed state"; fi
+grep -q "// push" "$PLUGIN" || fail "AC-55 rollback touched the local file"
+"$WPSYNC" pushes "$TARGET" | tee "$E2E/pushes1.log"
+grep -q "$PUSH_ID.*zurückgerollt" "$E2E/pushes1.log" || fail "AC-70 rollback missing in the push log"
+
+echo "== AC-57: Konflikt bricht ab, --force überschreibt"
+printf '\n// server\n' >> "$SRC_PLUGIN"
+if "$WPSYNC" push "$TARGET" code --yes >"$E2E/push2.log" 2>&1; then fail "AC-57 pushed over a server change"; fi
+grep -q "e2e-objects.php" "$E2E/push2.log" || fail "AC-57 conflicting file not named"
+grep -q "// server" "$SRC_PLUGIN" || fail "AC-57 server change lost without --force"
+"$WPSYNC" push "$TARGET" code --yes --force | tee "$E2E/push3.log"
+cmp -s "$PLUGIN" "$SRC_PLUGIN" || fail "AC-57 --force did not push"
+
+echo "== AC-58: neue Einheit wird angelegt und bleibt inaktiv"
+mkdir -p public/wp-content/plugins/e2e-new
+printf '<?php\n/* Plugin Name: E2E New\n * Version: 1.0 */\n' > public/wp-content/plugins/e2e-new/e2e-new.php
+"$WPSYNC" push "$TARGET" code plugins/e2e-new --yes | tee "$E2E/push4.log"
+grep -q "neu, bleibt auf der Site inaktiv" "$E2E/push4.log" || fail "AC-58 no hint for the new unit"
+[ -f "$E2E/source/public/wp-content/plugins/e2e-new/e2e-new.php" ] || fail "AC-58 new unit missing on the source"
+if src ddev wp plugin is-active e2e-new 2>/dev/null; then fail "AC-58 new plugin is active"; fi
+
+echo "== AC-62: Versionswechsel braucht eine eigene Bestätigung"
+printf '<?php\n/* Plugin Name: E2E New\n * Version: 1.1 */\n' > public/wp-content/plugins/e2e-new/e2e-new.php
+if "$WPSYNC" push "$TARGET" code plugins/e2e-new --yes >"$E2E/push5.log" 2>&1; then fail "AC-62 version change with --yes alone"; fi
+grep -q "1.0 → 1.1" "$E2E/push5.log" || fail "AC-62 version change not shown"
+"$WPSYNC" push "$TARGET" code plugins/e2e-new --yes --allow-version-change >/dev/null
+
+echo "== AC-63/AC-64: Syntaxfehler in aktivem Plugin wird automatisch zurückgerollt"
+cp -p "$PLUGIN" "$E2E/e2e-objects.good"
+printf '\nthis is not php(\n' >> "$PLUGIN"
+if "$WPSYNC" push "$TARGET" code plugins/e2e-objects --yes >"$E2E/push6.log" 2>&1; then fail "AC-63 broken push was confirmed"; fi
+cat "$E2E/push6.log"
+grep -q "zurückgerollt" "$E2E/push6.log" || fail "AC-63 no rollback reported"
+if grep -q "this is not php" "$SRC_PLUGIN"; then fail "AC-63 broken code is still live"; fi
+[ "$(home_status)" = "$HOME_BEFORE" ] || fail "AC-63 source is broken after the rollback (HTTP $(home_status))"
+"$WPSYNC" pushes "$TARGET" | tee "$E2E/pushes2.log"
+[ "$(grep -c "zurückgerollt" "$E2E/pushes2.log")" = "2" ] || fail "AC-63 push log does not show the automatic rollback"
+cp -p "$E2E/e2e-objects.good" "$PLUGIN"
+if "$WPSYNC" push "$TARGET" code plugins/e2e-objects --dry-run >"$E2E/push7.log" 2>&1; then fail "local copy should be unchanged again"; fi
+grep -q "nichts zu pushen" "$E2E/push7.log" || fail "restored file still counts as changed"
+
+window 0
 
 echo "E2E OK"
