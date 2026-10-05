@@ -22,12 +22,13 @@ import (
 	"github.com/usermind/wpsync/internal/mailguard"
 	"github.com/usermind/wpsync/internal/profile"
 	"github.com/usermind/wpsync/internal/pull"
+	"github.com/usermind/wpsync/internal/push"
 	"github.com/usermind/wpsync/internal/scan"
 	"github.com/usermind/wpsync/internal/setup"
 	"github.com/usermind/wpsync/internal/sites"
 )
 
-const usage = `wpsync – WordPress Live → Lokal
+const usage = `wpsync – WordPress Live ↔ Lokal
 
   wpsync setup                         einmalig pro Mac (fragt einmal nach dem Passwort)
   wpsync doctor                        Umgebung prüfen
@@ -41,6 +42,10 @@ const usage = `wpsync – WordPress Live → Lokal
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
   wpsync trust <site>                  eigene Änderungen in .ddev ansehen und freigeben
                                        (ohne Terminal: --fingerprint <fp> aus der Anzeige)
+  wpsync push <site> code [einheit…]   lokal geänderte Plugins/Themes/mu-plugins auf die Site bringen
+                                       (braucht ein offenes Push-Fenster; --dry-run, --force, --yes)
+  wpsync pushes <site>                 Protokoll der Pushes (--confirm <id>: hängenden Push bestätigen)
+  wpsync rollback <site> [push-id]     letzten bzw. einen bestimmten Push zurücknehmen
   wpsync version
 `
 
@@ -71,6 +76,12 @@ func main() {
 		err = cmdStatus(os.Args[2:])
 	case "trust":
 		err = cmdTrust(os.Args[2:])
+	case "push":
+		err = cmdPush(os.Args[2:])
+	case "pushes":
+		err = cmdPushes(os.Args[2:])
+	case "rollback":
+		err = cmdRollback(os.Args[2:])
 	case "version":
 		fmt.Println("wpsync " + agentapi.Version)
 	default:
@@ -386,6 +397,123 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	return pullError(pull.Status(pull.Options{Site: *site, Secret: secret, SitesRoot: root, Out: os.Stdout}), site)
+}
+
+// pushOptions loads the site and builds the options shared by push, pushes and rollback.
+func pushOptions(name string) (push.Options, *sites.Site, error) {
+	site, secret, err := loadSite(name)
+	if err != nil {
+		return push.Options{}, nil, err
+	}
+	root, err := sites.SitesRoot()
+	if err != nil {
+		return push.Options{}, nil, err
+	}
+	opts := push.Options{Site: *site, Secret: secret, SitesRoot: root, Out: os.Stdout}
+	if isTerminal() {
+		opts.Confirm = confirm
+	}
+	return opts, site, nil
+}
+
+func cmdPush(args []string) error {
+	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
+	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
+	allowVersion := fs.Bool("allow-version-change", false, "mit --yes: geänderte Plugin-/Theme-Version akzeptieren")
+	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was gepusht würde")
+	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) < 2 || positional[1] != "code" {
+		return errors.New("Aufruf: wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--dry-run] [--force] [--yes]")
+	}
+	opts, site, err := pushOptions(positional[0])
+	if err != nil {
+		return err
+	}
+	if *rps > 0 {
+		opts.Site.RPS = *rps
+	}
+	opts.Units = positional[2:]
+	opts.Force, opts.Yes, opts.AllowVersionChange, opts.DryRun = *force, *yes, *allowVersion, *dryRun
+	return pushError(push.Run(opts), site)
+}
+
+func cmdPushes(args []string) error {
+	fs := flag.NewFlagSet("pushes", flag.ContinueOnError)
+	confirmID := fs.String("confirm", "", "einen getauschten, aber nicht bestätigten Push als in Ordnung markieren")
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("Aufruf: wpsync pushes <site> [--confirm <push-id>]")
+	}
+	opts, site, err := pushOptions(positional[0])
+	if err != nil {
+		return err
+	}
+	if *confirmID != "" {
+		return pushError(push.ConfirmPending(opts, *confirmID), site)
+	}
+	return pushError(push.Pushes(opts), site)
+}
+
+func cmdRollback(args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return errors.New("Aufruf: wpsync rollback <site> [push-id]")
+	}
+	opts, site, err := pushOptions(args[0])
+	if err != nil {
+		return err
+	}
+	id := ""
+	if len(args) == 2 {
+		id = args[1]
+	}
+	return pushError(push.Rollback(opts, id), site)
+}
+
+// pushError turns push errors into the next step.
+func pushError(err error, site *sites.Site) error {
+	var pending *push.PendingError
+	var rolled *push.RolledBackError
+	var apiErr *agentapi.APIError
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, push.ErrNoBaseline):
+		return fmt.Errorf("für %s gibt es noch keinen Pull – zuerst wpsync pull %s", site.Name, site.Name)
+	case errors.Is(err, push.ErrNothing):
+		return fmt.Errorf("nichts zu pushen – lokal ist nichts geändert seit dem letzten Pull von %s", site.Name)
+	case errors.Is(err, push.ErrWindowClosed):
+		return fmt.Errorf("das Push-Fenster ist geschlossen – öffnen unter %s/wp-admin/tools.php?page=wpsync", site.URL)
+	case errors.Is(err, push.ErrConflict):
+		return fmt.Errorf("die Site hat sich seit dem letzten Pull geändert – zuerst wpsync pull %s, lokal zusammenführen und erneut pushen (bewusst überschreiben: --force)", site.Name)
+	case errors.Is(err, push.ErrNotWritable):
+		return errors.New("der Webserver darf das Verzeichnis nicht ersetzen – Besitzer und Rechte von wp-content/plugins bzw. themes auf dem Server prüfen")
+	case errors.Is(err, push.ErrAgentTooOld):
+		return fmt.Errorf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent)
+	case errors.Is(err, push.ErrVersionChange):
+		return errors.New("die Versionsnummer ändert sich (mögliche Datenbank-Migration) – im Terminal bestätigen oder --yes --allow-version-change angeben")
+	case errors.Is(err, push.ErrRescueUnreachable):
+		return fmt.Errorf("%w – ohne Rückweg wird nicht gepusht. Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe unter wp-content/plugins/?", err)
+	case errors.As(err, &pending):
+		return fmt.Errorf("%w.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, pending.PushID, site.Name, pending.PushID)
+	case errors.As(err, &rolled):
+		if len(rolled.StillWorse) > 0 {
+			return fmt.Errorf("%w.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; "))
+		}
+		return fmt.Errorf("%w.\n  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", err)
+	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
+		return fmt.Errorf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent)
+	case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_push_"):
+		return errors.New(apiErr.Message)
+	}
+	return explain(err, site)
 }
 
 // pullError adds the next step to profile-related errors.
