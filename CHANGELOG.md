@@ -3,6 +3,16 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.1.8] – 2026-10-05 · Agent 0.3.1
+
+**Agent auf allen gekoppelten Sites aktualisieren.** Die CLI ist bis auf die Versionsnummer unverändert.
+
+### Behoben
+- **Anonymisierung:** Bei klassischer Bestell-Speicherung (ohne HPOS) blieb der User-Agent aus
+  der WooCommerce-Bestellzuordnung (`_wc_order_attribution_user_agent`) in `postmeta` im
+  Klartext. Die Regel galt nur für `wc_orders_meta`. Die Regelversion steigt auf 2, dadurch
+  laden alle Sites die Tabellen mit Regel beim nächsten Pull einmal neu.
+
 ## [0.1.7] – 2026-10-05 · Agent 0.3.0
 
 **Agent und CLI gemeinsam aktualisieren.** Der neue Agent pseudonymisiert auch für ein älteres
