@@ -51,4 +51,11 @@ final class TableListTest extends TestCase
     {
         $this->assertSame(['a', 'b'], TableList::filter($this->base(['a', 'b']), ''));
     }
+
+    /** AC-71 */
+    public function testDropsThePushLog(): void
+    {
+        $rows = $this->base(['wp_options', 'wp_wpsync_pushes', 'wp_wpsync_pushes_archive']);
+        $this->assertSame(['wp_options', 'wp_wpsync_pushes_archive'], TableList::filter($rows, 'wp_'));
+    }
 }

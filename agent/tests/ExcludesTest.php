@@ -84,4 +84,12 @@ final class ExcludesTest extends TestCase
         $this->assertSame('backup', Excludes::path('site.tar.gz', 10));
         $this->assertNull(Excludes::path('uploads/2026/archive.zip', 10), 'archives below the top level are content');
     }
+
+    /** AC-71: der Arbeitsordner eines Pushs verlässt den Server nie. */
+    public function testPushWorkDirIsExcludedAtTop(): void
+    {
+        $this->assertTrue(Excludes::dir('wpsync-push-0123456789abcdef', true));
+        $this->assertFalse(Excludes::dir('wpsync-push-0123456789abcdef', false), 'only directly below wp-content');
+        $this->assertSame('excluded_dir', Excludes::path('wpsync-push-0123456789abcdef/p_20261005_0123456789ab/old/0/main.php', 10));
+    }
 }

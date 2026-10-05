@@ -11,7 +11,7 @@ defined('ABSPATH') || exit;
  */
 final class TableList
 {
-    private const OWN = '/wpsync_(pairings|nonces|state)\z/';
+    private const OWN = '/wpsync_(pairings|nonces|state|pushes)\z/';
 
     /**
      * @param list<array{0: string, 1: string}> $rows Zeilen aus SHOW FULL TABLES: Name, Typ
