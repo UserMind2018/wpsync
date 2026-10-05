@@ -487,6 +487,9 @@ health_urls:
   - https://kunde.de/mein-konto/
 ```
 
+Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per `http` zeigen
+(etwa eine Statusseite); vom Agenten gelieferte Seiten ruft `push` nur auf der gekoppelten Site ab.
+
 ---
 
 ## Fehlerbehebung
