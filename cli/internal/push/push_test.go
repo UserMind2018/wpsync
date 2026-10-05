@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/localgit"
 	"github.com/usermind/wpsync/internal/sites"
 )
 
@@ -607,5 +609,27 @@ func TestDefaultsUseAShortClientForHealthAndRescue(t *testing.T) {
 	}
 	if o.ChunkBytes != 3<<20 {
 		t.Errorf("ChunkBytes = %d, want 3 MiB (U13)", o.ChunkBytes)
+	}
+}
+
+// The default commit uses the snapshot repo next to the site folder and never a .git inside it (SEC-131).
+func TestDefaultCommitUsesSnapshotRepoOutsideTheSite(t *testing.T) {
+	root := t.TempDir()
+	siteDir := filepath.Join(root, "kunde")
+	if err := os.MkdirAll(filepath.Join(siteDir, "public", "wp-content", "plugins", "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(siteDir, "public", "wp-content", "plugins", "a", "a.php"), []byte("<?php\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{SitesRoot: root, Site: sites.Site{Name: "kunde", URL: "https://kunde.example"}, Out: &bytes.Buffer{}}.defaults()
+	if err := o.Commit(siteDir, "push "+testID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(siteDir, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site folder got a .git: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localgit.GitDir(root, "kunde"), "HEAD")); err != nil {
+		t.Fatalf("snapshot repo missing: %v", err)
 	}
 }
