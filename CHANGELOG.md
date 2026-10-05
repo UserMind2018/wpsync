@@ -3,6 +3,39 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unveröffentlicht] · Agent 0.4.0
+
+**Agent und CLI gemeinsam aktualisieren.** `wpsync push` braucht Agent 0.4.0. Pull, Scan und
+Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
+
+### Neu
+- **Code pushen:** `wpsync push <site> code` bringt lokal geänderte Plugins, Themes und
+  mu-plugins als ganze Verzeichnisse auf die Site. Hochgeladen werden nur geänderte Dateien,
+  getauscht wird per `rename`, das alte Verzeichnis bleibt als Snapshot.
+- **Lokal neue Verzeichnisse** (vom letzten Pull nicht geliefert) gehen nur mit, wenn sie
+  ausdrücklich genannt sind (`wpsync push <site> code plugins/<slug>`); ohne Nennung meldet die
+  CLI sie als übersprungen. Liegt ein gleichnamiges Verzeichnis schon auf der Site, ist das ein
+  Konflikt.
+- **Push-Fenster:** Schreiben geht nur, solange ein Administrator im WP-Admin für das Gerät ein
+  Fenster geöffnet hat (15 Minuten, 1 Stunde oder 8 Stunden).
+- **Health-Check und automatischer Rollback:** Die CLI ruft Startseite, Login und bei
+  WooCommerce Shop, Warenkorb und Kasse vor und nach dem Tausch auf und rollt zurück, wenn eine
+  Seite schlechter wird. Weitere Seiten: `health_urls` in der Site-Konfiguration.
+- **`rescue.php`:** Rollback ohne WordPress, falls der gepushte Code die Site lahmlegt.
+- **`wpsync rollback <site> [push-id]`** und **`wpsync pushes <site>`**; Snapshots der letzten
+  3 bestätigten Pushes bleiben bis zu 14 Tage.
+- **Konflikterkennung:** Hat sich eine Einheit auf der Site seit dem letzten Pull geändert,
+  bricht der Push ab (`--force` überschreibt bewusst).
+- **Admin-Seite:** Push-Fenster pro Gerät, Protokoll der Pushes, Zurückrollen.
+
+### Geändert
+- Der Agent ist nicht mehr rein lesend: im Push-Fenster schreibt er Code-Verzeichnisse unter
+  `wp-content/plugins`, `themes` und `mu-plugins`. Datenbank und Uploads schreibt er weiterhin nie.
+- `/ping` und `/delta` liefern `health_urls`.
+- Neue eigene Tabelle `wpsync_pushes`, neue Spalte `push_until` in `wpsync_pairings`, neuer
+  Ordner `wp-content/wpsync-push-<zufall>/`. Alles davon bleibt bei Pull und Scan auf dem Server.
+- Das Plugin-ZIP enthält zusätzlich `rescue.php`.
+
 ## [Unveröffentlicht]
 
 **Nur CLI, Agent unverändert.**
