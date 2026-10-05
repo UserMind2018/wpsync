@@ -334,6 +334,15 @@ final class Push
                     return new \WP_REST_Response(['next' => ['u' => $u, 'i' => $next], 'stamps' => new \stdClass()]);
                 }
             }
+            // Der Cursor kommt vom Client: vor dem Tausch muss jede Manifest-Datei wirklich liegen.
+            foreach ($plan['units'] as $n => $unit) {
+                foreach ($unit['files'] as $rel => $want) {
+                    $built = $base . '/new/' . $n . '/' . $rel;
+                    if (!is_file($built) || (int) filesize($built) !== (int) $want['size']) {
+                        throw new \RuntimeException('not built: ' . $unit['path'] . '/' . $rel);
+                    }
+                }
+            }
         } catch (\RuntimeException $e) {
             self::discard($pushId, self::FAILED);
             return self::error('wpsync_push_build', 'Push abgebrochen, nichts getauscht: ' . $e->getMessage(), 409);
