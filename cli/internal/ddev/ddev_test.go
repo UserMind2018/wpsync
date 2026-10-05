@@ -37,20 +37,19 @@ func TestClaimWPConfigRemovesMarkerOnce(t *testing.T) {
 	}
 }
 
-func TestWriteMailguardMount(t *testing.T) {
-	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".ddev"), 0o755)
+func TestOwnFilesMailguardMount(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "00-local-mailguard.php")
 	os.WriteFile(src, []byte("<?php"), 0o644)
 
-	if err := WriteMailguardMount(dir, src); err != nil {
+	files, err := OwnFiles(src)
+	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(filepath.Join(dir, ".ddev", "docker-compose.mailguard.yaml"))
-	if !strings.Contains(string(data), src+":/var/www/html/public/wp-content/mu-plugins/00-local-mailguard.php:ro") {
+	data := files[MailguardComposeFile]
+	if !strings.Contains(data, src+":/var/www/html/public/wp-content/mu-plugins/00-local-mailguard.php:ro") {
 		t.Fatalf("compose = %s", data)
 	}
-	if err := WriteMailguardMount(dir, "/does/not/exist.php"); err == nil {
+	if _, err := OwnFiles("/does/not/exist.php"); err == nil {
 		t.Fatal("missing mailguard source must be an error")
 	}
 }

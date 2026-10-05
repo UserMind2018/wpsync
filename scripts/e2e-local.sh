@@ -13,6 +13,14 @@ YEAR="$(date +%Y)"
 
 http_url() { ddev describe -j | python3 -c 'import json,sys; print(json.load(sys.stdin)["raw"]["httpurl"])'; }
 fail() { echo "FAIL: $*"; exit 1; }
+# Gibt .ddev des Ziels frei – ohne Terminal nur über den Fingerprint des angezeigten Stands.
+trust_ddev() {
+  local fp
+  # Ohne Terminal endet trust absichtlich mit Exit 1 und nennt nur den Fingerprint.
+  fp="$({ "$WPSYNC" trust "$TARGET" </dev/null 2>&1 || true; } | sed -n 's/^Fingerprint: //p')"
+  [ -n "$fp" ] || fail "SEC-101 wpsync trust zeigt keinen Fingerprint"
+  "$WPSYNC" trust "$TARGET" --fingerprint "$fp" </dev/null >/dev/null
+}
 
 (cd "$ROOT/agent" && ./build.sh)
 (cd "$ROOT/cli" && go build -o bin/wpsync ./cmd/wpsync)
@@ -96,7 +104,20 @@ echo "== Erst-Pull"
 # Laufzeit dieses Skripts kann hier über den AC-16-Proxy bereits 2019er-Dateien zwischengespeichert
 # haben. Ohne diesen Reset prüft AC-16 unten nur den alten Cache statt den frischen Full-Pull.
 rm -rf "$WPSYNC_SITES_DIR/$TARGET/public/wp-content/uploads"
+# SEC-101: Ein Ziel aus einem Lauf vor der .ddev-Prüfung braucht die einmalige Übernahme.
+if [ -f "$WPSYNC_SITES_DIR/$TARGET/.ddev/config.yaml" ] && [ ! -f "$WPSYNC_CONFIG_DIR/ddev-state/$TARGET.json" ]; then
+  if "$WPSYNC" pull "$TARGET" </dev/null >"$E2E/pull-takeover.log" 2>&1; then fail "SEC-101 AC-14 pull without takeover"; fi
+  grep -q "wpsync trust $TARGET" "$E2E/pull-takeover.log" || fail "SEC-101 AC-14 no hint to wpsync trust"
+  trust_ddev
+fi
+# SEC-131 AC-6: Ein Ziel aus einem Lauf vor der Umstellung hat noch <site>/.git – der Erst-Pull verschiebt es.
+SEC131_MOVE=no
+if [ -e "$WPSYNC_SITES_DIR/$TARGET/.git" ] && [ ! -e "$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git" ]; then SEC131_MOVE=yes; fi
 "$WPSYNC" pull "$TARGET" --full | tee "$E2E/pull1.log"
+if [ "$SEC131_MOVE" = yes ]; then
+  grep -q "Bisheriges Site-Git verschoben nach" "$E2E/pull1.log" || fail "SEC-131 AC-6 no notice about the moved .git"
+  ls -d "$WPSYNC_SITES_DIR/.wpsync-git/$TARGET".alt-*.git >/dev/null 2>&1 || fail "SEC-131 AC-6 old .git not moved aside"
+fi
 
 cd "$WPSYNC_SITES_DIR/$TARGET"
 TARGET_URL="$(http_url)"
@@ -106,8 +127,11 @@ ddev restart >/dev/null
 grep -q "e2e_" public/wp-config.php || fail "AC-20 prefix lost after restart"
 [ "$(ddev wp plugin list --status=active --field=name | grep -c password-protected || true)" = "0" ] || fail "AC-23"
 [ "$(ddev mysql -N -e "SHOW TABLES LIKE '%wpsync%'" | wc -l | tr -d ' ')" = "0" ] || fail "AC-27"
-[ "$(git log --oneline | wc -l | tr -d ' ')" -ge 1 ] || fail "AC-28"
-if git ls-files | grep -q "uploads/"; then fail "AC-28 uploads tracked"; fi
+# SEC-131: Das Schnappschuss-Repo liegt neben dem Site-Ordner; git nie im Site-Ordner aufrufen.
+SNAP=(git --git-dir="$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git")
+[ ! -e .git ] || fail "SEC-131 AC-1 .git in site folder"
+[ "$("${SNAP[@]}" log --oneline | wc -l | tr -d ' ')" -ge 1 ] || fail "AC-28"
+if "${SNAP[@]}" ls-files | grep -q "uploads/"; then fail "AC-28 uploads tracked"; fi
 
 echo "== AC-14: keine Revisionen, keine verwaisten Metadaten"
 [ "$(ddev wp post list --post_type=revision --format=count)" = "0" ] || fail "AC-14 revisions pulled"
@@ -142,12 +166,19 @@ ddev wp user check-password wpsync wpsync || fail "AC-34 local admin cannot log 
 echo "== AC-16: fehlendes Upload-Jahr kommt über den Proxy"
 [ ! -f public/wp-content/uploads/2019/01/wpsync-proxy.txt ] || fail "AC-16 2019 was pulled despite --uploads-since"
 # *.ddev.site zeigt im Container auf 127.0.0.1 – für den Test die Quelle über den DDEV-Router erreichbar machen
+# SEC-101 AC-13: eine eigene Compose-Datei bricht den Pull ab, bis sie freigegeben ist. Die
+# Zeitmarke macht die Datei in jedem Lauf neu, auch wenn ein früherer Lauf sie freigegeben hat.
 cat > .ddev/docker-compose.e2e-source.yaml <<YAML
+# e2e $(date +%s)
 services:
   web:
     external_links:
       - "ddev-router:${SOURCE_NAME}.ddev.site"
 YAML
+if "$WPSYNC" pull "$TARGET" </dev/null >"$E2E/pull-untrusted.log" 2>&1; then fail "SEC-101 AC-13 pull ran with an untrusted compose file"; fi
+grep -q "docker-compose.e2e-source.yaml" "$E2E/pull-untrusted.log" || fail "SEC-101 AC-13 abort does not name the file"
+if "$WPSYNC" trust "$TARGET" --yes </dev/null >/dev/null 2>&1; then fail "SEC-101 AC-13 --yes approved .ddev"; fi
+trust_ddev
 ddev restart >/dev/null
 body="$(curl -s "$TARGET_URL/wp-content/uploads/2019/01/wpsync-proxy.txt")"
 [ "$body" = "wpsync-proxy-ok" ] || fail "AC-16 proxy returned '$body'"

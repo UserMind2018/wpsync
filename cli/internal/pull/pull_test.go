@@ -34,7 +34,7 @@ func prepareServer(t *testing.T, extraTable string, deltaBody *map[string]any) *
 			if deltaBody != nil {
 				json.NewDecoder(r.Body).Decode(deltaBody)
 			}
-			w.Write([]byte(`{"env":{"table_prefix":"wp_","anon":"1.abcd1234"},"tables":[{"name":"wp_posts","checksum":"1"},{"name":"wp_e_submissions"},{"name":"wp_brand_new","checksum":"2"}],"files":[],"skipped":[],"next":null}`))
+			w.Write([]byte(`{"env":{"table_prefix":"wp_","home":"https://kunde.example","anon":"1.abcd1234"},"tables":[{"name":"wp_posts","checksum":"1"},{"name":"wp_e_submissions"},{"name":"wp_brand_new","checksum":"2"}],"files":[],"skipped":[],"next":null}`))
 		default:
 			t.Errorf("unexpected request %s", r.URL.Query().Get("rest_route"))
 		}
@@ -159,7 +159,7 @@ const anonTables = `[{"name":"wp_users","checksum":"1","anonymized":true},{"name
 func TestPrepareTagsAnonymizedTablesAndNamesPlainPII(t *testing.T) {
 	var body map[string]any
 	var data int
-	srv := anonServer(t, `{"table_prefix":"wp_","anon":"1.abcd1234"}`, anonTables, &body, &data)
+	srv := anonServer(t, `{"table_prefix":"wp_","home":"https://kunde.example","anon":"1.abcd1234"}`, anonTables, &body, &data)
 	defer srv.Close()
 	var out bytes.Buffer
 	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &out}
@@ -194,7 +194,7 @@ func TestPrepareTagsAnonymizedTablesAndNamesPlainPII(t *testing.T) {
 // AC-36: Ein Agent ohne Anonymisierung lieferte Klartext – abbrechen, bevor Tabellendaten fliessen.
 func TestPrepareRefusesAgentsThatCannotAnonymize(t *testing.T) {
 	var data int
-	srv := anonServer(t, `{"table_prefix":"wp_"}`, `[{"name":"wp_users","checksum":"1"}]`, nil, &data)
+	srv := anonServer(t, `{"table_prefix":"wp_","home":"https://kunde.example"}`, `[{"name":"wp_users","checksum":"1"}]`, nil, &data)
 	defer srv.Close()
 	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &bytes.Buffer{}}
 
@@ -210,7 +210,7 @@ func TestPrepareRefusesAgentsThatCannotAnonymize(t *testing.T) {
 func TestPrepareWithNoAnonymizeAsksForPlainData(t *testing.T) {
 	var body map[string]any
 	var data int
-	srv := anonServer(t, `{"table_prefix":"wp_"}`, `[{"name":"wp_users","checksum":"1"},{"name":"wp_orders","checksum":"3"}]`, &body, &data)
+	srv := anonServer(t, `{"table_prefix":"wp_","home":"https://kunde.example"}`, `[{"name":"wp_users","checksum":"1"},{"name":"wp_orders","checksum":"3"}]`, &body, &data)
 	defer srv.Close()
 	var out bytes.Buffer
 	o := Options{Site: sites.Site{URL: srv.URL, Profile: anonProfile(t)}, Out: &out, NoAnonymize: true}

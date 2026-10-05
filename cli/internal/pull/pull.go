@@ -27,6 +27,8 @@ type Options struct {
 	NoAnonymize     bool                    // pull personal data in plain text (needs confirmation)
 	Confirm         func(string) bool       // asks the user; nil without a terminal
 	SaveSite        func(*sites.Site) error // records a confirmed deviation in the profile
+	DDEVState       ddev.Store              // trusted .ddev state, outside the sites root
+	Docker          ddev.Docker             // nil: the docker CLI
 	Out             io.Writer
 	RowsPerChunk    int
 	FileBundleBytes int64
@@ -98,6 +100,9 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkDelta(delta, o.Site.Name); err != nil {
+		return nil, err
+	}
 	if !o.NoAnonymize && delta.Env.Anon == "" {
 		// An agent before 0.3.0 ignores the scope field and would send plain data (AC-36).
 		return nil, ErrAgentCannotAnonymize
@@ -150,7 +155,6 @@ func Run(o Options) error {
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
 	docroot := filepath.Join(siteDir, "public")
-	runner := &ddev.Exec{Dir: siteDir, Stdout: o.Out, Stderr: o.Out}
 	timer := newPhaseTimer(client, o.Out)
 	started := time.Now()
 
@@ -174,13 +178,17 @@ func Run(o Options) error {
 		base = baseline.New(o.Site.URL)
 	}
 
-	if !ddev.Exists(siteDir) {
-		if err := ddev.Setup(runner, siteDir, o.Site.Name, delta.Env, o.MailguardSource); err != nil {
-			return err
-		}
-		timer.done("DDEV-Setup")
-	} else if err := runner.Run("start", "-y"); err != nil {
+	project, err := openProject(&o, siteDir)
+	if err != nil {
 		return err
+	}
+	runner := project.Runner(&ddev.Exec{Dir: siteDir, Stdout: o.Out, Stderr: o.Out})
+	fresh, err := ddev.Start(runner, project, delta.Env, o.MailguardSource, o.Out)
+	if err != nil {
+		return err
+	}
+	if fresh {
+		timer.done("DDEV-Setup")
 	}
 	proxyChanged, err := ddev.WriteUploadsProxy(siteDir, o.Site.URL, agentapi.UserAgent(), o.Site.Profile.Uploads.Proxy)
 	if err != nil {
@@ -217,14 +225,8 @@ func Run(o Options) error {
 		}
 		timer.done("DB-Download")
 
-		reader, closeAll, err := ImportReader(dir, tables)
-		if err != nil {
+		if err := importTables(runner, dir, tables); err != nil {
 			return err
-		}
-		importErr := runner.RunStdin(reader, "mysql")
-		closeAll()
-		if importErr != nil {
-			return importErr
 		}
 		timer.done("DB-Import")
 
@@ -258,7 +260,7 @@ func Run(o Options) error {
 	if err := baseline.Save(siteDir, next); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
-	if err := localgit.Commit(siteDir, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); err != nil {
+	if err := localgit.Commit(o.SitesRoot, o.Site.Name, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset), o.Out); err != nil {
 		return err
 	}
 

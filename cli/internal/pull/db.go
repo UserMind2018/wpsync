@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -27,6 +26,12 @@ const (
 // DownloadTables stores each table as dir/<name>.sql plus a dir/<name>.done marker.
 // Small tables travel together (Spike B16), large ones per keyset chunk (Spike B26).
 func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o DBOptions) error {
+	// All names first: a valid table must not be requested before an invalid one aborts the run.
+	for _, t := range tables {
+		if _, err := tablePath(dir, t.Name, sqlSuffix); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -117,7 +122,14 @@ func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit 
 }
 
 func fetchChunks(c *agentapi.Client, dir string, t agentapi.Table, limit int, scope agentapi.Scope) error {
-	part := filepath.Join(dir, t.Name+".sql.part")
+	part, err := tablePath(dir, t.Name, partSuffix)
+	if err != nil {
+		return err
+	}
+	final, err := tablePath(dir, t.Name, sqlSuffix)
+	if err != nil {
+		return err
+	}
 	f, err := os.Create(part)
 	if err != nil {
 		return err
@@ -145,14 +157,21 @@ func fetchChunks(c *agentapi.Client, dir string, t agentapi.Table, limit int, sc
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(part, filepath.Join(dir, t.Name+".sql")); err != nil {
+	if err := os.Rename(part, final); err != nil {
 		return err
 	}
 	return writeMarker(dir, t)
 }
 
 func storeTable(dir string, t agentapi.Table, sql io.Reader) error {
-	tmp := filepath.Join(dir, t.Name+".sql.part")
+	tmp, err := tablePath(dir, t.Name, partSuffix)
+	if err != nil {
+		return err
+	}
+	final, err := tablePath(dir, t.Name, sqlSuffix)
+	if err != nil {
+		return err
+	}
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -162,7 +181,7 @@ func storeTable(dir string, t agentapi.Table, sql io.Reader) error {
 		os.Remove(tmp)
 		return errors.Join(err, copyErr)
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, t.Name+".sql")); err != nil {
+	if err := os.Rename(tmp, final); err != nil {
 		return err
 	}
 	return writeMarker(dir, t)
@@ -178,18 +197,27 @@ func markerValue(t agentapi.Table) string {
 }
 
 func writeMarker(dir string, t agentapi.Table) error {
-	return os.WriteFile(filepath.Join(dir, t.Name+".done"), []byte(markerValue(t)), 0o644)
+	path, err := tablePath(dir, t.Name, doneSuffix)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(markerValue(t)), 0o644)
 }
 
 func markerMatches(dir string, t agentapi.Table) bool {
 	if t.Checksum == nil && t.Mode != profile.ModeStructure {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(dir, t.Name+".done"))
+	path, err := tablePath(dir, t.Name, doneSuffix)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
 	return err == nil && strings.TrimSpace(string(data)) == markerValue(t)
 }
 
 // ImportReader concatenates header, all table files and footer for one `ddev mysql` import.
+// The table files are unchecked server content; importTables feeds them to a hardened client.
 func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error, error) {
 	readers := []io.Reader{strings.NewReader(importHeader)}
 	var files []*os.File
@@ -201,7 +229,12 @@ func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error,
 		return errors.Join(errs...)
 	}
 	for _, t := range tables {
-		f, err := os.Open(filepath.Join(dir, t.Name+".sql"))
+		path, err := tablePath(dir, t.Name, sqlSuffix)
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		f, err := os.Open(path)
 		if err != nil {
 			closeAll()
 			return nil, nil, fmt.Errorf("table %s not downloaded: %w", t.Name, err)
