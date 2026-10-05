@@ -28,6 +28,11 @@ final class PushUnits
         if ($rel === '' || strlen($rel) > 1024 || preg_match('/[\x00-\x1f\x7f\\\\]/', $rel) === 1) {
             return false;
         }
+        // C1- und Bidi-Steuerzeichen würden die Ausgabe im Terminal steuern; ungültiges UTF-8
+        // (preg_match liefert dann false) lässt sich nicht als JSON melden. Wie push.Ignored.
+        if (preg_match('/[\x{80}-\x{9f}\x{202a}-\x{202e}\x{2066}-\x{2069}]/u', $rel) !== 0) {
+            return false;
+        }
         foreach (explode('/', $rel) as $segment) {
             if ($segment === '' || $segment === '.' || $segment === '..' || in_array(strtolower($segment), Excludes::ANY_DIRS, true)) {
                 return false;

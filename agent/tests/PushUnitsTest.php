@@ -47,6 +47,17 @@ final class PushUnitsTest extends TestCase
         $this->assertTrue(PushUnits::validFile('plugins/a', 'a.php'));
         $this->assertTrue(PushUnits::validFile('plugins/a', 'inc/deep/file.name.php'));
         $this->assertTrue(PushUnits::validFile('mu-plugins', 'loader.php'));
+        $this->assertTrue(PushUnits::validFile('plugins/a', 'lang/übersetzung-größe.po'));
+        $this->assertTrue(PushUnits::validFile('plugins/a', '日本.css'));
+    }
+
+    /** N2: C1- und Bidi-Steuerzeichen sowie ungültiges UTF-8 – wie die CLI (push.Ignored). */
+    public function testFilesWithC1OrBidiControlsAreInvalid(): void
+    {
+        $invalid = ["a\u{9b}.php", "inc/\u{85}x.php", "wp_\u{202e}gnp.php", "\u{202a}a.php", "\u{2066}a.php", "\u{2069}a.php", "a\x9b.php", "a\xc3.php"];
+        foreach ($invalid as $rel) {
+            $this->assertFalse(PushUnits::validFile('plugins/a', $rel), bin2hex($rel));
+        }
     }
 
     /** AC-59 */

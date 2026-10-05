@@ -374,7 +374,7 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 		fmt.Fprintln(out, line)
 		if p.Exists { // a new unit is new as a whole – no need to list every file
 			for _, rel := range u.Changed {
-				fmt.Fprintf(out, "    %s\n", rel)
+				fmt.Fprintf(out, "    %s\n", showPath(rel))
 			}
 		}
 		if len(p.Conflicts) > 0 {
@@ -478,4 +478,13 @@ func rollbackNow(o Options, j *Journal, urls []string, before []Probe, reasons [
 			j.PushID, strings.Join(reasons, "; "), o.Site.Name, j.PushID, err)
 	}
 	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: Worse(before, Check(o.HTTP, urls, o.pause))}
+}
+
+// showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay
+// readable), otherwise quoted by agentapi.Printable – like ShowID for push IDs.
+func showPath(rel string) string {
+	if agentapi.CleanText(rel) == rel {
+		return rel
+	}
+	return agentapi.Printable(rel)
 }

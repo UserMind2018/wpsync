@@ -53,6 +53,8 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
   bricht der Push vor dem Tausch ab.
 - Fehlermeldungen des Agenten (Code, Text, Weiterleitungsziel) erreichen das Terminal ohne
   Steuer- und Bidi-Zeichen; Umlaute bleiben lesbar. Gilt zentral für alle Befehle.
+- Dateinamen mit C1- oder Bidi-Steuerzeichen pusht die CLI nicht und lehnt der Agent ab; die
+  Dateiliste im Push-Plan zeigt Namen nur maskiert, wenn sie nicht sicher darstellbar sind.
 
 ## [Unveröffentlicht]
 

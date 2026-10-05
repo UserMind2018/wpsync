@@ -98,7 +98,13 @@ func TestIgnored(t *testing.T) {
 	if !Ignored("mu-plugins", "wpsync-loader.php", 10) || !Ignored("plugins/x", "big.zip", 300<<20) {
 		t.Error("protected or oversized file not ignored")
 	}
-	for _, rel := range []string{"main.php", "inc/api.php", "assets/schema.sql", "00-local-mailguard.php", "readme.txt"} {
+	// N2: C1 and Bidi controls (and invalid UTF-8) would reach the terminal in the plan
+	for _, rel := range []string{"a\x1b.php", "a\u009b.php", "inc/\u0085x.php", "wp_\u202egnp.php", "\u2066a.php", "a\x9b.php"} {
+		if !Ignored("plugins/x", rel, 10) {
+			t.Errorf("plugins/x/%q should be ignored", rel)
+		}
+	}
+	for _, rel := range []string{"main.php", "inc/api.php", "assets/schema.sql", "00-local-mailguard.php", "readme.txt", "lang/übersetzung-größe.po", "日本.css"} {
 		if Ignored("plugins/x", rel, 10) {
 			t.Errorf("plugins/x/%s should be kept", rel)
 		}

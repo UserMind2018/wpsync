@@ -73,16 +73,13 @@ func UnitOf(path string) (unit, rel string, ok bool) {
 }
 
 // Ignored reports files that are never part of a push: what the agent would not deliver on a
-// pull either (its fixed exclusions), the local mail guard and wpsync's own files in mu-plugins,
+// pull either (its fixed exclusions), names that are unsafe to show, the local mail guard and wpsync's own files in mu-plugins,
 // and macOS/wpsync leftovers.
 func Ignored(unit, rel string, size int64) bool {
-	if size > maxFileBytes || strings.ContainsAny(rel, "\\\x7f") {
+	// Control characters (C0, DEL, C1), Bidi controls and invalid UTF-8 would steer the terminal
+	// when the plan lists the file; the agent refuses such names as well (PushUnits::validFile).
+	if size > maxFileBytes || strings.Contains(rel, "\\") || strings.ContainsFunc(rel, agentapi.Unsafe) {
 		return true
-	}
-	for _, r := range rel {
-		if r < 0x20 {
-			return true
-		}
 	}
 	segments := strings.Split(strings.ToLower(rel), "/")
 	for _, s := range segments {

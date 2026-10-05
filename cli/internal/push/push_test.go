@@ -705,3 +705,37 @@ func TestRunSkipsHealthURLsOutsideTheSite(t *testing.T) {
 		t.Errorf("no hint about the dropped page:\n%s", out)
 	}
 }
+
+// N2: file names in the plan reach the terminal only when they are safe to show.
+func TestRunKeepsFileNamesWithControlsOutOfThePlan(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	o.DryRun = true
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/inc/\u202egnp.php", "<?php", 1800000000)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/inc/größe.php", "<?php", 1800000000)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "\u202e") {
+		t.Errorf("Bidi control in the plan:\n%q", out)
+	}
+	if !strings.Contains(out.String(), "    inc/größe.php\n") {
+		t.Errorf("umlauts must stay readable:\n%s", out)
+	}
+	if _, ok := f.begins[0].Units[0].Files["inc/\u202egnp.php"]; ok {
+		t.Error("an ignored file was sent to the agent")
+	}
+}
+
+func TestShowPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"inc/größe.php":    "inc/größe.php",
+		"wp_\u202egnp.php": `"wp_\u202egnp.php"`,
+		"a\u009bb.php":     `"a\u009bb.php"`,
+	} {
+		if got := showPath(in); got != want {
+			t.Errorf("showPath(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
