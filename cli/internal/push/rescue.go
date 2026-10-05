@@ -72,6 +72,9 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 		return nil, fmt.Errorf("HTTP %d, keine Antwort von rescue.php", resp.StatusCode)
 	}
 	if ok, _ := body["ok"].(bool); resp.StatusCode != http.StatusOK || !ok {
+		if by, _ := body["by"].(string); body["error"] == "superseded" && pushIDRe.MatchString(by) {
+			return nil, fmt.Errorf("HTTP %d: superseded – zuerst den späteren Push %s zurückrollen", resp.StatusCode, by)
+		}
 		return nil, fmt.Errorf("HTTP %d: %v", resp.StatusCode, body["error"])
 	}
 	return body, nil

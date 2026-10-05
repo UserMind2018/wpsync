@@ -148,6 +148,14 @@ func TestRescueRollback(t *testing.T) {
 			t.Errorf("HTTP %d %s: want an error", c.status, c.body)
 		}
 	}
+
+	// U6: wer abgelöst wurde, erfährt, welcher Push zuerst zurückgerollt werden muss.
+	superseded := rescueServer(t, 409, `{"ok":false,"error":"superseded","by":"p_20261006_0123456789ab"}`, nil)
+	defer superseded.Close()
+	err = RescueRollback(superseded.Client(), superseded.URL+"/rescue.php", "p_20261005_0123456789ab", "k3y")
+	if err == nil || !strings.Contains(err.Error(), "p_20261006_0123456789ab") {
+		t.Errorf("err = %v, want the superseding push", err)
+	}
 }
 
 func TestRescueAllowed(t *testing.T) {
