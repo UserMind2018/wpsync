@@ -4,6 +4,7 @@ package push
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
@@ -41,6 +43,8 @@ type Unit struct {
 	Changed []string                      // new, modified or locally deleted files
 	New     bool                          // unknown to the baseline
 	Version string
+
+	dir fs.FileInfo // the unit directory as the scan saw it
 }
 
 // ValidUnit mirrors the agent's rule (PushUnits::valid): never the agent itself.
@@ -108,38 +112,51 @@ func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []stri
 		}
 	}
 
-	content := filepath.Join(docroot, "wp-content")
+	// Every directory from the site folder down to a unit must be real: a symlink there would push
+	// another site's files (M1). Inside a unit, symlinks are skipped and never followed.
 	local := map[string]bool{}
+	for _, rel := range []string{".", "wp-content"} {
+		if _, ok, err := realDir(docroot, rel); err != nil {
+			return nil, nil, err
+		} else if !ok {
+			return nil, sortedKeys(known), nil
+		}
+	}
 	for _, kind := range []string{"plugins", "themes"} {
-		entries, _ := os.ReadDir(filepath.Join(content, kind))
+		_, ok, err := realDir(docroot, "wp-content/"+kind)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(docroot, "wp-content", kind))
+		if err != nil {
+			return nil, nil, err
+		}
 		for _, e := range entries {
-			if unit := kind + "/" + e.Name(); e.IsDir() && ValidUnit(unit) {
+			unit := kind + "/" + e.Name()
+			switch {
+			case !ValidUnit(unit):
+			case e.Type()&fs.ModeSymlink != 0:
+				return nil, nil, fmt.Errorf("%s %w, Push abgebrochen", showDir(docroot, "wp-content/"+unit), ErrSymlink)
+			case e.IsDir():
 				local[unit] = true
 			}
 		}
 	}
-	if info, statErr := os.Stat(filepath.Join(content, muPlugins)); statErr == nil && info.IsDir() {
+	if _, ok, err := realDir(docroot, "wp-content/"+muPlugins); err != nil {
+		return nil, nil, err
+	} else if ok {
 		local[muPlugins] = true
 	}
 
 	for unit := range local {
-		dir := filepath.Join(content, filepath.FromSlash(unit))
-		files, err := localFiles(dir, unit)
+		u, err := scanUnit(docroot, unit, known[unit])
 		if err != nil {
 			return nil, nil, err
 		}
-		u := Unit{Path: unit, Files: files, Base: known[unit], New: len(known[unit]) == 0, Version: Version(dir, unit)}
-		for rel, f := range files {
-			if b, ok := u.Base[rel]; !ok || b.Size != f.Size || b.MTime != f.MTime {
-				u.Changed = append(u.Changed, rel)
-			}
-		}
-		for rel, b := range u.Base {
-			if _, ok := files[rel]; !ok && !Ignored(unit, rel, b.Size) {
-				u.Changed = append(u.Changed, rel)
-			}
-		}
-		if len(u.Changed) > 0 && len(files) > 0 {
+		if len(u.Changed) > 0 && len(u.Files) > 0 {
 			sort.Strings(u.Changed)
 			units = append(units, u)
 		}
@@ -154,21 +171,51 @@ func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []stri
 	return units, deleted, nil
 }
 
+func sortedKeys(m map[string]map[string]baseline.FileStamp) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// scanUnit lists a unit's files through a root pinned to the unit directory and compares them
+// with the baseline.
+func scanUnit(docroot, unit string, base map[string]baseline.FileStamp) (Unit, error) {
+	root, dir, err := openUnit(docroot, unit, nil)
+	if err != nil {
+		return Unit{}, err
+	}
+	defer root.Close()
+	files, err := localFiles(root, unit)
+	if err != nil {
+		return Unit{}, err
+	}
+	u := Unit{Path: unit, Files: files, Base: base, New: len(base) == 0, Version: versionIn(root, unit), dir: dir}
+	for rel, f := range files {
+		if b, ok := u.Base[rel]; !ok || b.Size != f.Size || b.MTime != f.MTime {
+			u.Changed = append(u.Changed, rel)
+		}
+	}
+	for rel, b := range u.Base {
+		if _, ok := files[rel]; !ok && !Ignored(unit, rel, b.Size) {
+			u.Changed = append(u.Changed, rel)
+		}
+	}
+	return u, nil
+}
+
 // localFiles lists the pushable files of a unit: no symlinks, nothing ignored.
-func localFiles(dir, unit string) (map[string]LocalFile, error) {
+func localFiles(root *os.Root, unit string) (map[string]LocalFile, error) {
 	files := map[string]LocalFile{}
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -183,9 +230,15 @@ func localFiles(dir, unit string) (map[string]LocalFile, error) {
 }
 
 // Hash fills in the sha256 of every file; the agent decides with it what must be uploaded.
+// It reads only what the scan saw: no symlinks, nothing outside the unit, same size and mtime.
 func (u *Unit) Hash(docroot string) error {
+	root, err := u.open(docroot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for rel, f := range u.Files {
-		file, err := os.Open(u.file(docroot, rel))
+		file, err := openFile(root, u.Path, rel, f)
 		if err != nil {
 			return err
 		}
@@ -201,6 +254,12 @@ func (u *Unit) Hash(docroot string) error {
 	return nil
 }
 
+// open pins the unit directory again; it must still be the one the scan listed.
+func (u *Unit) open(docroot string) (*os.Root, error) {
+	root, _, err := openUnit(docroot, u.Path, u.dir)
+	return root, err
+}
+
 // Request converts the unit into the manifest for /push/begin.
 func (u *Unit) Request() agentapi.PushUnit {
 	req := agentapi.PushUnit{Path: u.Path, Base: map[string]agentapi.PushStamp{}, Files: map[string]agentapi.PushFile{}}
@@ -213,24 +272,30 @@ func (u *Unit) Request() agentapi.PushUnit {
 	return req
 }
 
-func (u *Unit) file(docroot, rel string) string {
-	return filepath.Join(docroot, "wp-content", filepath.FromSlash(u.Path), filepath.FromSlash(rel))
-}
-
 // Version reads the version from the plugin header or the theme's style.css; "" if there is none.
 // Same rule as the agent (PushUnits::version), so both sides compare like with like.
 func Version(dir, unit string) string {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	return versionIn(root, unit)
+}
+
+// versionIn reads the version through a root pinned to the unit directory.
+func versionIn(root *os.Root, unit string) string {
 	if unit == muPlugins {
 		return ""
 	}
 	marker := "plugin name:"
-	candidates, _ := filepath.Glob(filepath.Join(dir, "*.php"))
+	candidates, _ := fs.Glob(root.FS(), "*.php")
 	if strings.HasPrefix(unit, "themes/") {
 		marker = "theme name:"
-		candidates = []string{filepath.Join(dir, "style.css")}
+		candidates = []string{"style.css"}
 	}
-	for _, path := range candidates {
-		file, err := os.Open(path)
+	for _, name := range candidates {
+		file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			continue
 		}

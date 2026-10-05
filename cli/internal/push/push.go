@@ -1,6 +1,8 @@
 package push
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -413,17 +415,19 @@ func upload(o Options, pushID string, index int, docroot string, u *Unit, need [
 		batch, size = nil, 0
 		return err
 	}
+	root, err := u.open(docroot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, rel := range need {
 		local, ok := u.Files[rel]
 		if !ok {
 			return fmt.Errorf("der Agent verlangt %s/%s, das nicht im Manifest steht", u.Path, agentapi.Printable(rel))
 		}
-		data, err := os.ReadFile(u.file(docroot, rel))
+		data, err := readExactly(root, u.Path, rel, local)
 		if err != nil {
 			return err
-		}
-		if int64(len(data)) != local.Size {
-			return fmt.Errorf("%s/%s hat sich während des Pushs geändert", u.Path, rel)
 		}
 		for off := 0; ; {
 			n := min(len(data)-off, o.ChunkBytes-size)
@@ -441,6 +445,25 @@ func upload(o Options, pushID string, index int, docroot string, u *Unit, need [
 		}
 	}
 	return flush()
+}
+
+// readExactly reads a file of the unit as the scan and Hash saw it; anything else stops the push
+// before the site changes.
+func readExactly(root *os.Root, unit, rel string, want LocalFile) ([]byte, error) {
+	file, err := openFile(root, unit, rel, want)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, want.Size+1))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(data)
+	if int64(len(data)) != want.Size || hex.EncodeToString(sum[:]) != want.SHA256 {
+		return nil, fmt.Errorf("%s/%s %w", unit, rel, ErrChanged)
+	}
+	return data, nil
 }
 
 // rollbackNow takes a swapped push back through rescue.php and checks the site again.

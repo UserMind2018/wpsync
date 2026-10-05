@@ -48,6 +48,9 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
   Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
   des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.
+- `push` bricht ab, wenn `public`, `wp-content`, `plugins`/`themes`/`mu-plugins` oder eine Einheit
+  ein Symlink ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan,
+  bricht der Push vor dem Tausch ab.
 
 ## [Unveröffentlicht]
 
