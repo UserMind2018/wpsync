@@ -36,6 +36,8 @@ type agent struct {
 	// OnFiles runs when /files is requested; the request then waits until it is cancelled
 	// (SIGTERM test). nil answers normally.
 	OnFiles func()
+	// Staging is env.staging as JSON; empty: the site has no staging copy.
+	Staging string
 	srv     *httptest.Server
 }
 
@@ -50,8 +52,12 @@ func newAgent(t *testing.T) *agent {
 func (a *agent) URL() string { return a.srv.URL }
 
 func (a *agent) serve(w http.ResponseWriter, r *http.Request) {
-	env := fmt.Sprintf(`{"php_version":"8.3.35","wp_version":"6.8.1","db_server":"10.11.14-MariaDB","table_prefix":"wp_","home":%q,"siteurl":%q,"agent_version":%q,"anon":%q}`,
-		a.srv.URL, a.srv.URL, a.AgentVersion, a.Anon)
+	staging := "null"
+	if a.Staging != "" {
+		staging = a.Staging
+	}
+	env := fmt.Sprintf(`{"php_version":"8.3.35","wp_version":"6.8.1","db_server":"10.11.14-MariaDB","table_prefix":"wp_","home":%q,"siteurl":%q,"agent_version":%q,"anon":%q,"staging":%s}`,
+		a.srv.URL, a.srv.URL, a.AgentVersion, a.Anon, staging)
 	switch r.URL.Query().Get("rest_route") {
 	case "/wpsync/v1":
 		w.Write([]byte(`{"namespace":"wpsync/v1"}`))
@@ -109,6 +115,7 @@ func paired(t *testing.T, name, url string) {
 type result struct {
 	code           int
 	stdout, stderr string
+	opened         []string // links handed to the browser
 }
 
 // run executes wpsync in-process with stdin and an empty in-memory keychain.
@@ -121,9 +128,11 @@ func run(t *testing.T, ctx context.Context, stdin string, args ...string) result
 func runKC(t *testing.T, ctx context.Context, kc keychain.Store, stdin string, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
+	var opened []string
 	a := &app{ctx: ctx, stdin: strings.NewReader(stdin), stdout: &out, stderr: &errOut, kc: kc}
+	a.browse = func(u string) error { opened = append(opened, u); return nil } // never a real browser
 	code := a.main(args)
-	return result{code: code, stdout: out.String(), stderr: errOut.String()}
+	return result{code: code, stdout: out.String(), stderr: errOut.String(), opened: opened}
 }
 
 // jsonLines decodes every stdout line; each must be a JSON object.

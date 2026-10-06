@@ -11,8 +11,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -34,6 +36,7 @@ import (
 	"github.com/usermind/wpsync/internal/secretstore"
 	"github.com/usermind/wpsync/internal/setup"
 	"github.com/usermind/wpsync/internal/sites"
+	"github.com/usermind/wpsync/internal/staging"
 )
 
 const usage = `wpsync – WordPress Live ↔ Lokal
@@ -52,21 +55,34 @@ const usage = `wpsync – WordPress Live ↔ Lokal
                                        (ohne Terminal: --fingerprint <fp> aus der Anzeige)
   wpsync push <site> code [einheit…]   lokal geänderte Plugins/Themes/mu-plugins auf die Site bringen
                                        (braucht ein offenes Push-Fenster; --dry-run, --force, --yes;
+                                       --to staging: auf die Staging-Kopie, Baseline bleibt;
                                        lokal neue Einheiten nur, wenn sie genannt werden)
   wpsync pushes <site>                 Protokoll der Pushes (--confirm <id>: hängenden Push bestätigen)
-  wpsync rollback <site> [push-id]     letzten bzw. einen bestimmten Push zurücknehmen
+  wpsync rollback <site> [push-id]     letzten Live-Push bzw. einen bestimmten zurücknehmen (--to staging)
+  wpsync staging create <site>         Staging-Kopie auf dem Server anlegen (anonymisiert; --no-anonymize)
+  wpsync staging open <site>           Einmal-Link: Zugang und Anmeldung als Staging-Admin (--print)
+  wpsync staging refresh <site>        Datenbank neu von Live (--code: auch den Code)
+  wpsync staging status <site>         Zustand, Alter, letzte Nutzung, Pushes nach Staging
+  wpsync staging delete <site>         Kopie löschen (Tabellen und Ordner)
   wpsync version
 
-  Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version) schreibt JSON auf stdout,
-  Meldungen auf stderr, und fragt nie nach; --secret-stdin liest das Secret von stdin.
+  Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version, staging, push, pushes,
+  rollback) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach; --secret-stdin liest
+  das Secret von stdin (scan, pull, status, staging).
   pull/status/list/stop --driver container --container c --docroot d --db-host h --db-name n
   --db-user u --local-url url [--cli-image i]: vorhandener WordPress-Container statt DDEV
-  (DB-Passwort als zweite Zeile von stdin). push, pushes und rollback nur mit DDEV.
+  (DB-Passwort als zweite Zeile von stdin). push, pushes und rollback nur mit DDEV und Keychain.
 `
 
-// jsonCommands accept --json (Spec Server-Modus §4). push, pushes, rollback, trust, list, stop
-// and setup stay text-only.
-var jsonCommands = map[string]bool{"pair": true, "scan": true, "pull": true, "status": true, "unpair": true, "doctor": true, "version": true}
+// jsonCommands accept --json (Spec Server-Modus §4, Spec 2b T4). trust, list, stop and setup stay
+// text-only.
+var jsonCommands = map[string]bool{
+	"pair": true, "scan": true, "pull": true, "status": true, "unpair": true, "doctor": true, "version": true,
+	"staging": true, "push": true, "pushes": true, "rollback": true,
+}
+
+// stagingCommands are the subcommands of wpsync staging (Spec 2b 6.1).
+var stagingCommands = map[string]bool{"create": true, "refresh": true, "open": true, "status": true, "delete": true}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
@@ -86,6 +102,7 @@ type app struct {
 	jw             *cliout.Writer
 	data           any // data of the JSON result
 	stdinSecrets   *secretstore.Stdin
+	browse         func(string) error // opens a URL; nil: open (macOS) or xdg-open
 }
 
 // out receives human messages: stdout, with --json stderr.
@@ -105,13 +122,17 @@ func (a *app) main(args []string) int {
 		return cliout.ExitUsage
 	}
 	cmd, rest := args[0], args[1:]
+	name := cmd
+	if cmd == "staging" && len(rest) > 0 && stagingCommands[rest[0]] {
+		name += " " + rest[0] // "staging create" – the caller tells the subcommands apart
+	}
 	a.json = jsonCommands[cmd] && hasJSONFlag(rest)
 	if a.json {
 		a.jw = cliout.NewWriter(a.stdout)
 	}
 	err := a.dispatch(cmd, rest)
 	if a.json {
-		return a.jw.Result(cmd, a.data, err)
+		return a.jw.Result(name, a.data, err)
 	}
 	if err != nil {
 		fmt.Fprintf(a.stderr, "\n✗ %v\n", err)
@@ -151,6 +172,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdPushes(args)
 	case "rollback":
 		return a.cmdRollback(args)
+	case "staging":
+		return a.cmdStaging(args)
 	case "version":
 		return a.cmdVersion(args)
 	}
@@ -735,7 +758,8 @@ func (a *app) status(opts pull.Options, site *sites.Site) error {
 }
 
 // pushOptions loads the site and builds the options shared by push, pushes and rollback. Push
-// stays a Mac command: keychain only, no --json, no container driver.
+// stays a Mac command: keychain only, no --secret-stdin, no container driver (V11). With --json
+// the messages go to stderr and nothing asks.
 func (a *app) pushOptions(name string) (push.Options, *sites.Site, error) {
 	site, secret, err := loadSite(name, a.keychainStore())
 	if err != nil {
@@ -745,7 +769,7 @@ func (a *app) pushOptions(name string) (push.Options, *sites.Site, error) {
 	if err != nil {
 		return push.Options{}, nil, err
 	}
-	opts := push.Options{Site: *site, Secret: secret, SitesRoot: root, Out: a.stdout}
+	opts := push.Options{Site: *site, Secret: secret, SitesRoot: root, Out: a.out()}
 	if a.interactive() {
 		opts.Confirm = a.confirm
 	}
@@ -753,18 +777,25 @@ func (a *app) pushOptions(name string) (push.Options, *sites.Site, error) {
 }
 
 func (a *app) cmdPush(args []string) error {
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--to staging] [--dry-run] [--force] [--yes] [--json]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
 	allowVersion := fs.Bool("allow-version-change", false, "mit --yes: geänderte Plugin-/Theme-Version akzeptieren")
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was gepusht würde")
+	to := fs.String("to", push.TargetLive, "Ziel: live oder staging")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
-	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--dry-run] [--force] [--yes]")
+	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
 	if err != nil {
 		return err
 	}
 	if positional[1] != "code" {
-		return cliout.Usage(errors.New("Aufruf: wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--dry-run] [--force] [--yes]"))
+		return cliout.Usage(errors.New("Aufruf: " + call))
+	}
+	if *to == "" {
+		// An empty target means live to the push package; a caller that passes an empty variable
+		// must not end up there.
+		return cliout.Usage(push.ErrTarget)
 	}
 	opts, site, err := a.pushOptions(positional[0])
 	if err != nil {
@@ -775,13 +806,23 @@ func (a *app) cmdPush(args []string) error {
 	}
 	opts.Units = positional[2:]
 	opts.Force, opts.Yes, opts.AllowVersionChange, opts.DryRun = *force, *yes, *allowVersion, *dryRun
-	return pushError(push.Run(opts), site)
+	opts.Target = *to // as typed: the push package refuses what it does not know
+	var res push.Result
+	opts.Report = &res
+	if a.json {
+		opts.Event = a.jw.Event
+	}
+	err = push.Run(opts)
+	if res.Units != nil {
+		a.data = res // also with an error: push_id and status say what happened on the site
+	}
+	return pushError(err, site)
 }
 
 func (a *app) cmdPushes(args []string) error {
 	fs := a.flags("pushes")
 	confirmID := fs.String("confirm", "", "einen getauschten, aber nicht bestätigten Push als in Ordnung markieren")
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pushes <site> [--confirm <push-id>]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pushes <site> [--confirm <push-id>] [--json]")
 	if err != nil {
 		return err
 	}
@@ -790,24 +831,51 @@ func (a *app) cmdPushes(args []string) error {
 		return err
 	}
 	if *confirmID != "" {
-		return pushError(push.ConfirmPending(opts, *confirmID), site)
+		if err := push.ConfirmPending(opts, *confirmID); err != nil {
+			return pushError(err, site)
+		}
+		a.data = map[string]string{"push_id": *confirmID, "status": "confirmed"}
+		return nil
+	}
+	if a.json {
+		records, err := push.List(opts)
+		if err != nil {
+			return pushError(err, site)
+		}
+		if records == nil {
+			records = []agentapi.PushRecord{}
+		}
+		a.data = map[string]any{"pushes": records}
+		return nil
 	}
 	return pushError(push.Pushes(opts), site)
 }
 
 func (a *app) cmdRollback(args []string) error {
-	if len(args) < 1 || len(args) > 2 {
-		return cliout.Usage(errors.New("Aufruf: wpsync rollback <site> [push-id]"))
-	}
-	opts, site, err := a.pushOptions(args[0])
+	fs := a.flags("rollback")
+	to := fs.String("to", "", "ohne Push-ID: den neuesten Push dieses Ziels (live, staging); Standard: live")
+	positional, err := a.parse(fs, args, func(n int) bool { return n == 1 || n == 2 }, "wpsync rollback <site> [push-id] [--to staging] [--json]")
 	if err != nil {
 		return err
 	}
-	id := ""
-	if len(args) == 2 {
-		id = args[1]
+	opts, site, err := a.pushOptions(positional[0])
+	if err != nil {
+		return err
 	}
-	return pushError(push.Rollback(opts, id), site)
+	// Without --to the target stays unnamed: a push ID then decides itself where it is taken
+	// back, and without an ID it is the newest live push (V10).
+	opts.Target = *to
+	var res push.Result
+	opts.Report = &res
+	id := ""
+	if len(positional) == 2 {
+		id = positional[1]
+	}
+	err = push.Rollback(opts, id)
+	if res.PushID != "" {
+		a.data = res
+	}
+	return pushError(err, site)
 }
 
 // pushError turns push errors into the next step; the original error stays for the exit code.
@@ -848,13 +916,221 @@ func pushError(err error, site *sites.Site) error {
 			return cliout.Hint(err, fmt.Sprintf("%v.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; ")))
 		}
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", err))
+	case errors.Is(err, push.ErrNeedsYes):
+		return cliout.Hint(err, "ohne Terminal (oder mit --json) mit --yes bestätigen")
+	case errors.Is(err, push.ErrAgentNoStaging):
+		return cliout.Hint(&agentapi.OutdatedError{Required: staging.MinAgent, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kennt noch kein Staging – Agent %s installieren", site.URL, staging.MinAgent))
+	case errors.Is(err, staging.ErrMissing):
+		return cliout.Hint(err, fmt.Sprintf("es gibt keine Staging-Kopie – anlegen mit wpsync staging create %s", site.Name))
+	case errors.Is(err, staging.ErrLocked):
+		return cliout.Hint(err, fmt.Sprintf("die Staging-Kopie ist gesperrt – entsperren mit wpsync staging open %s", site.Name))
+	case errors.Is(err, staging.ErrBusy):
+		return cliout.Hint(err, fmt.Sprintf("auf der Staging-Kopie läuft gerade ein Job – Stand: wpsync staging status %s", site.Name))
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
-	case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_push_"):
-		return cliout.Hint(err, apiErr.Message)
+	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_")):
+		return cliout.Hint(err, agentText(apiErr.Message))
 	}
 	return explain(err, site)
+}
+
+const stagingCall = "wpsync staging create|refresh|open|status|delete <site> [--yes] [--no-anonymize] [--code] [--print] [--json] [--secret-stdin]"
+
+// cmdStaging runs the staging commands (Spec 2b 6.1). They need no local files, so the server
+// mode can call them with --secret-stdin (V11).
+func (a *app) cmdStaging(args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return cliout.Usage(errors.New("Aufruf: " + stagingCall))
+	}
+	sub := args[0]
+	if !stagingCommands[sub] {
+		return cliout.Usage(fmt.Errorf("unbekannter Staging-Befehl %s – %s", agentapi.Printable(sub), stagingCall))
+	}
+	fs := a.flags("staging")
+	yes := fs.Bool("yes", false, "ohne Rückfrage")
+	noAnon := fs.Bool("no-anonymize", false, "create/refresh: personenbezogene Daten im Klartext (fragt nach; ohne Terminal zusätzlich --yes)")
+	code := fs.Bool("code", false, "refresh: auch den Code neu von Live (gepushter Code geht verloren)")
+	printOnly := fs.Bool("print", false, "open: Link nur ausgeben, keinen Browser öffnen")
+	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
+	secretStdin := secretStdinFlag(fs)
+	positional, err := a.parse(fs, args[1:], exactly(1), stagingCall)
+	if err != nil {
+		return err
+	}
+	switch {
+	case *code && sub != "refresh":
+		return cliout.Usage(errors.New("--code nur mit wpsync staging refresh"))
+	case *noAnon && sub != "create" && sub != "refresh":
+		return cliout.Usage(errors.New("--no-anonymize nur mit wpsync staging create oder refresh"))
+	case *printOnly && sub != "open":
+		return cliout.Usage(errors.New("--print nur mit wpsync staging open"))
+	}
+	site, secret, err := loadSite(positional[0], a.secretStore(*secretStdin))
+	if err != nil {
+		return err
+	}
+	if *rps > 0 {
+		site.RPS = *rps
+	}
+	client := agentapi.New(site.URL, site.KeyID, secret, site.RPS)
+	client.Ctx = a.ctx
+	opts := staging.Options{Site: *site, Client: client, Out: a.out(), Yes: *yes, NoAnonymize: *noAnon, Code: *code}
+	if a.interactive() {
+		opts.Confirm = a.confirm
+	}
+	if a.json {
+		opts.Progress = a.jw.Phase
+	}
+	switch sub {
+	case "create", "refresh":
+		run, done := staging.Create, "angelegt"
+		if sub == "refresh" {
+			run, done = staging.Refresh, "aufgefrischt"
+		}
+		res, err := run(opts)
+		if errors.Is(err, staging.ErrBusy) {
+			res, err = a.resumeStaging(sub, opts, err)
+		}
+		if err == nil && res == nil {
+			err = errors.New("der Staging-Job endete ohne Ergebnis – Stand: wpsync staging status " + site.Name)
+		}
+		if err != nil {
+			return stagingError(err, site)
+		}
+		a.data = res
+		// An address outside the paired site arrives empty (staging.Create) and is not shown.
+		at := ""
+		if res.URL != "" {
+			at = ": " + shown(res.URL)
+		}
+		fmt.Fprintf(a.out(), "\n✓ Staging %s%s\n  Öffnen:      wpsync staging open %s\n  Code testen: wpsync push %s code <einheit> --to staging\n",
+			done, at, site.Name, site.Name)
+		if !res.Anonymized {
+			fmt.Fprintln(a.out(), "  ! die Kopie enthält personenbezogene Daten im KLARTEXT")
+		}
+		if res.SkippedValues > 0 {
+			fmt.Fprintf(a.out(), "  ! %d serialisierte Werte liessen sich nicht lesen und zeigen noch auf Live\n", res.SkippedValues)
+		}
+		return nil
+	case "open":
+		l, err := staging.Open(opts)
+		if err != nil {
+			return stagingError(err, site)
+		}
+		// The link carries the token: it goes to the browser, to stdout on request, or into the
+		// JSON result – into no other message.
+		a.data = l
+		switch {
+		case a.json:
+		case *printOnly:
+			fmt.Fprintln(a.stdout, l.URL)
+		default:
+			if err := a.openURL(l.URL); err != nil {
+				fmt.Fprintf(a.stdout, "Browser nicht geöffnet (%v) – Link (5 Minuten, einmal gültig):\n%s\n", err, l.URL)
+				return nil
+			}
+			fmt.Fprintln(a.stdout, "✓ Staging im Browser geöffnet – angemeldet als wpsync (Link 5 Minuten, einmal gültig)")
+		}
+		return nil
+	case "status":
+		st, err := staging.Status(opts)
+		if st != nil {
+			a.data = st // also for a missing or locked copy
+		}
+		return stagingError(err, site)
+	}
+	err = staging.Delete(opts)
+	if errors.Is(err, staging.ErrBusy) {
+		_, err = a.resumeStaging(sub, opts, err)
+	}
+	if err != nil {
+		return stagingError(err, site)
+	}
+	a.data = map[string]string{"site": site.Name, "status": "deleted"}
+	fmt.Fprintln(a.out(), "✓ Staging-Kopie gelöscht")
+	return nil
+}
+
+// resumeStaging picks up the job a run of the same command left on the server when it was
+// interrupted: the agent answers the next begin with busy until the job has ended. The user has
+// confirmed this command by then, so stepping on is what was asked for. Anything else stays
+// busy: a job of another kind, one that treats personal data differently than this call asks
+// for, the cleanup of a failed job, a push – and a create that still waits for its probe,
+// because a step without a verdict takes the copy down.
+func (a *app) resumeStaging(sub string, opts staging.Options, busy error) (*agentapi.StagingResult, error) {
+	want := map[string]string{"create": agentapi.StagingCreating, "refresh": agentapi.StagingRefreshing, "delete": agentapi.StagingDeleting}[sub]
+	st, err := opts.Client.StagingStatus()
+	switch {
+	case err != nil, !st.Exists, st.Job == nil, st.Job.Finished(), st.Status != want:
+		return nil, busy
+	case sub == "create" && st.Job.Phase == "probe":
+		return nil, busy
+	case sub != "delete" && st.Anonymized == opts.NoAnonymize:
+		return nil, busy
+	}
+	fmt.Fprintf(a.out(), "Ein unterbrochener Lauf von wpsync staging %s hat seinen Job auf dem Server gelassen – er wird fortgesetzt.\n", sub)
+	return staging.Resume(opts)
+}
+
+// stagingError adds the next step to staging errors; the original error stays for the exit code.
+func stagingError(err error, site *sites.Site) error {
+	var apiErr *agentapi.APIError
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, staging.ErrNoProfile):
+		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("noch kein Pull-Profil – Staging kopiert nach Profil: zuerst wpsync scan %s", site.Name))
+	case errors.Is(err, staging.ErrNoInfosheet):
+		return cliout.Hint(err, fmt.Sprintf("die Site hat noch kein Infosheet – wpsync scan %s --refresh", site.Name))
+	case errors.Is(err, staging.ErrNeedsYes):
+		return cliout.Hint(err, "ohne Terminal (oder mit --json) mit --yes bestätigen")
+	case errors.Is(err, staging.ErrMissing):
+		return cliout.Hint(err, fmt.Sprintf("es gibt keine Staging-Kopie – anlegen mit wpsync staging create %s", site.Name))
+	case errors.Is(err, staging.ErrExists):
+		return cliout.Hint(err, fmt.Sprintf("es gibt schon eine Staging-Kopie – auffrischen mit wpsync staging refresh %s, öffnen mit wpsync staging open %s oder löschen mit wpsync staging delete %s", site.Name, site.Name, site.Name))
+	case errors.Is(err, staging.ErrLocked):
+		return cliout.Hint(err, fmt.Sprintf("die Staging-Kopie ist nach 14 Tagen ohne Nutzung gesperrt – entsperren mit wpsync staging open %s", site.Name))
+	case errors.Is(err, staging.ErrBusy):
+		return cliout.Hint(err, fmt.Sprintf("auf der Staging-Kopie wird gerade gearbeitet (Job oder Push) – später erneut versuchen; Stand: wpsync staging status %s", site.Name))
+	case errors.As(err, &apiErr) && apiErr.Code == "wpsync_staging_pending":
+		return cliout.Hint(err, fmt.Sprintf("%s Protokoll: wpsync pushes %s", agentText(apiErr.Message), site.Name))
+	case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_staging_"):
+		return cliout.Hint(err, agentText(apiErr.Message))
+	}
+	return explain(err, site)
+}
+
+// openURL opens a link in the browser: open on the Mac, xdg-open on a Linux desktop.
+func (a *app) openURL(u string) error {
+	if a.browse != nil {
+		return a.browse(u)
+	}
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	return exec.Command(name, u).Start()
+}
+
+// agentText makes a message of the agent safe for the terminal and keeps its line breaks (the
+// nginx rule of a failed probe).
+func agentText(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = agentapi.CleanText(l)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// shown returns a name or address from the agent for the terminal: as it is when that is safe,
+// else quoted.
+func shown(s string) string {
+	if agentapi.CleanText(s) == s {
+		return s
+	}
+	return agentapi.Printable(s)
 }
 
 // pullError adds the next step to profile-related errors; the original error stays for the exit code.

@@ -10,6 +10,7 @@ import (
 	"github.com/usermind/wpsync/internal/cliout"
 	"github.com/usermind/wpsync/internal/push"
 	"github.com/usermind/wpsync/internal/sites"
+	"github.com/usermind/wpsync/internal/staging"
 )
 
 // F7 gilt auch für push, pushes und rollback: der Hinweis ersetzt nur den Text, der Exit-Code
@@ -34,6 +35,14 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"pending", &push.PendingError{PushID: "p_x", Device: "mac"}, cliout.ExitPushPending, "wpsync rollback kunde"},
 		{"rolled_back", &push.RolledBackError{PushID: "p_x", Reasons: []string{"HTTP 500"}}, cliout.ExitPushRolledBack, "wieder auf dem alten Stand"},
 		{"busy", &agentapi.APIError{Status: 423, Code: "wpsync_push_locked", Message: "Auf dieser Site läuft bereits ein Push."}, cliout.ExitBusy, "läuft bereits ein Push"},
+		{"needs_yes", push.ErrNeedsYes, cliout.ExitUsage, "mit --yes bestätigen"},
+		{"target", fmt.Errorf("%w (%q)", push.ErrTarget, "stagin"), cliout.ExitUsage, "erlaubt sind live und staging"},
+		{"no_staging", fmt.Errorf("%w: %w", push.ErrAgentNoStaging, &agentapi.APIError{Status: 400, Code: "wpsync_push_target"}), cliout.ExitAgentOutdated, "kennt noch kein Staging – Agent 0.5.0 installieren"},
+		{"staging_missing", fmt.Errorf("%w: %w", staging.ErrMissing, &agentapi.APIError{Status: 409, Code: "wpsync_staging_missing"}), cliout.ExitStagingMissing, "wpsync staging create kunde"},
+		{"staging_locked", fmt.Errorf("%w: %w", staging.ErrLocked, &agentapi.APIError{Status: 409, Code: "wpsync_staging_locked"}), cliout.ExitStagingLocked, "wpsync staging open kunde"},
+		{"staging_busy", fmt.Errorf("%w: %w", staging.ErrBusy, &agentapi.APIError{Status: 423, Code: "wpsync_staging_busy"}), cliout.ExitBusy, "wpsync staging status kunde"},
+		{"staging_state", &agentapi.APIError{Status: 409, Code: "wpsync_staging_state", Message: "Die Staging-Kopie ist im Status failed."}, cliout.ExitUnknown, "im Status failed"},
+		{"other_target", &push.TargetError{PushID: "p_20261005_0123456789ab", Is: "staging", Want: "live"}, cliout.ExitUnknown, "ging nach Staging, nicht nach Live"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -45,18 +54,25 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 	}
 }
 
-// Push bleibt ein Mac-Befehl: kein --json und kein Container-Treiber (Exit 2 usage, Text auf stderr).
+// Push bleibt ein Mac-Befehl (V11): Keychain statt --secret-stdin, kein Container-Treiber.
+// --json gibt es seit 0.4.0 – auch ein Aufruf-Fehler kommt dann als JSON.
 func TestPushHasNoServerMode(t *testing.T) {
 	env(t)
 	for _, args := range [][]string{
-		{"push", "kunde", "code", "--json"},
+		{"push", "kunde", "code", "--secret-stdin"},
 		{"push", "kunde", "code", "--driver", "container"},
 		{"pushes", "kunde", "--secret-stdin"},
+		{"rollback", "kunde", "--secret-stdin"},
 		{"rollback"},
+		{"rollback", "kunde", "p_20261005_0123456789ab", "extra"},
 	} {
-		r := run(t, context.Background(), "", args...)
-		if r.code != cliout.ExitUsage || r.stdout != "" || !strings.Contains(r.stderr, "✗") {
+		r := run(t, context.Background(), testSecret+"\n", args...)
+		if r.code != cliout.ExitUsage || r.stdout != "" || !strings.Contains(r.stderr, "✗") || strings.Contains(r.stderr, testSecret) {
 			t.Errorf("%v: exit %d\nstdout: %s\nstderr: %s", args, r.code, r.stdout, r.stderr)
+		}
+		name := args[0]
+		if m := lastResult(t, run(t, context.Background(), testSecret+"\n", append(args, "--json")...), name, cliout.ExitUsage); m["data"] != nil {
+			t.Errorf("%v --json: data = %v", args, m["data"])
 		}
 	}
 }
