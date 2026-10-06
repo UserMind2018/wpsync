@@ -235,6 +235,21 @@ WORK="$(find "$WPC" -maxdepth 1 -name 'wpsync-push-*' | head -1)"
 # Die DDEV-Quelle läuft mit nginx und wertet keine .htaccess aus – geprüft wird, dass die Sperre liegt.
 check AC-71 "Arbeitsordner hat eine .htaccess-Sperre" "$(grep -c 'Require all denied' "$WORK/.htaccess")" 1
 
+echo "== U18: Rollback eines bestätigten Pushs nur bei offenem Fenster"
+window "$KEY" 0
+check U18 "bestätigter Push ohne Fenster: /push/rollback abgelehnt" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 403
+check U18 "Fehlercode für das geschlossene Fenster" "$(signed /wpsync/v1/push/rollback "$(byid)" | field '["code"]')" wpsync_push_window
+check U18 "rescue.php rollt einen bestätigten Push nicht zurück" "$(rcode "$(rkey)")" 409
+check U18 "bestätigter Push bleibt bestätigt" "$(pushes "push_id = '$PUSH' AND status = 'confirmed' AND pruned = 0")" 1
+window "$KEY" "time() + 900"
+check U18 "bestätigter Push mit Fenster: Rollback ok" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
+check U18 "Protokoll kennt den Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1
+push
+window "$KEY" 0
+check U18 "unbestätigter Push ohne Fenster: Rollback ok" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
+check U18 "Protokoll kennt den Notfall-Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1
+window "$KEY" "time() + 900"
+
 ddev wp eval "WpSync\\Store::deletePairing('$KEY');" >/dev/null
 check AC-53 "widerrufenes Pairing kann nicht zurückrollen" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 401
 check AC-53 "widerrufenes Pairing kann nicht pushen" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push main.php)")")" 401

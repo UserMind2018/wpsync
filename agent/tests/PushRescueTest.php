@@ -177,6 +177,26 @@ final class PushRescueTest extends TestCase
         $this->assertNull(PushRescue::read($this->work, self::ID)['superseded_by']);
     }
 
+    /** U18: rescue.php ist der Notfallweg für den unbestätigten Push; bestätigte nur über den Agent. */
+    public function testRescueRefusesAConfirmedPush(): void
+    {
+        PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
+
+        $this->assertSame([409, ['ok' => false, 'error' => 'confirmed']], $this->post(self::ID, $this->key));
+        $this->assertSame('new', file_get_contents($this->content . '/plugins/x/main.php'));
+        $this->assertSame(PushRescue::CONFIRMED, PushRescue::read($this->work, self::ID)['status']);
+        $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64))[0], 'the key is checked first');
+    }
+
+    /** U18: der Agent (REST mit Fenster, WP-Admin) rollt auch einen bestätigten Push zurück. */
+    public function testAgentRollbackStillTakesBackAConfirmedPush(): void
+    {
+        PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
+
+        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::ID)[0]);
+        $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
+    }
+
     public function testSetStatus(): void
     {
         $this->assertTrue(PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED));

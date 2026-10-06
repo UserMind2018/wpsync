@@ -21,7 +21,8 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - **Health-Check und automatischer Rollback:** Die CLI ruft Startseite, Login und bei
   WooCommerce Shop, Warenkorb und Kasse vor und nach dem Tausch auf und rollt zurück, wenn eine
   Seite schlechter wird. Weitere Seiten: `health_urls` in der Site-Konfiguration.
-- **`rescue.php`:** Rollback ohne WordPress, falls der gepushte Code die Site lahmlegt.
+- **`rescue.php`:** Rollback ohne WordPress, falls der gepushte Code die Site lahmlegt – nur für
+  den unbestätigten Push (nach dem Tausch, vor der Bestätigung).
 - **`wpsync rollback <site> [push-id]`** und **`wpsync pushes <site>`**; Snapshots der letzten
   3 bestätigten Pushes bleiben bis zu 14 Tage.
 - **Konflikterkennung:** Hat sich eine Einheit auf der Site seit dem letzten Pull geändert,
@@ -45,6 +46,9 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
 - Health-Seiten des Agenten ruft `push` nur auf der gekoppelten Site ab (gleiches Schema, gleicher
   Host mit Port), `health_urls` der Site-Konfiguration nur über http(s); Weiterleitungen nur auf
   denselben Host. Andere Seiten werden mit Hinweis verworfen.
+- Ein bestätigter Push lässt sich über `/push/rollback` nur bei offenem Push-Fenster des Geräts
+  zurückrollen (sonst 403 `wpsync_push_window`, kein Umweg über `rescue.php`); ein unbestätigter
+  immer. Im WP-Admin geht der Rollback weiterhin ohne Fenster (U18).
 - `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
   Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
   des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.

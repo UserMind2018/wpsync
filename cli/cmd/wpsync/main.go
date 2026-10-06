@@ -494,6 +494,8 @@ func pushError(err error, site *sites.Site) error {
 			strings.Join(skipped.Units, ", "), site.Name)
 	case errors.Is(err, push.ErrNothing):
 		return fmt.Errorf("nichts zu pushen – lokal ist nichts geändert seit dem letzten Pull von %s", site.Name)
+	case errors.Is(err, push.ErrRollbackWindow):
+		return fmt.Errorf("%w – ein Administrator muss das Push-Fenster unter %s/wp-admin/tools.php?page=wpsync öffnen oder den Push dort selbst zurückrollen", err, site.URL)
 	case errors.Is(err, push.ErrWindowClosed):
 		return fmt.Errorf("das Push-Fenster ist geschlossen – öffnen unter %s/wp-admin/tools.php?page=wpsync", site.URL)
 	case errors.Is(err, push.ErrConflict):

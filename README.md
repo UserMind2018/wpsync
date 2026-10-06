@@ -313,11 +313,14 @@ bricht jeder Push ab.
 Erst `wpsync pull`, lokal zusammenführen, dann erneut pushen. `--force` überschreibt bewusst.
 
 **Rollback.** Snapshots der letzten 3 bestätigten Pushes bleiben bis zu 14 Tage liegen.
-`wpsync rollback <site> [push-id]` stellt einen davon wieder her; dasselbe geht im WP-Admin unter
-Werkzeuge → wpsync → Pushes. Legt der gepushte Code WordPress lahm, geht die CLI über
-`wp-content/plugins/wpsync-agent/rescue.php`: Das Skript lädt kein WordPress und prüft einen
-Schlüssel, den nur dein Mac aus dem Pairing-Secret ableiten kann. Ein Push lässt sich nur
-zurückrollen, solange kein späterer Push dieselbe Einheit getauscht hat.
+`wpsync rollback <site> [push-id]` stellt einen davon wieder her – bei einem bestätigten Push nur,
+solange das Push-Fenster des Geräts offen ist; sonst öffnet ein Administrator das Fenster oder
+rollt im WP-Admin unter Werkzeuge → wpsync → Pushes selbst zurück (dort ohne Fenster). Ein
+unbestätigter Push (getauscht, Health-Check noch nicht bestanden) lässt sich immer zurückrollen.
+Legt er WordPress lahm, geht die CLI über `wp-content/plugins/wpsync-agent/rescue.php`: Das
+Skript lädt kein WordPress, prüft einen Schlüssel, den nur dein Mac aus dem Pairing-Secret
+ableiten kann, und rollt nur unbestätigte Pushes zurück. Ein Push lässt sich nur zurückrollen,
+solange kein späterer Push dieselbe Einheit getauscht hat.
 
 **Was ein Push nie tut.**
 
@@ -368,8 +371,9 @@ zurückrollen, solange kein späterer Push dieselbe Einheit getauscht hat.
   Ein Push ist Code-Ausführung auf dem Server – das Fenster nur öffnen, wenn gepusht wird.
 - **Push-Schutz im Agent, nicht in der CLI:** erlaubte Einheiten, verbotene Dateinamen,
   Hash-Prüfung vor dem Tausch und die Sperre „ein Push gleichzeitig" prüft der Server selbst.
-- **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank
-  und sperrt einen Push nach 5 falschen Schlüsseln für 10 Minuten. Der Schlüssel ist pro Push
+- **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
+  rollt nur unbestätigte Pushes zurück und sperrt einen Push nach 5 falschen Schlüsseln für
+  10 Minuten. Der Schlüssel ist pro Push
   aus dem Pairing-Secret abgeleitet und geht als POST-Formularfeld an das Skript, nie in der
   URL; auf dem Server liegt nur sein Hash.
 - **Snapshots:** liegen in `wp-content/wpsync-push-<zufall>/` mit `.htaccess`-Sperre. Auf

@@ -15,8 +15,13 @@ import (
 	"github.com/usermind/wpsync/internal/agentapi"
 )
 
-// ErrRescueUnreachable: without a way back there is no push (AC-66).
-var ErrRescueUnreachable = errors.New("das Notfall-Skript rescue.php ist nicht erreichbar")
+var (
+	// ErrRescueUnreachable: without a way back there is no push (AC-66).
+	ErrRescueUnreachable = errors.New("das Notfall-Skript rescue.php ist nicht erreichbar")
+	// ErrRescueConfirmed: rescue.php takes back only a push that was swapped in but not yet
+	// confirmed; a confirmed one goes through the agent or the WP admin (U18).
+	ErrRescueConfirmed = errors.New("rescue.php rollt nur unbestätigte Pushes zurück – dieser ist bestätigt; im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
+)
 
 // RescueKey derives the per-push rollback key from the pairing secret. The agent stores only its
 // sha256, so rescue.php needs neither the database nor the secret.
@@ -78,6 +83,9 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 		return nil, fmt.Errorf("HTTP %d, keine Antwort von rescue.php", resp.StatusCode)
 	}
 	if ok, _ := body["ok"].(bool); resp.StatusCode != http.StatusOK || !ok {
+		if body["error"] == "confirmed" {
+			return nil, ErrRescueConfirmed
+		}
 		if by, _ := body["by"].(string); body["error"] == "superseded" && pushIDRe.MatchString(by) {
 			return nil, fmt.Errorf("HTTP %d: superseded – zuerst den späteren Push %s zurückrollen", resp.StatusCode, by)
 		}

@@ -256,7 +256,16 @@ echo "== AC-71: Arbeitsordner und Protokoll verlassen den Server nicht"
 if find public/wp-content -maxdepth 1 -name 'wpsync-push-*' | grep -q .; then fail "AC-71 push work dir was pulled"; fi
 [ "$(ddev mysql -N -e "SHOW TABLES LIKE '%wpsync%'" | wc -l | tr -d ' ')" = "0" ] || fail "AC-71 wpsync tables were pulled"
 
+echo "== U18: bestätigter Push lässt sich ohne Push-Fenster nicht zurückrollen"
+window 0
+if "$WPSYNC" rollback "$TARGET" >"$E2E/rollback0.log" 2>&1; then fail "U18 rolled back a confirmed push without a window"; fi
+cat "$E2E/rollback0.log"
+grep -q "Push-Fenster geschlossen" "$E2E/rollback0.log" || fail "U18 no hint about the window"
+if grep -q "rescue.php" "$E2E/rollback0.log"; then fail "U18 the closed window was bypassed through rescue.php"; fi
+grep -q "// push" "$SRC_PLUGIN" || fail "U18 source changed without a window"
+
 echo "== AC-55: rollback stellt den alten Stand her"
+window "time() + 900"
 "$WPSYNC" rollback "$TARGET" | tee "$E2E/rollback1.log"
 if grep -q "// push" "$SRC_PLUGIN"; then fail "AC-55 source still has the pushed state"; fi
 grep -q "// push" "$PLUGIN" || fail "AC-55 rollback touched the local file"

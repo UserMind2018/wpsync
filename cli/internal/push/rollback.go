@@ -12,6 +12,10 @@ import (
 	"github.com/usermind/wpsync/internal/baseline"
 )
 
+// ErrRollbackWindow: a confirmed push goes back through the agent only while the push window of
+// this device is open; otherwise an administrator rolls it back in the WP admin (U18).
+var ErrRollbackWindow = errors.New("der Push ist bestätigt und das Push-Fenster geschlossen")
+
 var statusLabel = map[string]string{
 	"uploading":   "Upload läuft",
 	"committed":   "getauscht, nicht bestätigt",
@@ -90,6 +94,9 @@ func Rollback(o Options, pushID string) error {
 
 	if err := o.Client.PushRollback(pushID); err != nil {
 		var apiErr *agentapi.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_window" {
+			return fmt.Errorf("Push %s: %w", pushID, ErrRollbackWindow) // never around the window through rescue.php
+		}
 		if errors.As(err, &apiErr) && apiErr.Code != "" && apiErr.Status < 500 {
 			return err // the agent answered and refused: superseded, pruned or not ours
 		}

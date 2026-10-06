@@ -424,22 +424,32 @@ final class Push
     }
 
     /**
-     * Braucht kein offenes Fenster: stellt nur wieder her, was vorher live war.
+     * REST-Weg. Ein unbestätigter Push (nach dem Tausch, vor confirm) lässt sich immer
+     * zurückrollen – der Notfall. Ein bestätigter nur bei offenem Push-Fenster des Geräts (U18):
+     * sonst könnte ein entwendetes Secret jederzeit alten Code zurück auf die Site bringen.
      *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
      */
     public static function rollback(array $params, string $keyId)
     {
+        self::sync();
         $push = self::own($params, $keyId);
         if ($push instanceof \WP_Error) {
             return $push;
+        }
+        if ($push['status'] === PushRescue::CONFIRMED && !PushWindow::open(Store::pushUntil($keyId), time())) {
+            return self::error(
+                'wpsync_push_window',
+                'Push ' . $push['push_id'] . ' ist bestätigt und das Push-Fenster geschlossen. Ein Administrator muss im WP-Admin unter Werkzeuge → wpsync das Push-Fenster öffnen oder den Push dort selbst zurückrollen.',
+                403
+            );
         }
         return self::rollbackPush($push['push_id']);
     }
 
     /**
-     * Auch für die Admin-Seite.
+     * Ohne Fensterprüfung – auch für die Admin-Seite, deren Administratoren vertrauenswürdig sind.
      *
      * @return \WP_REST_Response|\WP_Error
      */

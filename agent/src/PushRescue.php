@@ -126,6 +126,11 @@ final class PushRescue
                 self::save((string) $workDir, $record);
                 return [403, ['ok' => false, 'error' => 'wrong key']];
             }
+            // Notfallweg nur für den unbestätigten Push (U18): einen bestätigten rollt nur der Agent
+            // zurück – per CLI bei offenem Push-Fenster oder im WP-Admin. rescue.php kennt kein Fenster.
+            if ($record['status'] === self::CONFIRMED) {
+                return [409, ['ok' => false, 'error' => 'confirmed']];
+            }
             return self::rollback($contentDir, (string) $workDir, $pushId);
         }
         return [404, ['ok' => false, 'error' => 'unknown push']];

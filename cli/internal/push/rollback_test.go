@@ -2,6 +2,7 @@ package push
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -83,6 +84,38 @@ func TestRollbackKeepsARefusalOfTheAgent(t *testing.T) {
 	base, _ := baseline.Load(siteDir)
 	if base.Files["wp-content/plugins/x/main.php"].MTime != 1800000000 {
 		t.Error("baseline changed although nothing was rolled back")
+	}
+}
+
+// U18: a confirmed push needs an open window; the refusal must not detour through rescue.php.
+func TestRollbackOfAConfirmedPushNeedsTheWindow(t *testing.T) {
+	f, o, siteDir := pushed(t)
+	f.rollback, f.rbCode = 403, "wpsync_push_window"
+
+	err := Rollback(o, testID)
+	if !errors.Is(err, ErrRollbackWindow) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "rollback" {
+		t.Errorf("the closed window must not be bypassed through rescue.php: %s", got)
+	}
+	base, _ := baseline.Load(siteDir)
+	if base.Files["wp-content/plugins/x/main.php"].MTime != 1800000000 {
+		t.Error("baseline changed although nothing was rolled back")
+	}
+}
+
+// U18: rescue.php refuses a confirmed push; the CLI says where to go instead.
+func TestRollbackExplainsThatRescueOnlyTakesUnconfirmedPushes(t *testing.T) {
+	f, o, _ := pushed(t)
+	f.rollback, f.rescue, f.rescueErr = 500, 409, "confirmed"
+
+	err := Rollback(o, testID)
+	if !errors.Is(err, ErrRescueConfirmed) || !strings.Contains(err.Error(), "WP-Admin") {
+		t.Fatalf("err = %v", err)
+	}
+	if f.rolledBack {
+		t.Error("rolled back although rescue.php refused")
 	}
 }
 

@@ -43,6 +43,8 @@ type fakeSite struct {
 	confirm   int      // HTTP status of /push/confirm
 	rollback  int      // HTTP status of /push/rollback
 	rescue    int      // HTTP status of rescue.php for a rollback
+	rescueErr string   // error of rescue.php when rescue != 200; empty: "restore failed"
+	rbCode    string   // error code of /push/rollback when rollback != 200; empty: wpsync_push_state
 	health    []string // extra pages the agent names for the health check
 
 	committed  bool
@@ -71,7 +73,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		f.rescueKey = r.PostForm.Get("key")
 		if f.rescue != 200 {
 			w.WriteHeader(f.rescue)
-			w.Write([]byte(`{"ok":false,"error":"restore failed"}`))
+			why := f.rescueErr
+			if why == "" {
+				why = "restore failed"
+			}
+			w.Write([]byte(`{"ok":false,"error":"` + why + `"}`))
 			return
 		}
 		f.rolledBack = true
@@ -161,6 +167,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	case "/wpsync/v1/push/rollback":
 		if f.rollback == 200 {
 			f.rolledBack = true
+		}
+		if f.rbCode != "" {
+			w.WriteHeader(f.rollback)
+			w.Write([]byte(`{"code":"` + f.rbCode + `","message":"Fenster zu"}`))
+			return
 		}
 		f.status(w, f.rollback)
 	case "/wpsync/v1/push/list":
