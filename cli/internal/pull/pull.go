@@ -120,6 +120,10 @@ var ErrNoInfosheet = errors.New("die Site hat noch kein Infosheet")
 // ErrNeedsConfirmation: a question would be needed, but there is no terminal and no --yes.
 var ErrNeedsConfirmation = errors.New("das Profil kennt neue Tabellen/Plugins nicht")
 
+// ErrUploadsWithoutProxy: the profile leaves out older uploads, but the driver has no uploads
+// proxy (container mode) – the site would miss images (exit code usage).
+var ErrUploadsWithoutProxy = errors.New("das Profil lässt ältere Uploads aus, im Container-Modus gibt es keinen Uploads-Proxy")
+
 // ErrInterrupted: the pull was cancelled (SIGTERM); downloaded files and tables are kept and the
 // next pull continues (exit code interrupted).
 var ErrInterrupted = errors.New("Pull abgebrochen – der nächste Pull setzt fort")
@@ -242,6 +246,10 @@ func Run(o Options) error {
 }
 
 func run(o Options) error {
+	if _, proxy := o.Driver.(localenv.UploadsProxy); !proxy && o.Site.Profile != nil && o.Site.Profile.Uploads.Since != "" {
+		return fmt.Errorf("%w (Uploads ab %s) – Profil neu speichern: wpsync scan %s --preset %s --uploads-since alle",
+			ErrUploadsWithoutProxy, o.Site.Profile.Uploads.Since, o.Site.Name, o.Site.Profile.Preset)
+	}
 	if o.NoAnonymize && !o.Yes {
 		if o.Confirm == nil {
 			return ErrPlainNeedsConfirmation

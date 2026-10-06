@@ -102,7 +102,8 @@ func classify(err error) int {
 	switch {
 	case errors.Is(err, pull.ErrInterrupted), errors.Is(err, context.Canceled):
 		return ExitInterrupted
-	case errors.As(err, &usage), errors.Is(err, pull.ErrNeedsConfirmation), errors.Is(err, pull.ErrPlainNeedsConfirmation):
+	case errors.As(err, &usage), errors.Is(err, pull.ErrNeedsConfirmation), errors.Is(err, pull.ErrPlainNeedsConfirmation),
+		errors.Is(err, pull.ErrUploadsWithoutProxy):
 		return ExitUsage
 	case errors.Is(err, syscall.ENOSPC):
 		return ExitDiskFull

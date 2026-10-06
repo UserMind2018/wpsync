@@ -124,3 +124,12 @@ func TestPrepareWithoutTerminalNeedsConfirmation(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Container-Modus: ohne Uploads-Proxy darf das Profil keine Upload-Jahre auslassen (Spec §3).
+func TestRunRefusesUploadsSinceWithoutProxy(t *testing.T) {
+	o := pullOptions(t, "http://127.0.0.1:1", newFakeDriver(false))
+	o.Site.Profile.Uploads.Since = "2024"
+	if err := Run(o); !errors.Is(err, ErrUploadsWithoutProxy) || !strings.Contains(err.Error(), "--uploads-since alle") {
+		t.Fatalf("err = %v", err)
+	}
+}

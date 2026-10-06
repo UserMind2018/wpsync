@@ -23,6 +23,7 @@ func TestExitCodes(t *testing.T) {
 		{"ok", nil, ExitOK},
 		{"unknown", errors.New("irgendwas"), ExitUnknown},
 		{"usage", Usage(errors.New("flag provided but not defined: -x")), ExitUsage},
+		{"usage_uploads_since_container", fmt.Errorf("%w (Uploads ab 2024)", pull.ErrUploadsWithoutProxy), ExitUsage},
 		{"usage_confirmation", fmt.Errorf("%w – mit --yes bestätigen", pull.ErrNeedsConfirmation), ExitUsage},
 		{"agent_unreachable", fmt.Errorf("%w: discover https://x: no such host", agentapi.ErrUnreachable), ExitAgentUnreachable},
 		{"agent_outdated", &agentapi.OutdatedError{Installed: "0.2.0", Required: "0.3.0", Err: pull.ErrAgentCannotAnonymize}, ExitAgentOutdated},

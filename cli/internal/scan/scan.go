@@ -16,6 +16,8 @@ type Adjust struct {
 	ExcludePlugins   []string
 	ExcludePostTypes []string
 	UploadsSince     string
+	// AllUploads pulls every upload year (--uploads-since alle); needed without uploads proxy.
+	AllUploads bool
 }
 
 func (a Adjust) apply(p *profile.Profile) {
@@ -23,6 +25,9 @@ func (a Adjust) apply(p *profile.Profile) {
 	p.PostTypes.Exclude = append(p.PostTypes.Exclude, a.ExcludePostTypes...)
 	if a.UploadsSince != "" {
 		p.Uploads.Since = a.UploadsSince
+	}
+	if a.AllUploads {
+		p.Uploads.Since = ""
 	}
 }
 
