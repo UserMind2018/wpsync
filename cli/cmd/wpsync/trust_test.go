@@ -1,8 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,31 +11,16 @@ import (
 	"testing"
 
 	"github.com/usermind/wpsync/internal/ddev"
+	"github.com/usermind/wpsync/internal/keychain"
 )
 
 // runTrust calls cmdTrust without a terminal and returns its output.
 func runTrust(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	null, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer null.Close()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdin, stdout := os.Stdin, os.Stdout
-	os.Stdin, os.Stdout = null, w
-	done := make(chan string)
-	go func() {
-		data, _ := io.ReadAll(r)
-		done <- string(data)
-	}()
-	cmdErr := cmdTrust(args)
-	w.Close()
-	os.Stdin, os.Stdout = stdin, stdout
-	return <-done, cmdErr
+	var out bytes.Buffer
+	a := &app{ctx: context.Background(), stdin: strings.NewReader(""), stdout: &out, stderr: &out, kc: keychain.NewMemory()}
+	err := a.cmdTrust(args)
+	return out.String(), err
 }
 
 var fpRe = regexp.MustCompile(`--fingerprint ([0-9a-f]+)`)

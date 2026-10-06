@@ -19,10 +19,10 @@ const ResolverContent = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
 
 // Check is one doctor result.
 type Check struct {
-	Name   string
-	OK     bool
-	Detail string
-	Fix    string
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	Fix    string `json:"fix,omitempty"`
 }
 
 // Env abstracts the system for tests.
