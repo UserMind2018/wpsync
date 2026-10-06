@@ -199,3 +199,21 @@ func TestSIGTERMEndsPullWithExit30(t *testing.T) {
 		t.Fatalf("last line = %s", last)
 	}
 }
+
+// Review N3: pull und status lehnen einen Docroot ab, der .wpsync, .git oder / ist oder direkt
+// unter / liegt – Exit 2, ohne docker.
+func TestContainerDocrootIsValidated(t *testing.T) {
+	env(t)
+	ag := newAgent(t)
+	paired(t, "vorlage", ag.URL())
+	_, dockerLog := containerSite(t)
+	for _, bad := range []string{"/", "/html", filepath.Join(t.TempDir(), ".wpsync"), filepath.Join(t.TempDir(), ".git")} {
+		r := run(t, context.Background(), secrets, append([]string{"pull", "vorlage", "--json", "--secret-stdin", "--yes"}, containerArgs(bad)...)...)
+		lastResult(t, r, "pull", 2)
+		r = run(t, context.Background(), secrets, "status", "vorlage", "--json", "--secret-stdin", "--driver", "container", "--docroot", bad)
+		lastResult(t, r, "status", 2)
+	}
+	if calls, _ := os.ReadFile(dockerLog); len(calls) != 0 {
+		t.Fatalf("docker called: %s", calls)
+	}
+}

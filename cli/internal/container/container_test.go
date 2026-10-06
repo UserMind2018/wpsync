@@ -447,3 +447,24 @@ func TestConfigureRejectsInvalidPHPVersion(t *testing.T) {
 		}
 	}
 }
+
+// Review N3: der Docroot liegt in einem eigenen Site-Ordner und ist weder .wpsync noch .git –
+// sonst läge der Zustand von wpsync im Docroot oder ein Repo im Weg.
+func TestConfigValidateDocroot(t *testing.T) {
+	ok := testDriver(t).Config
+	for _, bad := range []string{"/", "/html", "/srv/kunde/.wpsync", "/srv/kunde/.git", "/srv/kunde/.GIT", "/srv/kunde/.WPSync",
+		"/srv/kunde/..", "/srv/kunde/a b", "/srv/kunde/ä"} {
+		c := ok
+		c.Docroot = bad
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--docroot") {
+			t.Errorf("Validate(%q) = %v", bad, err)
+		}
+	}
+	for _, good := range []string{"/srv/kunde/html", "/data/sites/vorlage/docroot", "/srv/kunde/public_html"} {
+		c := ok
+		c.Docroot = good
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate(%q) = %v", good, err)
+		}
+	}
+}

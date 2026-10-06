@@ -153,3 +153,15 @@ func TestRunClearsStaleGitLocks(t *testing.T) {
 		t.Fatalf("warnings = %v", res.Warnings)
 	}
 }
+
+// Review N3: auch ohne die Prüfung der Flags liegt der Docroot nie auf .wpsync oder .git.
+func TestRunRefusesReservedDocroot(t *testing.T) {
+	for _, name := range []string{".wpsync", ".git", ".GIT"} {
+		o := pullOptions(t, "http://127.0.0.1:1", newFakeDriver(false))
+		o.SiteDir = t.TempDir()
+		o.Docroot = filepath.Join(o.SiteDir, name)
+		if err := Run(o); err == nil || !strings.Contains(err.Error(), "reserv") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}

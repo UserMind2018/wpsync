@@ -71,14 +71,37 @@ var (
 	imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9./:_-]{0,254}$`)
 )
 
+var docrootNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// CheckDocroot checks --docroot: an absolute path whose parent is the site folder (it holds
+// .wpsync/ next to the docroot), so the parent is not / and the docroot is neither .wpsync nor
+// .git (in any case: macOS volumes ignore it) nor . or .. – and its name is one the snapshot repo
+// can ignore exactly (localgit.CommitTree).
+func CheckDocroot(docroot string) error {
+	if docroot == "" || !filepath.IsAbs(docroot) {
+		return errors.New("--docroot muss ein absoluter Pfad sein")
+	}
+	clean := filepath.Clean(docroot)
+	name, parent := filepath.Base(clean), filepath.Dir(clean)
+	switch {
+	case clean == "/" || parent == "/":
+		return fmt.Errorf("--docroot %s muss in einem eigenen Site-Ordner liegen (nicht / und nicht direkt darunter)", docroot)
+	case strings.EqualFold(name, ".wpsync"), strings.EqualFold(name, ".git"), name == ".", name == "..", strings.Trim(name, ".") == "":
+		return fmt.Errorf("--docroot darf nicht %s heißen – der Name ist für wpsync bzw. git reserviert", name)
+	case !docrootNameRe.MatchString(name):
+		return fmt.Errorf("--docroot %s: der Ordnername darf nur A–Z, a–z, 0–9, Punkt, _ und - enthalten", docroot)
+	}
+	return nil
+}
+
 // Validate checks the flags before anything runs.
 func (c Config) Validate() error {
 	var problems []string
 	if !nameRe.MatchString(c.Container) {
 		problems = append(problems, "--container fehlt oder ist ungültig")
 	}
-	if c.Docroot == "" || !filepath.IsAbs(c.Docroot) {
-		problems = append(problems, "--docroot muss ein absoluter Pfad sein")
+	if err := CheckDocroot(c.Docroot); err != nil {
+		problems = append(problems, err.Error())
 	}
 	for flag, v := range map[string]string{"--db-host": c.DBHost, "--db-name": c.DBName, "--db-user": c.DBUser} {
 		if !nameRe.MatchString(v) {

@@ -105,6 +105,9 @@ func (o *Options) dirs() (siteDir, docroot string, err error) {
 	if filepath.Dir(docroot) != filepath.Clean(siteDir) {
 		return "", "", fmt.Errorf("docroot %s must lie directly below %s", docroot, siteDir)
 	}
+	if name := filepath.Base(docroot); strings.EqualFold(name, ".wpsync") || strings.EqualFold(name, ".git") {
+		return "", "", fmt.Errorf("docroot %s: der Name %s ist für wpsync bzw. git reserviert", docroot, name)
+	}
 	return siteDir, docroot, nil
 }
 

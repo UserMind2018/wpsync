@@ -709,8 +709,11 @@ func (a *app) cmdStatus(args []string) error {
 		return err
 	}
 	if inContainer {
-		if *df.docroot == "" || !filepath.IsAbs(*df.docroot) {
+		if *df.docroot == "" {
 			return cliout.Usage(errors.New("--driver container braucht --docroot (absoluter Pfad)"))
+		}
+		if err := container.CheckDocroot(*df.docroot); err != nil {
+			return cliout.Usage(err)
 		}
 		opts.Docroot = filepath.Clean(*df.docroot)
 		opts.SiteDir = filepath.Dir(opts.Docroot)
