@@ -20,7 +20,7 @@ import (
 
 // Version is the CLI version, sent in the User-Agent. Release builds override it
 // via -ldflags "-X github.com/usermind/wpsync/internal/agentapi.Version=…".
-var Version = "0.3.0"
+var Version = "0.3.1"
 
 // UserAgent is fixed and documented so admins can allow it explicitly (Spike B23).
 func UserAgent() string { return "wpsync/" + Version }
