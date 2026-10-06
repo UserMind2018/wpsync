@@ -10,7 +10,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
-	"github.com/usermind/wpsync/internal/ddev"
+	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/localgit"
 	"github.com/usermind/wpsync/internal/profile"
 	"github.com/usermind/wpsync/internal/sites"
@@ -18,21 +18,49 @@ import (
 
 // Options for one pull.
 type Options struct {
-	Site            sites.Site
-	Secret          string
-	SitesRoot       string
-	MailguardSource string
+	Site      sites.Site
+	Secret    string
+	SitesRoot string
+	// Driver is the local runtime (DDEV or container); it brings its own .ddev guard and mailguard.
+	Driver localenv.Driver
+	// SiteDir holds baseline and DB cache; default SitesRoot/<name> with the snapshot repo in
+	// localgit.GitDir. With SiteDir set (server mode) the repo is localgit.TreeGitDir(SiteDir).
+	SiteDir string
+	// Docroot holds the WordPress files; default SiteDir/public. Must lie directly below SiteDir.
+	Docroot         string
 	Full            bool
 	Yes             bool                    // accept profile deviations without asking
 	NoAnonymize     bool                    // pull personal data in plain text (needs confirmation)
 	Confirm         func(string) bool       // asks the user; nil without a terminal
 	SaveSite        func(*sites.Site) error // records a confirmed deviation in the profile
-	DDEVState       ddev.Store              // trusted .ddev state, outside the sites root
-	Docker          ddev.Docker             // nil: the docker CLI
 	Out             io.Writer
 	RowsPerChunk    int
 	FileBundleBytes int64
 	DBBundleBytes   int64
+}
+
+// dirs resolves site folder and docroot.
+func (o *Options) dirs() (siteDir, docroot string, err error) {
+	siteDir = o.SiteDir
+	if siteDir == "" {
+		siteDir = filepath.Join(o.SitesRoot, o.Site.Name)
+	}
+	docroot = o.Docroot
+	if docroot == "" {
+		docroot = filepath.Join(siteDir, "public")
+	}
+	if filepath.Dir(docroot) != filepath.Clean(siteDir) {
+		return "", "", fmt.Errorf("docroot %s must lie directly below %s", docroot, siteDir)
+	}
+	return siteDir, docroot, nil
+}
+
+// commit records code and baseline in the site's snapshot repo.
+func (o *Options) commit(siteDir, docroot, message string) error {
+	if o.SiteDir == "" {
+		return localgit.Commit(o.SitesRoot, o.Site.Name, message, o.Out)
+	}
+	return localgit.CommitTree(localgit.TreeGitDir(siteDir), siteDir, filepath.Base(docroot), message, o.Out)
 }
 
 // ErrNoProfile: a pull needs a profile from wpsync scan (Spec 5.1).
@@ -41,8 +69,8 @@ var ErrNoProfile = errors.New("noch kein Pull-Profil")
 // ErrNoInfosheet: the agent has not built an inventory yet.
 var ErrNoInfosheet = errors.New("die Site hat noch kein Infosheet")
 
-// ErrAborted: the user declined to continue.
-var ErrAborted = errors.New("abgebrochen")
+// ErrAborted: the user declined to continue (also the declined .ddev takeover of the DDEV driver).
+var ErrAborted = localenv.ErrAborted
 
 // ErrAgentCannotAnonymize: the agent is older than 0.3.0 and would deliver plain personal data.
 var ErrAgentCannotAnonymize = errors.New("der Agent auf der Site kann noch nicht anonymisieren")
@@ -142,7 +170,7 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	return &plan{scope: scope, delta: delta}, nil
 }
 
-// Run pulls the site into its DDEV project within the profile's scope.
+// Run pulls the site into its local environment (Options.Driver) within the profile's scope.
 func Run(o Options) error {
 	if o.NoAnonymize && !o.Yes {
 		if o.Confirm == nil {
@@ -152,9 +180,12 @@ func Run(o Options) error {
 			return ErrAborted
 		}
 	}
+	siteDir, docroot, err := o.dirs()
+	if err != nil {
+		return err
+	}
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
-	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
-	docroot := filepath.Join(siteDir, "public")
+	drv, name := o.Driver, o.Site.Name
 	timer := newPhaseTimer(client, o.Out)
 	started := time.Now()
 
@@ -178,25 +209,24 @@ func Run(o Options) error {
 		base = baseline.New(o.Site.URL)
 	}
 
-	project, err := openProject(&o, siteDir)
+	if err := drv.Configure(delta.Env); err != nil {
+		return err
+	}
+	runner := drv.Runner(name)
+	exists, err := drv.Exists(name)
 	if err != nil {
 		return err
 	}
-	runner := project.Runner(&ddev.Exec{Dir: siteDir, Stdout: o.Out, Stderr: o.Out})
-	fresh, err := ddev.Start(runner, project, delta.Env, o.MailguardSource, o.Out)
-	if err != nil {
+	if !exists {
+		if err := drv.Setup(name); err != nil {
+			return err
+		}
+		timer.done("Setup")
+	} else if err := drv.Start(name); err != nil {
 		return err
 	}
-	if fresh {
-		timer.done("DDEV-Setup")
-	}
-	proxyChanged, err := ddev.WriteUploadsProxy(siteDir, o.Site.URL, agentapi.UserAgent(), o.Site.Profile.Uploads.Proxy)
-	if err != nil {
-		return err
-	}
-	if proxyChanged {
-		fmt.Fprintln(o.Out, "  Uploads-Proxy konfiguriert – DDEV startet neu")
-		if err := runner.Run("restart"); err != nil {
+	if up, ok := drv.(localenv.UploadsProxy); ok {
+		if err := up.UploadsProxy(name, o.Site.URL, agentapi.UserAgent(), o.Site.Profile.Uploads.Proxy); err != nil {
 			return err
 		}
 	}
@@ -230,7 +260,7 @@ func Run(o Options) error {
 		}
 		timer.done("DB-Import")
 
-		localURL, err := ddev.LocalURL(runner)
+		localURL, err := drv.LocalURL(name)
 		if err != nil {
 			return err
 		}
@@ -242,7 +272,7 @@ func Run(o Options) error {
 	}
 
 	if err := MailguardCheck(runner); err != nil {
-		_ = runner.Run("stop")
+		_, _ = drv.Stop(name)
 		return err
 	}
 	fmt.Fprintln(o.Out, "  local-mailguard aktiv ✓")
@@ -260,11 +290,11 @@ func Run(o Options) error {
 	if err := baseline.Save(siteDir, next); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
-	if err := localgit.Commit(o.SitesRoot, o.Site.Name, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset), o.Out); err != nil {
+	if err := o.commit(siteDir, docroot, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); err != nil {
 		return err
 	}
 
-	localURL, err := ddev.LocalURL(runner)
+	localURL, err := drv.LocalURL(name)
 	if err != nil {
 		return err
 	}

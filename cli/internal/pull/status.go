@@ -3,7 +3,6 @@ package pull
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
@@ -12,7 +11,10 @@ import (
 // Status shows what changed on the source since the last pull, without transferring content
 // (AC-29). It asks the agent for infosheet and delta only; profile deviations are just reported.
 func Status(o Options) error {
-	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
+	siteDir, _, err := o.dirs()
+	if err != nil {
+		return err
+	}
 	base, err := baseline.Load(siteDir)
 	if err != nil {
 		return fmt.Errorf("load baseline: %w", err)

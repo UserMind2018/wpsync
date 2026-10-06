@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
-	"github.com/usermind/wpsync/internal/ddev"
+	"github.com/usermind/wpsync/internal/localenv"
 )
 
 // ErrMailguardMissing stops a pull: a local site must never send real mail (AC-22).
@@ -53,7 +53,7 @@ type PostSetupOptions struct {
 }
 
 // PostSetup rewrites URLs, sets local constants and deactivates problematic or missing plugins.
-func PostSetup(r ddev.Runner, env agentapi.Env, localURL string, o PostSetupOptions, out io.Writer) error {
+func PostSetup(r localenv.Runner, env agentapi.Env, localURL string, o PostSetupOptions, out io.Writer) error {
 	// Checked here as well as after /delta: home, siteurl and the prefix become `wp` arguments.
 	if err := env.CheckArgs(); err != nil {
 		return err
@@ -122,7 +122,7 @@ var slugRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // dropMissingPlugins removes excluded but active plugins from active_plugins. Their files were
 // not pulled, so `wp plugin deactivate` would not find them.
-func dropMissingPlugins(r ddev.Runner, env agentapi.Env, excluded []string, out io.Writer) error {
+func dropMissingPlugins(r localenv.Runner, env agentapi.Env, excluded []string, out io.Writer) error {
 	var names, quoted []string
 	for _, slug := range excluded {
 		if !slugRe.MatchString(slug) {
@@ -163,7 +163,7 @@ func RemoveDropIns(docroot string) {
 
 // MailguardCheck verifies that local-mailguard itself is loaded (not just any wp_mail filter,
 // which an SMTP plugin would also register) and its wp_mail filter is active.
-func MailguardCheck(r ddev.Runner) error {
+func MailguardCheck(r localenv.Runner) error {
 	out, err := r.Output("wp", "eval", `echo function_exists("local_mailguard_collect") && has_filter("wp_mail") ? "ok" : "missing";`)
 	if err != nil {
 		return fmt.Errorf("%w (%v)", ErrMailguardMissing, err)

@@ -379,12 +379,12 @@ func cmdPull(args []string) error {
 	if err != nil {
 		return err
 	}
+	drv := &ddev.Driver{SitesRoot: root, MailguardSource: guard, State: state, Docker: dockerCLI, Out: os.Stdout, Err: os.Stdout}
 	opts := pull.Options{
 		Site:            *site,
 		Secret:          secret,
 		SitesRoot:       root,
-		MailguardSource: guard,
-		DDEVState:       state,
+		Driver:          drv,
 		Full:            *full,
 		Yes:             *yes,
 		NoAnonymize:     *noAnon,
@@ -396,6 +396,7 @@ func cmdPull(args []string) error {
 	}
 	if isTerminal() {
 		opts.Confirm = confirm
+		drv.Confirm = confirm
 	}
 	if *dryRun {
 		return pullError(pull.Status(opts), site)

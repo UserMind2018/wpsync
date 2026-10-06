@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/usermind/wpsync/internal/agentapi"
-	"github.com/usermind/wpsync/internal/ddev"
+	"github.com/usermind/wpsync/internal/localenv"
 )
 
 // The import connects as DDEV's default database user. db/db is DDEV's public default, not a
@@ -43,7 +43,7 @@ func importArgs() []string {
 }
 
 // importTables pipes header, the downloaded table files and footer into one hardened client run.
-func importTables(r ddev.Runner, dir string, tables []agentapi.Table) error {
+func importTables(r localenv.Runner, dir string, tables []agentapi.Table) error {
 	reader, closeAll, err := ImportReader(dir, tables)
 	if err != nil {
 		return err

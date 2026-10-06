@@ -218,7 +218,7 @@ func TestRunWithInvalidEnvLeavesNoTrace(t *testing.T) {
 				Site:      sites.Site{Name: "kunde", URL: srv.URL, KeyID: "0123456789abcdef", RPS: 1000, Profile: anonProfile(t)},
 				Secret:    "secret",
 				SitesRoot: root,
-				DDEVState: store,
+				Driver:    &ddev.Driver{SitesRoot: root, State: store, Out: io.Discard},
 				Yes:       true,
 				Out:       &bytes.Buffer{},
 			})
