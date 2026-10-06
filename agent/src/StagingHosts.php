@@ -76,7 +76,9 @@ final class StagingHosts
             return 'live';
         }
         $allowed = [rtrim($stagingPath, '/')];
-        if (self::origin($uploadsUrl) === $live) {
+        // Uploads nur ohne Query: ein Pfad, den es dort nicht gibt, landet bei index.php von Live,
+        // und ?rest_route=, ?wc-ajax= wirken dann dort. Die Kopie selbst darf Queries haben.
+        if (self::origin($uploadsUrl) === $live && strpos($url, '?') === false && strpos($path, '?') === false) {
             $allowed[] = rtrim((string) parse_url(trim($uploadsUrl), PHP_URL_PATH), '/');
         }
         foreach ($allowed as $prefix) {

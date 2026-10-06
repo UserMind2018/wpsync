@@ -108,6 +108,27 @@ final class StagingHostsTest extends TestCase
         $this->assertNull($this->blocked('https://example.com/wp-content/%75ploads/a.jpg'));
     }
 
+    /** Ein Pfad unter Uploads, den es nicht gibt, landet bei index.php von Live – mit Query bei REST und wc-ajax. */
+    public function testUploadsExceptionOnlyWithoutQueryString(): void
+    {
+        foreach ([
+            'https://example.com/wp-content/uploads/missing?rest_route=/wc/v3/orders',
+            'https://example.com/wp-content/uploads/a.jpg?ver=1',
+            'https://example.com/wp-content/uploads/a.jpg?',
+            'https://example.com/wp-content/uploads?wc-ajax=checkout',
+            'https://www.example.com:443/wp-content/uploads/x?wc-api=stripe',
+            'https://example.com/wp-content/uploads/x#a?rest_route=/',
+            'https://example.com/wp-content/uploads/x%3Frest_route=/wc/v3/orders',
+        ] as $url) {
+            $this->assertSame('live', $this->blocked($url), $url);
+        }
+        $this->assertNull($this->blocked('https://example.com/wp-content/uploads/2024/01/a.jpg#top'));
+        // Die Kopie ruft sich selbst mit Query auf (wp-cron, admin-ajax): das ist nicht Live.
+        $this->assertNull($this->blocked('https://example.com/wpsync-staging-0123456789ab/wp-cron.php?doing_wp_cron=1'));
+        // Uploads auf einem anderen Host sind nicht Live.
+        $this->assertNull($this->blocked('https://cdn.example.net/uploads/a.jpg?ver=1', 'https://cdn.example.net/uploads'));
+    }
+
     /** Was sich nicht eindeutig lesen lässt, geht nicht raus. */
     public function testBlocksUrlsItCannotRead(): void
     {
