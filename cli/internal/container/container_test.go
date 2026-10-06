@@ -437,3 +437,13 @@ func TestRunNameIsUniquePerRun(t *testing.T) {
 		t.Fatalf("names %q %q", a, b)
 	}
 }
+
+// Review N2: eine PHP-Version der Quelle außerhalb von <major>.<minor> wird kein Image-Name.
+func TestConfigureRejectsInvalidPHPVersion(t *testing.T) {
+	d := testDriver(t)
+	for _, bad := range []string{"8.3/../evil.1", "8.3@sha256:x", "8", "-8.3"} {
+		if err := d.Configure(agentapi.Env{PHPVersion: bad}); !errors.Is(err, agentapi.ErrInvalidEnv) {
+			t.Errorf("Configure(%q) = %v, want ErrInvalidEnv", bad, err)
+		}
+	}
+}

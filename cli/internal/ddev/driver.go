@@ -87,6 +87,12 @@ func (d *Driver) Exists(site string) (bool, error) { return Exists(d.dir(site)),
 
 // Configure keeps the source environment for Setup and Start.
 func (d *Driver) Configure(env agentapi.Env) error {
+	// An empty version leaves the choice to DDEV, as before; anything else must be <major>.<minor>.
+	if env.PHPVersion != "" {
+		if _, err := PHPMajorMinor(env.PHPVersion); err != nil {
+			return err
+		}
+	}
 	d.env = env
 	return nil
 }

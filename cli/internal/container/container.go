@@ -168,10 +168,14 @@ func (d *Driver) Exists(string) (bool, error) {
 
 // Configure takes PHP version, WordPress version and table prefix of the source; on every pull.
 func (d *Driver) Configure(env agentapi.Env) error {
-	d.php = ddev.MajorMinor(env.PHPVersion)
-	if d.php == "" {
+	if env.PHPVersion == "" {
 		return errors.New("die Quelle meldet keine PHP-Version")
 	}
+	php, err := ddev.PHPMajorMinor(env.PHPVersion)
+	if err != nil {
+		return err
+	}
+	d.php = php
 	d.prefix = env.TablePrefix
 	if d.prefix == "" {
 		d.prefix = "wp_"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -76,6 +77,9 @@ func Start(r Runner, p *Project, env agentapi.Env, mailguardSource string, out i
 	// Checked here as well as after /delta: Start is exported, and setup hands the prefix to `wp`.
 	if !agentapi.ValidTablePrefix(env.TablePrefix) {
 		return false, fmt.Errorf("%w: table_prefix %s", agentapi.ErrInvalidEnv, agentapi.Printable(env.TablePrefix))
+	}
+	if _, err := PHPMajorMinor(env.PHPVersion); env.PHPVersion != "" && err != nil {
+		return false, err
 	}
 	if !Exists(p.Dir) {
 		return true, setup(r, p, env, mailguardSource)
@@ -171,6 +175,19 @@ func MajorMinor(version string) string {
 		return version
 	}
 	return parts[0] + "." + parts[1]
+}
+
+var phpVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+
+// PHPMajorMinor returns <major>.<minor> of the source's PHP version. The value comes from the site
+// and becomes --php-version (DDEV) or part of the WP-CLI image name (container mode); anything
+// else than two numbers is ErrInvalidEnv.
+func PHPMajorMinor(version string) (string, error) {
+	mm := MajorMinor(version)
+	if !phpVersionRe.MatchString(mm) {
+		return "", fmt.Errorf("%w: php_version %s", agentapi.ErrInvalidEnv, agentapi.Printable(version))
+	}
+	return mm, nil
 }
 
 // LocalURL returns the project's HTTP URL.

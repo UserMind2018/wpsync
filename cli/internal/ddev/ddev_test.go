@@ -1,10 +1,13 @@
 package ddev
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/usermind/wpsync/internal/agentapi"
 )
 
 func TestDatabaseSpec(t *testing.T) {
@@ -58,5 +61,26 @@ func TestParseDescribe(t *testing.T) {
 	url, err := parseDescribe([]byte(`{"level":"info","raw":{"httpurl":"http://x.ddev.site:8480","status":"running"}}`))
 	if err != nil || url != "http://x.ddev.site:8480" {
 		t.Fatalf("url = %q, err = %v", url, err)
+	}
+}
+
+// Review N2: die PHP-Version stammt von der Quelle und landet in --php-version bzw. im Image-Namen.
+func TestPHPMajorMinor(t *testing.T) {
+	for in, want := range map[string]string{"8.3.35": "8.3", "7.4": "7.4", "8.4.0-1ubuntu": "8.4", "10.0.1": "10.0"} {
+		if got, err := PHPMajorMinor(in); err != nil || got != want {
+			t.Errorf("PHPMajorMinor(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "8", "8.3/../x.1", "8.x.1", "--privileged", "8.3@sha256:abc", " 8.3", "8.3 .1", "8.3\n.1"} {
+		if got, err := PHPMajorMinor(bad); !errors.Is(err, agentapi.ErrInvalidEnv) {
+			t.Errorf("PHPMajorMinor(%q) = %q, %v; want ErrInvalidEnv", bad, got, err)
+		}
+	}
+}
+
+func TestDriverConfigureRejectsInvalidPHPVersion(t *testing.T) {
+	d := &Driver{}
+	if err := d.Configure(agentapi.Env{PHPVersion: "8.3/../../x.1", TablePrefix: "wp_"}); !errors.Is(err, agentapi.ErrInvalidEnv) {
+		t.Fatalf("Configure = %v, want ErrInvalidEnv", err)
 	}
 }
