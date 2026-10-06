@@ -1,6 +1,9 @@
 package push
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -70,5 +73,49 @@ func TestSaveJournalRefusesASaltOfAnotherFormat(t *testing.T) {
 	j := NewJournal(testID, "https://kunde.de/rescue.php", "salt", baseline.New("https://kunde.de"), nil)
 	if err := SaveJournal(t.TempDir(), j); err == nil {
 		t.Error("a salt the agent never produces was accepted")
+	}
+}
+
+// Nach-Review M-2: <site>/.wpsync/pushes liegt auf dem Mac im DDEV-Mount. Symlinks dort führen
+// weder beim Schreiben noch beim Lesen aus dem Ordner hinaus.
+func TestJournalNeverFollowsSymlinks(t *testing.T) {
+	siteDir, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep"), 0o644)
+	dir := filepath.Join(siteDir, ".wpsync", "pushes")
+	os.MkdirAll(dir, 0o700)
+	os.Symlink(victim, filepath.Join(dir, testID+".json.tmp"))
+	os.Symlink(victim, filepath.Join(dir, testID+".json.wpsync-tmp"))
+	os.Symlink(victim, filepath.Join(dir, testID+".json"))
+	j := NewJournal(testID, "https://kunde.de/rescue.php", testSalt, baseline.New("https://kunde.de"), nil)
+	if err := SaveJournal(siteDir, j); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("SaveJournal wrote through a symlink: %q", b)
+	}
+
+	// a journal that is a symlink to a file outside is not read
+	other := "p_20261005_aaaaaaaaaaaa"
+	data, _ := os.ReadFile(filepath.Join(dir, testID+".json"))
+	foreign := filepath.Join(outside, "foreign.json")
+	os.WriteFile(foreign, []byte(strings.ReplaceAll(string(data), testID, other)), 0o644)
+	os.Symlink(foreign, filepath.Join(dir, other+".json"))
+	if _, err := LoadJournal(siteDir, other); err == nil {
+		t.Fatal("LoadJournal followed a symlink")
+	}
+
+	// a symlinked pushes folder is neither written nor read
+	site2 := t.TempDir()
+	os.MkdirAll(filepath.Join(site2, ".wpsync"), 0o700)
+	os.Symlink(dir, filepath.Join(site2, ".wpsync", "pushes"))
+	if err := SaveJournal(site2, j); err == nil {
+		t.Fatal("SaveJournal into a symlinked folder must fail")
+	}
+	if _, err := LoadJournal(site2, testID); err == nil {
+		t.Fatal("LoadJournal from a symlinked folder must fail")
+	}
+	if id := LatestJournal(site2); id != "" {
+		t.Fatalf("LatestJournal through a symlink = %s", id)
 	}
 }
