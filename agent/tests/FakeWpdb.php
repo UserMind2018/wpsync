@@ -25,10 +25,12 @@ final class FakeWpdb
     public $options = 'wp_options';
     /** @var list<string> */
     public $queries = [];
+    /** @var (callable(string): void)|null sieht jede Abfrage, bevor sie beantwortet wird */
+    public $observer = null;
     /** @var list<array{pattern: string, results: list<mixed>, error: string|null}> */
     private $answers = [];
 
-    /** Antworten in dieser Reihenfolge; die letzte gilt für alle weiteren Treffer. */
+    /** Antworten in dieser Reihenfolge; die letzte gilt für alle weiteren Treffer. Eine Closure wird mit dem SQL gefragt. */
     public function answer(string $pattern, ...$results): void
     {
         $this->answers[] = ['pattern' => $pattern, 'results' => $results, 'error' => null];
@@ -111,6 +113,9 @@ final class FakeWpdb
     {
         $this->last_error = '';
         $this->queries[]  = $sql;
+        if ($this->observer !== null) {
+            ($this->observer)($sql);
+        }
         foreach ($this->answers as $i => $answer) {
             if (preg_match($answer['pattern'], $sql) !== 1) {
                 continue;
@@ -123,7 +128,8 @@ final class FakeWpdb
             if (count($results) > 1) {
                 $this->answers[$i]['results'] = array_slice($results, 1);
             }
-            return [true, $results[0] ?? null];
+            $result = $results[0] ?? null;
+            return [true, $result instanceof \Closure ? $result($sql) : $result];
         }
         return [true, null];
     }

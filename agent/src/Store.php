@@ -135,15 +135,19 @@ final class Store
         return is_array($value) ? $value : null;
     }
 
-    /** @param array<string, mixed>|null $value */
-    public static function setState(string $name, ?array $value): void
+    /**
+     * @param array<string, mixed>|null $value
+     * @return bool false, wenn der Zustand nicht geschrieben wurde – der Staging-Job bricht dann ab,
+     *              statt einen Schritt zu wiederholen
+     */
+    public static function setState(string $name, ?array $value): bool
     {
         global $wpdb;
         if ($value === null) {
-            $wpdb->delete(self::table('state'), ['name' => $name]);
-            return;
+            return false !== $wpdb->delete(self::table('state'), ['name' => $name]);
         }
-        $wpdb->replace(self::table('state'), ['name' => $name, 'value' => wp_json_encode($value)]);
+        $json = wp_json_encode($value);
+        return is_string($json) && false !== $wpdb->replace(self::table('state'), ['name' => $name, 'value' => $json]);
     }
 
     /**
