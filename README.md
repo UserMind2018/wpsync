@@ -653,6 +653,12 @@ nichts davon im Docroot:
 
 Historie ansehen: `git --git-dir <slug>/.wpsync/history.git log`.
 
+**Bekannte Einschränkung (0.3.0):** `history.git` ist intern. Tauscht die Site während des
+Auto-Commits einen Ordner gegen einen Symlink, kann `git add` Dateien ausserhalb des Docroot in
+die Historie lesen (kein Schreiben, keine Ausführung). Der Aufrufer zeigt `history.git` deshalb
+nie an, liefert es nicht aus und spielt daraus nichts in den Docroot zurück. Behoben wird das in
+0.3.1 (Schnappschuss ohne Work-Tree).
+
 Im Docroot schreibt wpsync nur unter `wp-content/` und – als einzige Datei ausserhalb davon –
 `<docroot>/.htaccess`: Fehlt sie, legt wpsync bei Setup und jedem Folge-Pull den
 WordPress-Standardblock an (`RewriteBase` aus dem Pfad von `--local-url`, sonst `/`). Ohne die
