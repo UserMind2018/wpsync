@@ -29,6 +29,11 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"unpaired", &agentapi.APIError{Status: 401, Code: "wpsync_unpaired"}, cliout.ExitAuthFailed, "neu koppeln"},
 		{"unreachable", fmt.Errorf("%w: request /wpsync/v1/push-begin: dial tcp", agentapi.ErrUnreachable), cliout.ExitAgentUnreachable, "nicht erreichbar"},
 		{"window_closed", push.ErrWindowClosed, cliout.ExitPushWindowClosed, "Push-Fenster ist geschlossen"},
+		{"rollback_window", push.ErrRollbackWindow, cliout.ExitPushWindowClosed, "Push-Fenster"},
+		{"conflict", push.ErrConflict, cliout.ExitPushConflict, "zuerst wpsync pull kunde"},
+		{"pending", &push.PendingError{PushID: "p_x", Device: "mac"}, cliout.ExitPushPending, "wpsync rollback kunde"},
+		{"rolled_back", &push.RolledBackError{PushID: "p_x", Reasons: []string{"HTTP 500"}}, cliout.ExitPushRolledBack, "wieder auf dem alten Stand"},
+		{"busy", &agentapi.APIError{Status: 423, Code: "wpsync_push_locked", Message: "Auf dieser Site läuft bereits ein Push."}, cliout.ExitBusy, "läuft bereits ein Push"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
