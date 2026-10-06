@@ -51,6 +51,8 @@ type Failure struct {
 	Message   string `json:"message"`
 	Installed string `json:"installed,omitempty"`
 	Required  string `json:"required,omitempty"`
+	// Reason names a case within Code for callers that must not parse Message ("site_locked").
+	Reason string `json:"reason,omitempty"`
 }
 
 // UsageError: wrong call – unknown flag, missing argument, unsupported combination.
@@ -89,6 +91,9 @@ func Classify(err error) Failure {
 	var outdated *agentapi.OutdatedError
 	if errors.As(err, &outdated) {
 		f.Installed, f.Required = outdated.Installed, outdated.Required
+	}
+	if errors.Is(err, pull.ErrPullRunning) {
+		f.Reason = "site_locked"
 	}
 	return f
 }

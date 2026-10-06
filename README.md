@@ -583,7 +583,8 @@ fehlt das Feld, gab es keine. Werte:
 
 **Site-Lock.** Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (`flock` auf
 `<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
-sofort mit Exit 20 (`local_env`, „für diese Site läuft bereits ein wpsync-Vorgang“), ohne die
+sofort mit Exit 20 (`local_env`, `error.reason: "site_locked"`; Aufrufer prüfen `reason`, nicht
+den Meldungstext), ohne die
 Quelle zu fragen. Der Lock gilt bis zum Prozessende, auch nach SIGKILL. Unter dem Lock räumen
 die Befehle Reste eines gekillten Vorgängers weg: liegengebliebene git-Locks im internen Repo
 und – beim Pull im Container-Modus – Hilfscontainer mit dem Label `wpsync.site=<Schlüssel>`.
@@ -602,7 +603,7 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | 12 | pair_rejected | Pairing-Code falsch oder abgelaufen |
 | 13 | auth_failed | Kopplung widerrufen |
 | 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
-| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits |
+| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits (`error.reason: "site_locked"`) |
 | 21 | disk_full | |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort |

@@ -103,3 +103,14 @@ func TestFileWriteENOSPCIsDiskFull(t *testing.T) {
 		t.Fatalf("Classify(%v) = %d, want %d", err, f.Exit, ExitDiskFull)
 	}
 }
+
+// Das OS erkennt den belegten Site-Lock an error.reason, nicht am Meldungstext.
+func TestSiteLockedHasAReason(t *testing.T) {
+	f := Classify(localenv.Wrap("lock", pull.ErrPullRunning))
+	if f.Exit != ExitLocalEnv || f.Reason != "site_locked" {
+		t.Fatalf("failure = %+v", f)
+	}
+	if f := Classify(localenv.Wrap("container", errors.New("boom"))); f.Reason != "" {
+		t.Fatalf("other local_env errors carry no reason: %+v", f)
+	}
+}

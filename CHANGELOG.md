@@ -64,7 +64,7 @@ weiterhin Agent 0.3.0 oder neuer, `push` 0.4.0.
   abzubrechen: Meldung je Pfad, `"warnings": ["symlink_skipped"]`, der nächste Pull fragt sie
   erneut an
 - Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (Site-Lock); ein zweiter
-  endet sofort mit Exit 20. Push und Rollback räumen alte git-Locks wie der Pull weg
+  endet sofort mit Exit 20 und `error.reason: "site_locked"` im JSON. Push und Rollback räumen alte git-Locks wie der Pull weg
 - Container-Modus: Jeder `docker run` von wpsync läuft mit `--init`, Namen `wpsync-<site>-…` und
   Label `wpsync.site=<Schlüssel des Site-Ordners>`. Nach SIGTERM entfernt wpsync den laufenden Hilfscontainer, beim
   nächsten Pull auch verwaiste eines gekillten Laufs; bisher lief er nach dem Abbruch weiter
