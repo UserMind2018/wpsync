@@ -48,7 +48,16 @@ func installFakeDocker(t *testing.T) fake {
 	t.Setenv("FAKE_MISSING", "")
 	t.Setenv("FAKE_RUNNING", "")
 	t.Setenv("FAKE_PS", "")
+	fixedRunName(t)
 	return f
+}
+
+// fixedRunName makes the container names of docker run predictable.
+func fixedRunName(t *testing.T) {
+	t.Helper()
+	orig := runName
+	runName = func(site string) string { return "wpsync-" + site + "-test" }
+	t.Cleanup(func() { runName = orig })
 }
 
 func (f fake) calls(t *testing.T) []string {
@@ -94,7 +103,8 @@ func TestRunnerRunsWPCLIInTheSiteNetwork(t *testing.T) {
 	if err := d.Runner("vorlage").Run("wp", "option", "get", "siteurl"); err != nil {
 		t.Fatal(err)
 	}
-	want := "run --rm --network container:ws-dev-vorlage --volumes-from ws-dev-vorlage --user 33:33 " +
+	want := "run --rm --init --name wpsync-vorlage-test --label wpsync.site=vorlage " +
+		"--network container:ws-dev-vorlage --volumes-from ws-dev-vorlage --user 33:33 " +
 		"-e WORDPRESS_DB_HOST -e WORDPRESS_DB_NAME -e WORDPRESS_DB_USER -e WORDPRESS_DB_PASSWORD -e WORDPRESS_TABLE_PREFIX " +
 		"wordpress:cli-php8.3 wp option get siteurl"
 	if got := f.calls(t); !reflect.DeepEqual(got, []string{want}) {
@@ -116,7 +126,7 @@ func TestRunnerImportsSQLWithMariaDBClient(t *testing.T) {
 	if err := d.Runner("vorlage").RunStdin(strings.NewReader("SELECT 1;"), importArgs...); err != nil {
 		t.Fatal(err)
 	}
-	want := "run --rm -i --network container:ws-dev-vorlage -e MYSQL_PWD wordpress:cli-php8.2 mariadb --skip-ssl --binary-mode --local-infile=0 -h wp-mariadb -u ws_dev_vorlage ws_dev_vorlage"
+	want := "run --rm -i --init --name wpsync-vorlage-test --label wpsync.site=vorlage --network container:ws-dev-vorlage -e MYSQL_PWD wordpress:cli-php8.2 mariadb --skip-ssl --binary-mode --local-infile=0 -h wp-mariadb -u ws_dev_vorlage ws_dev_vorlage"
 	if got := f.calls(t); !reflect.DeepEqual(got, []string{want}) {
 		t.Fatalf("calls = %v", got)
 	}
@@ -345,5 +355,85 @@ func TestHtaccessUsesLocalURLPath(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(d.Docroot, ".htaccess"))
 	if !strings.Contains(string(data), "RewriteBase /sub/\n") || !strings.Contains(string(data), "RewriteRule . /sub/index.php [L]") {
 		t.Fatalf(".htaccess = %q", data)
+	}
+}
+
+// Review M1: SIGTERM beendet nur die docker-CLI. Der Container läuft mit --init (Signale erreichen
+// WP-CLI), trägt Name und Label und wird nach dem Abbruch per docker rm -f entfernt.
+func TestCancelRemovesTheRunContainer(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\n[ \"$1\" = run ] && exec sleep 30\nexit 0\n"
+	os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fixedRunName(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	d := testDriver(t)
+	d.Ctx = ctx
+	d.Configure(agentapi.Env{PHPVersion: "8.3"})
+	go func() {
+		for {
+			if data, _ := os.ReadFile(log); len(data) > 0 {
+				cancel()
+				return
+			}
+		}
+	}()
+	err := d.Runner("vorlage").Run("wp", "option", "get", "home")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	data, _ := os.ReadFile(log)
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "run --rm --init --name wpsync-vorlage-test --label wpsync.site=vorlage ") ||
+		calls[1] != "rm -f wpsync-vorlage-test" {
+		t.Fatalf("calls = %q", calls)
+	}
+}
+
+// Ohne Abbruch kein docker rm: --rm räumt selbst auf.
+func TestRunWithoutCancelRemovesNothing(t *testing.T) {
+	f := installFakeDocker(t)
+	d := testDriver(t)
+	d.Configure(agentapi.Env{PHPVersion: "8.3"})
+	if err := d.Runner("vorlage").Run("wp", "option", "get", "home"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.calls(t) {
+		if strings.HasPrefix(c, "rm ") {
+			t.Fatalf("unexpected %q", c)
+		}
+	}
+}
+
+// Beim Pull-Start (unter dem Site-Lock) räumt wpsync verwaiste Läufe der Site weg – nur die eigenen.
+func TestRemoveOrphans(t *testing.T) {
+	f := installFakeDocker(t)
+	ps := filepath.Join(t.TempDir(), "ps")
+	os.WriteFile(ps, []byte("abc123\ndef456\n"), 0o644)
+	t.Setenv("FAKE_PS", ps)
+	d := testDriver(t)
+	if err := d.RemoveOrphans("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ps -aq --filter label=wpsync.site=vorlage", "rm -f abc123 def456"}
+	if got := f.calls(t); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+
+	os.WriteFile(ps, nil, 0o644)
+	os.Remove(f.log)
+	if err := d.RemoveOrphans("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.calls(t); !reflect.DeepEqual(got, []string{"ps -aq --filter label=wpsync.site=vorlage"}) {
+		t.Fatalf("calls = %q", got)
+	}
+}
+
+func TestRunNameIsUniquePerRun(t *testing.T) {
+	a, b := runName("vorlage"), runName("vorlage")
+	if a == b || !strings.HasPrefix(a, "wpsync-vorlage-") || !nameRe.MatchString(a) {
+		t.Fatalf("names %q %q", a, b)
 	}
 }

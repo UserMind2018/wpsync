@@ -34,6 +34,7 @@ func TestExitCodes(t *testing.T) {
 		{"rate_limited", &agentapi.APIError{Status: 429, Code: "wpsync_busy"}, ExitRateLimited},
 		{"rate_limited_ban", fmt.Errorf("%w: connection reset", agentapi.ErrSuspectedBan), ExitRateLimited},
 		{"local_env", localenv.Wrap("exists", errors.New("container ws-dev-x fehlt")), ExitLocalEnv},
+		{"local_env_pull_running", localenv.Wrap("lock", pull.ErrPullRunning), ExitLocalEnv},
 		{"disk_full", &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, ExitDiskFull},
 		{"disk_full_wins_over_local_env", localenv.Wrap("db import", &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}), ExitDiskFull},
 		{"postsetup_failed", &pull.PostSetupError{Err: pull.ErrMailguardMissing}, ExitPostSetupFailed},

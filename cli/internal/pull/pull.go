@@ -268,6 +268,18 @@ func run(o Options) error {
 	if err != nil {
 		return err
 	}
+	lock, err := lockSite(o.lockPath())
+	if err != nil {
+		return localenv.Wrap("lock", err)
+	}
+	defer lock.Close()
+	// Leftovers of a killed pull (container mode: docker runs that outlived their CLI) go first –
+	// only now, under the lock, none of them can belong to a running pull.
+	if r, ok := o.Driver.(localenv.OrphanRemover); ok {
+		if err := r.RemoveOrphans(o.Site.Name); err != nil {
+			return localenv.Wrap("orphans", err)
+		}
+	}
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
 	client.Ctx = o.Ctx
 	drv, name := o.Driver, o.Site.Name

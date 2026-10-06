@@ -58,6 +58,12 @@ type UploadsProxy interface {
 	UploadsProxy(site, sourceURL, userAgent string, enabled bool) error
 }
 
+// OrphanRemover is implemented by drivers whose helper runs can outlive a killed pull (container
+// mode); pull calls it under the site lock before anything else.
+type OrphanRemover interface {
+	RemoveOrphans(site string) error
+}
+
 // Error marks a failure of the local environment (exit code local_env).
 type Error struct {
 	Op  string

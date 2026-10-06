@@ -6,6 +6,8 @@ package container
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,20 @@ const wwwData = "33:33"
 
 // stopGrace: after SIGTERM the docker CLI gets this long before it is killed.
 const stopGrace = 10 * time.Second
+
+// removeTimeout bounds the docker rm -f after a cancelled run; the pull's own context is done then.
+const removeTimeout = 30 * time.Second
+
+// LabelRun marks every docker run of wpsync with its site, so a pull finds runs that outlived a
+// killed predecessor (RemoveOrphans).
+const LabelRun = "wpsync.site"
+
+// runName names one docker run: wpsync-<site>-<random>. Tests replace it.
+var runName = func(site string) string {
+	b := make([]byte, 6)
+	rand.Read(b)
+	return "wpsync-" + site + "-" + hex.EncodeToString(b)
+}
 
 // Config are the per-call parameters of the container mode.
 type Config struct {
@@ -93,7 +109,10 @@ type Driver struct {
 	php, prefix, wpVersion string
 }
 
-var _ localenv.Driver = (*Driver)(nil)
+var (
+	_ localenv.Driver        = (*Driver)(nil)
+	_ localenv.OrphanRemover = (*Driver)(nil)
+)
 
 // ErrNoCore: the docroot has no WordPress core. The site network has no internet, so wpsync does
 // not download it; the caller puts the core in place before the first pull (exit code local_env).
@@ -115,6 +134,9 @@ func (d *Driver) docker(stdin io.Reader, stdout io.Writer, env []string, args ..
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, d.Err
 	if err := cmd.Run(); err != nil {
+		if ctxErr := d.ctx().Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			return fmt.Errorf("docker %s: %w (%w)", args[0], ctxErr, err)
+		}
 		return fmt.Errorf("docker %s: %w", args[0], err)
 	}
 	return nil
@@ -337,28 +359,33 @@ func (r *runner) wpEnv() (flags, env []string) {
 	return flags, env
 }
 
-func (r *runner) translate(args []string) (dockerArgs, env []string, err error) {
+// translate returns the docker run for args and the container name it gets. Every run has
+// --init, so a SIGTERM that the docker CLI forwards reaches WP-CLI or the client instead of a PID 1
+// that ignores it, plus a name and the label LabelRun for the cleanup after a cancel or a kill.
+func (r *runner) translate(args []string) (dockerArgs, env []string, name string, err error) {
 	d := r.d
 	if len(args) == 0 {
-		return nil, nil, errors.New("container: empty command")
+		return nil, nil, "", errors.New("container: empty command")
 	}
 	net := "container:" + d.Container
+	name = runName(d.Site)
+	own := []string{"--init", "--name", name, "--label", LabelRun + "=" + d.Site, "--network", net}
 	switch args[0] {
 	case "wp":
 		flags, env := r.wpEnv()
-		a := []string{"run", "--rm", "--network", net, "--volumes-from", d.Container, "--user", wwwData}
+		a := append(append([]string{"run", "--rm"}, own...), "--volumes-from", d.Container, "--user", wwwData)
 		a = append(append(a, flags...), d.image())
-		return append(a, args...), env, nil
+		return append(a, args...), env, name, nil
 	case "mysql":
 		opts, err := clientOptions(args[1:])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
-		a := append([]string{"run", "--rm", "-i", "--network", net, "-e", "MYSQL_PWD", d.image(), "mariadb", "--skip-ssl"}, opts...)
-		a = append(a, "-h", d.DBHost, "-u", d.DBUser, d.DBName)
-		return a, []string{"MYSQL_PWD=" + d.DBPassword}, nil
+		a := append(append([]string{"run", "--rm", "-i"}, own...), "-e", "MYSQL_PWD", d.image(), "mariadb", "--skip-ssl")
+		a = append(append(a, opts...), "-h", d.DBHost, "-u", d.DBUser, d.DBName)
+		return a, []string{"MYSQL_PWD=" + d.DBPassword}, name, nil
 	}
-	return nil, nil, fmt.Errorf("container: unsupported command %q", args[0])
+	return nil, nil, "", fmt.Errorf("container: unsupported command %q", args[0])
 }
 
 // importHardening are the client options pull sends with every SQL import (pull.importArgs): they
@@ -388,14 +415,47 @@ func clientOptions(args []string) ([]string, error) {
 }
 
 func (r *runner) exec(stdin io.Reader, stdout io.Writer, args []string) error {
-	dockerArgs, env, err := r.translate(args)
+	dockerArgs, env, name, err := r.translate(args)
 	if err != nil {
 		return err
 	}
+	started := r.d.ctx().Err() == nil // cancelled before: docker does not even start
 	if err := r.d.docker(stdin, stdout, env, dockerArgs...); err != nil {
+		if started && r.d.ctx().Err() != nil {
+			// Cancelled (SIGTERM): the CLI is gone, the container may still run. --rm only
+			// applies once it ends, so remove it here; a failure is left to RemoveOrphans.
+			r.d.remove(name)
+		}
 		return fmt.Errorf("%s: %w", strings.Join(args[:min(len(args), 3)], " "), err)
 	}
 	return nil
+}
+
+// remove force-removes containers with a short context of its own (the pull's is cancelled).
+func (d *Driver) remove(names ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), removeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"rm", "-f"}, names...)...)
+	cmd.Stdout, cmd.Stderr = io.Discard, d.Err
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker rm: %w", err)
+	}
+	return nil
+}
+
+// RemoveOrphans removes the docker runs of site that outlived a killed pull (label LabelRun).
+// pull calls it under the site lock, so none of them belongs to a running pull.
+func (d *Driver) RemoveOrphans(site string) error {
+	out, err := d.output("ps", "-aq", "--filter", "label="+LabelRun+"="+site)
+	if err != nil {
+		return err
+	}
+	ids := strings.Fields(out)
+	if len(ids) == 0 {
+		return nil
+	}
+	fmt.Fprintf(d.Out, "  %d verwaiste Hilfscontainer eines abgebrochenen Pulls entfernt\n", len(ids))
+	return d.remove(ids...)
 }
 
 func (r *runner) Run(args ...string) error { return r.exec(nil, r.d.Out, args) }

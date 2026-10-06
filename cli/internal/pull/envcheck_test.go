@@ -231,7 +231,7 @@ func TestRunWithInvalidEnvLeavesNoTrace(t *testing.T) {
 			if calls := readCalls(dockerLog); len(calls) != 0 {
 				t.Errorf("docker called: %q", calls)
 			}
-			if entries, _ := os.ReadDir(root); len(entries) != 0 {
+			if entries := sitesRootTrace(root, "kunde"); len(entries) != 0 {
 				t.Errorf("SitesRoot not empty: %v", entries)
 			}
 			if _, err := os.Stat(store.Dir); err == nil {
