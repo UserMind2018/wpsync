@@ -42,11 +42,7 @@ func RescueAllowed(siteURL, rescueURL string) error {
 
 // onSite: rawURL has the scheme and host (with port) of the paired site. http passes only when
 // the site itself was paired over http.
-func onSite(siteURL, rawURL string) bool {
-	site, err1 := url.Parse(siteURL)
-	u, err2 := url.Parse(rawURL)
-	return err1 == nil && err2 == nil && u.Host != "" && strings.EqualFold(site.Host, u.Host) && site.Scheme == u.Scheme
-}
+func onSite(siteURL, rawURL string) bool { return agentapi.SameOrigin(siteURL, rawURL) }
 
 // RescuePing checks that rescue.php answers without WordPress.
 func RescuePing(hc *http.Client, rescueURL string) error {

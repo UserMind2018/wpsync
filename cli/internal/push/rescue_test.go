@@ -48,7 +48,11 @@ func TestRescueKeyAcceptedByAgentCode(t *testing.T) {
 	key := RescueKey(secret, pushID, "salt")
 	sum := sha256.Sum256([]byte(key))
 
-	content := t.TempDir()
+	// PushRescue vergleicht mit dem aufgelösten wp-content; das Temp-Verzeichnis von macOS ist ein Symlink.
+	content, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	work := filepath.Join(content, "wpsync-push-abc")
 	if err := os.MkdirAll(filepath.Join(work, pushID), 0o755); err != nil {
 		t.Fatal(err)
@@ -58,7 +62,7 @@ $c = getenv("CONTENT"); $id = getenv("PUSH_ID");
 \WpSync\PushRescue::write($c . "/wpsync-push-abc", $id, getenv("KEY_HASH"), [], \WpSync\PushRescue::COMMITTED);
 echo hash_equals(getenv("KEY_HASH"), hash("sha256", \WpSync\PushRescue::key(getenv("SECRET"), $id, "salt"))) ? "same" : "differs", "\n";
 foreach (["wrong", getenv("KEY")] as $k) {
-    list($s, $b) = \WpSync\PushRescue::handle($c, ["action" => "rollback", "push_id" => $id, "key" => $k], time());
+    list($s, $b) = \WpSync\PushRescue::handle([$c], ["action" => "rollback", "push_id" => $id, "key" => $k], time());
     echo $s, " ", json_encode($b), "\n";
 }`
 	cmd := exec.Command(php, "-r", script)
