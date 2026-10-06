@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -542,6 +543,13 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		// The baseline describes live: a push to staging changes neither it nor the internal git
 		// (Spec 2b 6.2). The next push to live uploads the same state and checks it against live.
+		for _, file := range leftOut(units, stamps) {
+			why := ""
+			if strings.EqualFold(path.Base(file), ".htaccess") {
+				why = " (eine .htaccess mit Rewrite-Regeln nähme ihrem Ordner die Zugangssperre der Kopie; nach Live geht sie mit)"
+			}
+			fmt.Fprintf(o.Out, "  ! nicht in die Kopie übernommen: %s%s\n", file, why)
+		}
 		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
 			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, strings.Join(names, " "))
 		return nil
@@ -654,6 +662,26 @@ func showVersion(v string) string {
 		return "–"
 	}
 	return agentapi.Printable(v)
+}
+
+// leftOut lists the files of the manifest the agent did not place, as unit/file. A push to staging
+// leaves out a .htaccess with rewrite directives, as the copy itself does. A unit the agent sent no
+// stamps for says nothing.
+func leftOut(units []Unit, stamps map[string]map[string]agentapi.PushStamp) []string {
+	var out []string
+	for _, u := range units {
+		placed, ok := stamps[u.Path]
+		if !ok {
+			continue
+		}
+		for rel := range u.Files {
+			if _, ok := placed[rel]; !ok {
+				out = append(out, u.Path+"/"+rel)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // upload sends the needed files of one unit, at most ChunkBytes of raw data per request;

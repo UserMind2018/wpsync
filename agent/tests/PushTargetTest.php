@@ -150,6 +150,99 @@ final class PushTargetTest extends TestCase
         $this->assertSame('live-old', $this->liveFile());
     }
 
+    /** @return array{size: int, sha256: string, mtime: int} */
+    private function entry(string $content): array
+    {
+        return ['size' => strlen($content), 'sha256' => hash('sha256', $content), 'mtime' => 1700000000];
+    }
+
+    /**
+     * Ganzer Push einer Einheit mit mehreren Dateien bis nach dem Tausch.
+     *
+     * @param array<string, string> $files
+     */
+    private function pushFiles(string $target, array $files): void
+    {
+        $begin = Push::begin(['target' => $target, 'force' => true, 'units' => [['path' => 'plugins/x', 'files' => array_map([$this, 'entry'], $files), 'base' => []]]], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code : '');
+        $id     = (string) $begin->data['push_id'];
+        $chunks = [];
+        foreach ($begin->data['units'][0]['need'] as $rel) {
+            $chunks[] = ['path' => $rel, 'data' => base64_encode($files[$rel]), 'offset' => 0];
+        }
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::upload(['push_id' => $id, 'unit' => 0, 'files' => $chunks], self::KEY));
+        $commit = Push::commit(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->confirm($id);
+    }
+
+    /**
+     * Eine .htaccess mit Rewrite-Direktiven nähme ihrem Ordner die Cookie-Sperre der Kopie: im E2E
+     * kam eine PHP-Datei daneben nach einem Push ohne Cookie. Sie bleibt draussen, wie beim Kopieren.
+     */
+    public function testAStagingPushLeavesOutAHtaccessThatLiftsTheGate(): void
+    {
+        $files = [
+            'main.php'       => 'new',
+            'sub/.htaccess'  => "RewriteEngine On\nRewriteRule ^nothing$ - [L]\n",
+            'sub/open.php'   => '<?php echo 1;',
+            'base/.HTACCESS' => "RewriteBase /\n",
+            'inc/.htaccess'  => "Require all denied\n",
+        ];
+        $this->pushFiles('staging', $files);
+        $unit = $this->staging . '/plugins/x';
+        $this->assertSame('new', $this->stagingFile());
+        $this->assertFileExists($unit . '/sub/open.php');
+        $this->assertFileExists($unit . '/inc/.htaccess', 'a .htaccess without rewrite directives stays');
+        $this->assertFileDoesNotExist($unit . '/sub/.htaccess');
+        $this->assertFileDoesNotExist($unit . '/base/.HTACCESS');
+
+        // Nach Live geht dieselbe Einheit vollständig.
+        $this->pushFiles('live', $files);
+        $this->assertSame($files['sub/.htaccess'], file_get_contents($this->live . '/plugins/x/sub/.htaccess'));
+    }
+
+    /**
+     * Was die Kopie von Live weglässt (StagingFiles), steht in der Baseline des Clients und fehlt
+     * auf Staging – im E2E meldete schon der erste Push nach Staging deshalb einen Konflikt.
+     */
+    public function testWhatTheCopyLeavesOutIsNoConflict(): void
+    {
+        $rules = "RewriteEngine On\n";
+        foreach ([$this->live, $this->staging] as $content) {
+            mkdir($content . '/plugins/x/sub');
+            file_put_contents($content . '/plugins/x/main.php', 'same');
+            file_put_contents($content . '/plugins/x/sub/a.php', 'a');
+        }
+        file_put_contents($this->live . '/plugins/x/sub/.htaccess', $rules);
+        file_put_contents($this->live . '/plugins/x/.user.ini', 'x');
+        $base = [];
+        foreach (['main.php' => 'same', 'sub/a.php' => 'a', 'sub/.htaccess' => $rules, '.user.ini' => 'x'] as $rel => $content) {
+            touch($this->live . '/plugins/x/' . $rel, 1700000000);
+            if (is_file($this->staging . '/plugins/x/' . $rel)) {
+                touch($this->staging . '/plugins/x/' . $rel, 1700000000);
+            }
+            $base[$rel] = ['size' => strlen($content), 'mtime' => 1700000000];
+        }
+        $plan = static function (string $target, array $base): array {
+            $unit = ['path' => 'plugins/x', 'files' => ['main.php' => ['size' => 3, 'sha256' => hash('sha256', 'new'), 'mtime' => 1700000001]], 'base' => $base];
+            return Push::begin(['target' => $target, 'dry' => true, 'units' => [$unit]], 'k_test')->data['units'][0]['conflicts'];
+        };
+        $this->assertSame([], $plan('staging', $base));
+        $this->assertSame([], $plan('live', $base), 'live holds every file of the baseline');
+
+        // Eine Datei, die die Kopie nicht weglässt und die dort fehlt, bleibt ein Konflikt.
+        file_put_contents($this->live . '/plugins/x/sub/b.php', 'b');
+        $this->assertSame(['sub/b.php'], $plan('staging', $base + ['sub/b.php' => ['size' => 1, 'mtime' => 1700000000]]));
+        // Ebenso ein Pfad, der aus der Einheit herausführt oder den es auf Live nicht gibt.
+        mkdir($this->live . '/plugins/y');
+        file_put_contents($this->live . '/plugins/y/.htaccess', $rules);
+        $this->assertSame(['../y/.htaccess', 'gone/.htaccess'], $plan('staging', $base + ['../y/.htaccess' => ['size' => 1, 'mtime' => 1], 'gone/.htaccess' => ['size' => 1, 'mtime' => 1]]));
+        // Auf Live fehlt die Datei wirklich: dort bleibt es ein Konflikt.
+        unlink($this->live . '/plugins/x/sub/.htaccess');
+        $this->assertSame(['sub/.htaccess', 'sub/b.php'], $plan('live', $base));
+    }
+
     public function testALivePushLeavesTheCopyAlone(): void
     {
         $id = $this->push('live', 'new');

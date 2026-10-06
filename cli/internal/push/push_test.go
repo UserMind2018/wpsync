@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,7 @@ type fakeSite struct {
 	redirect    string   // where the front page of the copy redirects to; empty: it answers
 	cookies     []string // "path cookie-header" of every frontend request
 	stgHealth   []string // extra pages the agent names for a push to staging
+	leftOut     []string // "unit/file" the commit does not place (staging: a .htaccess with rewrite rules)
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -218,7 +220,9 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		for _, u := range f.begins[len(f.begins)-1].Units {
 			stamps[u.Path] = map[string]agentapi.PushStamp{}
 			for rel, file := range u.Files {
-				stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
+				if !slices.Contains(f.leftOut, u.Path+"/"+rel) {
+					stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
+				}
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]any{"next": nil, "stamps": stamps})

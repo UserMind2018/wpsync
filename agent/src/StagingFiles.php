@@ -85,7 +85,7 @@ final class StagingFiles
                 if ($files > 0 && microtime(true) > $deadline) {
                     return ['next' => [$i, ''], 'files' => $files];
                 }
-                if ($after === '' && !self::skips($items[$i], $src)) {
+                if ($after === '' && !self::leftOut($items[$i], $src)) {
                     self::file($src, $to . '/' . $items[$i], $check);
                     $files++;
                 }
@@ -121,7 +121,7 @@ final class StagingFiles
                 return null;
             }
             if (is_file($src)) {
-                $bytes += self::skips($item, $src) ? 0 : (int) @filesize($src);
+                $bytes += self::leftOut($item, $src) ? 0 : (int) @filesize($src);
                 continue;
             }
             foreach (self::walk($src, '', $item . '/') as $rel) {
@@ -227,9 +227,11 @@ final class StagingFiles
      * (Excludes::path), sonst Excludes::file; überall dazu Varianten der wp-config.php (Zugangsdaten
      * von Live), .user.ini und jede .htaccess mit Rewrite-Direktiven (liftsTheGate).
      *
+     * Auch Push fragt hier: was die Kopie weglässt, fehlt dort nicht „seit dem letzten Pull“.
+     *
      * @param string $rel relativ zu ABSPATH
      */
-    private static function skips(string $rel, string $full): bool
+    public static function leftOut(string $rel, string $full): bool
     {
         $name = strtolower(basename($rel));
         if (in_array($rel, self::NEVER, true) || self::isConfig($name) || $name === '.user.ini') {
@@ -247,7 +249,7 @@ final class StagingFiles
 
     /**
      * Dateien unter $dir in strcmp-Reihenfolge, relativ zu $dir, nur die hinter $after. Keine
-     * Symlinks, keine VCS-Ordner und nichts, was skips() ausschliesst.
+     * Symlinks, keine VCS-Ordner und nichts, was leftOut() ausschliesst.
      *
      * @param string $item Pfad von $dir relativ zu ABSPATH, mit „/“ am Ende
      * @return \Generator<int, string>
@@ -270,7 +272,7 @@ final class StagingFiles
                 }
                 continue;
             }
-            if ($cmp > 0 && !self::skips($item . $prefix . $name, $full)) {
+            if ($cmp > 0 && !self::leftOut($item . $prefix . $name, $full)) {
                 yield $prefix . $name;
             }
         }

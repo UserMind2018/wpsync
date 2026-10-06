@@ -85,6 +85,33 @@ func TestRunToStagingKeepsTheBaselineAndUsesTheAccessCookie(t *testing.T) {
 	}
 }
 
+// The copy keeps no .htaccess with rewrite directives (it would lift the access gate of its folder):
+// the agent leaves it out of a push to staging, and the push says so instead of claiming the copy
+// equals the local state.
+func TestRunToStagingNamesWhatTheCopyLeavesOut(t *testing.T) {
+	f, o, siteDir, out := stagingSite(t)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/sub/.htaccess", "RewriteEngine On\n", 1800000000)
+	f.leftOut = []string{"plugins/x/sub/.htaccess"}
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "nicht in die Kopie übernommen: plugins/x/sub/.htaccess") || !strings.Contains(out.String(), "Zugangssperre") {
+		t.Errorf("no note about the file left out:\n%s", out)
+	}
+	if strings.Contains(out.String(), "main.php (") {
+		t.Errorf("a placed file is named as left out:\n%s", out)
+	}
+
+	// Nothing to say when the agent placed every file.
+	f, o, _, out = stagingSite(t)
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "nicht in die Kopie übernommen") {
+		t.Errorf("note without a file left out:\n%s", out)
+	}
+}
+
 // AC-98: the push to live after the test on staging uploads the same state and is checked against live.
 func TestPushToLiveAfterStagingUploadsEverythingAgain(t *testing.T) {
 	f, o, siteDir, out := stagingSite(t)

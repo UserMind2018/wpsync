@@ -126,7 +126,8 @@ final class Push
                 return self::error('wpsync_push_unit', 'Einheit liegt nicht im wp-content des Ziels: ' . $unit['path'], 400);
             }
             $exists    = is_dir($dir);
-            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path']) : [], $unit['base']);
+            $base      = $target === 'staging' ? self::copyBase($live . '/' . $unit['path'], $dir, $unit['path'], $unit['base']) : $unit['base'];
+            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path']) : [], $base);
             $writable  = is_writable(dirname($dir)) && (!$exists || is_writable($dir));
             $plans[]   = [
                 'path'      => $unit['path'],
@@ -357,6 +358,11 @@ final class Push
                     if (!is_file($built) || (int) filesize($built) !== (int) $want['size']) {
                         throw new \RuntimeException('not built: ' . $unit['path'] . '/' . $rel);
                     }
+                }
+            }
+            if ($target === 'staging') {
+                foreach (array_keys($plan['units']) as $n) {
+                    self::keepTheGate($base . '/new/' . $n);
                 }
             }
         } catch (\RuntimeException $e) {
@@ -632,6 +638,51 @@ final class Push
                 : self::error('wpsync_push_state', 'Das Ziel dieses Pushs ist nicht benutzbar.', 409);
         }
         return [$content, self::workDir($content)];
+    }
+
+    /**
+     * Die Baseline des Clients beschreibt Live; die Kopie lässt davon Dateien weg (StagingFiles:
+     * .htaccess mit Rewrite-Direktiven, .user.ini, Varianten der wp-config.php). Was deshalb auf
+     * Staging fehlt, ist kein Konflikt – entschieden an der Datei von Live, nicht am Namen allein.
+     *
+     * @param array<string, mixed> $base
+     * @return array<string, mixed>
+     */
+    private static function copyBase(string $liveDir, string $dir, string $unit, array $base): array
+    {
+        foreach (array_keys($base) as $rel) {
+            $rel  = (string) $rel;
+            $from = $liveDir . '/' . $rel;
+            // Der Pfad kommt vom Client: nur einer, den auch ein Manifest nennen dürfte.
+            if (!PushUnits::validFile($unit, $rel) || file_exists($dir . '/' . $rel) || is_link($dir . '/' . $rel)) {
+                continue;
+            }
+            if (is_file($from) && !is_link($from) && StagingFiles::leftOut('wp-content/' . $unit . '/' . $rel, $from)) {
+                unset($base[$rel]);
+            }
+        }
+        return $base;
+    }
+
+    /**
+     * Vor dem Tausch in die Kopie: eine gepushte .htaccess, die ihrem Ordner die Cookie-Sperre nähme
+     * (StagingFiles::liftsTheGate), bleibt draussen – wie beim Kopieren. Symlinks werden nicht betreten.
+     *
+     * @throws \RuntimeException wenn sich eine solche Datei nicht entfernen lässt
+     */
+    private static function keepTheGate(string $dir): void
+    {
+        foreach (@scandir($dir) ?: [] as $name) {
+            $full = $dir . '/' . $name;
+            if ($name === '.' || $name === '..' || is_link($full)) {
+                continue;
+            }
+            if (is_dir($full)) {
+                self::keepTheGate($full);
+            } elseif (StagingFiles::liftsTheGate($full) && !@unlink($full)) {
+                throw new \RuntimeException('cannot leave out ' . self::printable($name));
+            }
+        }
     }
 
     /**
