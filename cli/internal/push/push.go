@@ -398,13 +398,26 @@ func Run(o Options) error {
 		}
 		return ErrNothing
 	}
+	// Which units changed is decided by the baseline alone (scan above). Only the base of the
+	// conflict check differs for staging: a unit this machine pushed there before is compared with
+	// the stamps that push left in the copy, every other unit with the baseline – the copy was made
+	// from live. A push to live never reads the staging stamps.
+	var copied *copyID
+	var known *stagingBase
+	if target == TargetStaging {
+		copied, known = o.stagingStamps(siteDir)
+	}
 	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true}
 	names := make([]string, len(units))
 	for i := range units {
 		if err := units[i].Hash(docroot); err != nil {
 			return err
 		}
-		req.Units = append(req.Units, units[i].Request())
+		unit := units[i].Request()
+		if base := known.unit(units[i].Path); base != nil {
+			unit.Base = base
+		}
+		req.Units = append(req.Units, unit)
 		names[i] = units[i].Path
 	}
 	report.Units = names
@@ -432,6 +445,13 @@ func Run(o Options) error {
 		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
 	}
 	conflict, readonly, versionChange := printPlan(o.Out, units, plan)
+	for i, u := range units {
+		// Such a unit was compared with the last push to staging, not with the last pull.
+		if len(plan.Units[i].Conflicts) > 0 && known.unit(u.Path) != nil {
+			fmt.Fprintf(o.Out, "  ! %s: in der Kopie geändert seit dem letzten Push nach Staging – ein Pull löst das nicht.\n"+
+				"    Bewusst --force, oder die Kopie neu von Live holen: wpsync staging refresh %s --code\n", u.Path, o.Site.Name)
+		}
+	}
 	o.event("plan", planEvent(units, plan, target))
 	if readonly {
 		return ErrNotWritable
@@ -543,6 +563,10 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		// The baseline describes live: a push to staging changes neither it nor the internal git
 		// (Spec 2b 6.2). The next push to live uploads the same state and checks it against live.
+		// What the copy holds now is remembered apart, for the next push to staging.
+		if err := o.rememberStaging(siteDir, copied, known, begin.PushID, names, stamps); err != nil {
+			return fmt.Errorf("Push %s ist auf Staging, die Stempel der Kopie liessen sich aber nicht merken – der nächste Push nach Staging meldet Konflikte: %w", begin.PushID, err)
+		}
 		for _, file := range leftOut(units, stamps) {
 			why := ""
 			if strings.EqualFold(path.Base(file), ".htaccess") {

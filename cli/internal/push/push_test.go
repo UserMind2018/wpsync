@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -66,10 +67,24 @@ type fakeSite struct {
 	cookies     []string // "path cookie-header" of every frontend request
 	stgHealth   []string // extra pages the agent names for a push to staging
 	leftOut     []string // "unit/file" the commit does not place (staging: a .htaccess with rewrite rules)
+
+	// The staging copy as /staging/status describes it and, when copy is set, its files: then a
+	// push to staging is checked against them like PushManifest::conflicts does.
+	copy       map[string]map[string]agentapi.PushStamp // unit → file → stamp; nil: conflicts as scripted
+	copyOld    map[string]map[string]agentapi.PushStamp // the units of the last commit before it
+	copyDir    string                                   // folder of the copy; empty: testStaging
+	copyMade   int64                                    // created
+	copyCopied int64                                    // copied_at
+	noStatus   bool                                     // /staging/status fails
+	statuses   int                                      // calls of /staging/status
+	ids        []string                                 // push ids of the next real begins; empty: testID
+	pushID     string                                   // id of the last real begin
+	forStaging bool                                     // the last real begin went to staging
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
 	f := &fakeSite{t: t, uploaded: map[string]string{}, version: "0.4.0", window: true, confirm: 200, rollback: 200, rescue: 200}
+	f.copyMade, f.copyCopied = 1790000000, 1790000100
 	f.versions = map[string]string{"plugins/x": "1.0"}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
@@ -123,6 +138,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.rolledBack = true
+		f.restoreCopy()
 		w.Write([]byte(`{"ok":true,"status":"rolled_back"}`))
 		return
 	}
@@ -134,6 +150,20 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Write([]byte("<html>ok</html>"))
+		return
+	}
+	if route == "/wpsync/v1/staging/status" { // read-only and not part of the push protocol: counted apart
+		f.statuses++
+		if f.noStatus || !AtLeast(f.version, "0.5.0") {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"code":"rest_no_route","message":"no route"}`))
+			return
+		}
+		dir := f.copyDir
+		if dir == "" {
+			dir = testStaging
+		}
+		json.NewEncoder(w).Encode(agentapi.StagingStatus{Exists: true, Status: "ready", URL: f.srv.URL + dir, Created: f.copyMade, CopiedAt: f.copyCopied})
 		return
 	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
@@ -175,6 +205,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			if u.Path == "plugins/x" {
 				plan.Conflicts = append(plan.Conflicts, f.conflicts...)
 			}
+			if f.copy != nil && req.Target == "staging" {
+				plan.Exists = f.copy[u.Path] != nil
+				plan.Conflicts = append(plan.Conflicts, copyConflicts(f.copy[u.Path], u.Base)...)
+			}
 			if f.unpulled[u.Path] {
 				for rel := range u.Files {
 					plan.Conflicts = append(plan.Conflicts, rel) // unknown to the client's baseline
@@ -189,6 +223,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if !req.Dry {
 			res.PushID, res.Rescue.Salt = testID, testSalt
+			if len(f.ids) > 0 {
+				res.PushID, f.ids = f.ids[0], f.ids[1:]
+			}
+			f.pushID, f.forStaging = res.PushID, req.Target == "staging"
 			f.uploaded, f.committed, f.rolledBack = map[string]string{}, false, false
 		}
 		json.NewEncoder(w).Encode(res)
@@ -225,6 +263,12 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if f.copy != nil && f.forStaging {
+			f.copyOld = map[string]map[string]agentapi.PushStamp{}
+			for unit, files := range stamps {
+				f.copyOld[unit], f.copy[unit] = f.copy[unit], files
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]any{"next": nil, "stamps": stamps})
 	case "/wpsync/v1/push/confirm":
 		f.status(w, f.confirm)
@@ -236,6 +280,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		f.rbID = rb.PushID
 		if f.rollback == 200 {
 			f.rolledBack = true
+			f.restoreCopy()
 		}
 		if f.rbCode != "" {
 			w.WriteHeader(f.rollback)
@@ -252,6 +297,37 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.t.Errorf("unexpected route %s", route)
 	}
+}
+
+// restoreCopy puts the units of the last commit back as they were: a rollback renames the
+// snapshot into place, the files keep their stamps.
+func (f *fakeSite) restoreCopy() {
+	for unit, files := range f.copyOld {
+		if files == nil {
+			delete(f.copy, unit)
+		} else {
+			f.copy[unit] = files
+		}
+	}
+	f.copyOld = nil
+}
+
+// copyConflicts mirrors PushManifest::conflicts: every file on the server whose stamp the client
+// does not know, and every file the client knows that the server no longer has.
+func copyConflicts(server, base map[string]agentapi.PushStamp) []string {
+	var out []string
+	for rel, stamp := range server {
+		if known, ok := base[rel]; !ok || known != stamp {
+			out = append(out, rel)
+		}
+	}
+	for rel := range base {
+		if _, ok := server[rel]; !ok {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (f *fakeSite) status(w http.ResponseWriter, status int) {

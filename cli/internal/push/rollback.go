@@ -166,6 +166,9 @@ func Rollback(o Options, pushID string) error {
 
 	if target == TargetStaging {
 		fmt.Fprintln(o.Out, "  Push nach Staging – die Baseline bildet Live ab und bleibt unverändert.")
+		if err := o.forgetStagingPush(siteDir, pushID); err != nil {
+			return fmt.Errorf("save staging base: %w", err)
+		}
 		return nil
 	}
 	if jerr != nil || !j.Applied {
