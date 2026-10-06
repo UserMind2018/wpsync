@@ -15,6 +15,15 @@ final class PairingTest extends TestCase
         $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', Pairing::newSecret());
     }
 
+    public function testIsSecretRecognisesPlainSecrets(): void
+    {
+        $this->assertTrue(Pairing::isSecret(Pairing::newSecret()));
+        $this->assertFalse(Pairing::isSecret(strtoupper(Pairing::newSecret())));
+        $this->assertFalse(Pairing::isSecret(substr(Pairing::newSecret(), 1)));
+        $this->assertFalse(Pairing::isSecret('v1:' . Pairing::newSecret()));
+        $this->assertFalse(Pairing::isSecret(''));
+    }
+
     public function testNormalizeIgnoresCaseAndSeparators(): void
     {
         $this->assertSame(Pairing::hashCode('ABCD-EFGH'), Pairing::hashCode('abcd efgh'));
