@@ -1021,3 +1021,18 @@ func TestCommitTreeMovesSiteGitNextToTheRepo(t *testing.T) {
 		t.Fatalf("moved = %v, out = %s", moved, out.String())
 	}
 }
+
+// Container-Modus: wpsync endet mit dem Container. Ein abgekoppeltes Auto-gc stürbe mit und liesse
+// HEAD.lock zurück, der nächste Pull könnte nicht mehr committen (Abnahme Server-Modus, Folge-Pull).
+func TestAutoMaintenanceRunsInForeground(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), "history.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", gitDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	for _, key := range []string{"gc.autoDetach", "maintenance.autoDetach"} {
+		out, err := run(gitDir, "", "config", "--get", key)
+		if err != nil || strings.TrimSpace(string(out)) != "false" {
+			t.Errorf("%s = %q, %v; want false", key, out, err)
+		}
+	}
+}

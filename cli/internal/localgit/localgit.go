@@ -266,7 +266,10 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 	base = append(base, "-c", "core.excludesFile="+os.DevNull, "-c", "core.attributesFile="+os.DevNull,
 		// defence in depth, not the boundary: also reaches git's subprocesses in embedded repos, but does
 		// not stop their clean filters – only an index without gitlinks does (see Commit)
-		"-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull)
+		"-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull,
+		// auto gc/maintenance in the foreground: a detached one dies with a short-lived container and
+		// leaves HEAD.lock behind, which blocks the next pull's commit
+		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
 	cmd := exec.Command("git", append(base, args...)...)
 	cmd.Dir = gitDir
 	cmd.Env = gitEnv()
