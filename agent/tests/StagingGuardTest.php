@@ -155,6 +155,21 @@ final class StagingGuardTest extends TestCase
         }
     }
 
+    /** Ein Ordner, der eben noch echt war und jetzt ein Symlink ist: PHP darf das nicht aus dem Cache beantworten. */
+    public function testPathSeesASymlinkSetInTheSameProcess(): void
+    {
+        $g   = $this->guard();
+        $dir = $this->abs . '/' . self::DIR . '/wp-content/plugins';
+        mkdir($dir);
+        $real = (string) realpath($this->abs) . '/' . self::DIR . '/wp-content/plugins';
+        $this->assertSame($real . '/x.php', $g->path($real . '/x.php'));
+        $this->assertTrue(is_dir($real)); // füllt Stat- und realpath-Cache
+        // Von aussen getauscht (anderer Prozess): PHP selbst leert seine Caches dabei nicht.
+        exec('rmdir ' . escapeshellarg($dir) . ' && ln -s ' . escapeshellarg($this->abs . '/wp-content') . ' ' . escapeshellarg($dir));
+        $this->assertRejected($g, $real . '/x.php');
+        $this->assertRejected($g, $real);
+    }
+
     public function testConstructorRejectsOverlapsAndBadNames(): void
     {
         foreach ([['stg', 'stgabc123_', self::DIR], ['wp_', 'wp_x_', self::DIR], ['wp_', 'stgabc123_', 'wpsync-staging-x']] as $args) {

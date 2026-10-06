@@ -142,6 +142,8 @@ final class StagingGuard
         if (preg_match('#/\.\.?(/|\z)|[\x00-\x1f]#', $path) === 1) {
             throw StagingException::guard('unsafe path: ' . self::printable($path));
         }
+        // Ein Ordner kann seit der letzten Prüfung gegen einen Symlink getauscht worden sein – nie aus dem Cache antworten.
+        clearstatcache(true);
         if (is_link($path)) {
             throw StagingException::guard('symlink: ' . self::printable($path));
         }
