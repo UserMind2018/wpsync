@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,14 +48,29 @@ func GitDir(sitesRoot, name string) string {
 	return filepath.Join(sitesRoot, storeDir, name+".git")
 }
 
-// Commit records the current state of <sitesRoot>/<name> in its snapshot repo. A .git inside the
-// site folder is never used: before the first commit it is moved aside, later it only triggers a warning.
+// Commit records the current state of <sitesRoot>/<name> (docroot public/) in its snapshot repo
+// GitDir(sitesRoot, name). A .git inside the site folder is never used: before the first commit it
+// is moved aside, later it only triggers a warning.
 func Commit(sitesRoot, name, message string, out io.Writer) error {
 	if !sites.ValidName(name) {
 		return fmt.Errorf("invalid site name %q", name)
 	}
-	siteDir := filepath.Join(sitesRoot, name)
-	gitDir := GitDir(sitesRoot, name)
+	return CommitTree(GitDir(sitesRoot, name), filepath.Join(sitesRoot, name), "public", message, out)
+}
+
+// TreeGitDir is the snapshot repo of a site folder in the server mode: <siteDir>/.wpsync/history.git.
+// Only the docroot below siteDir is mounted into the site's containers, so the repo stays out of
+// their reach like GitDir on the Mac; the .gitignore keeps it out of the snapshot.
+func TreeGitDir(siteDir string) string { return filepath.Join(siteDir, ".wpsync", "history.git") }
+
+var docrootRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// CommitTree is Commit for an explicit snapshot repo, site folder and docroot folder directly below
+// siteDir (server mode: TreeGitDir(siteDir), <slug>/, docroot).
+func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
+	if !docrootRe.MatchString(docroot) || docroot == "." || docroot == ".." {
+		return fmt.Errorf("docroot must be a folder directly below %s, got %q", siteDir, docroot)
+	}
 	if err := os.MkdirAll(filepath.Dir(gitDir), 0o700); err != nil {
 		return err
 	}
@@ -67,7 +83,7 @@ func Commit(sitesRoot, name, message string, out io.Writer) error {
 
 	if _, err := os.Lstat(gitDir); errors.Is(err, os.ErrNotExist) {
 		if hasSiteGit {
-			if err := moveAside(siteGit, sitesRoot, name, out); err != nil {
+			if err := moveAside(siteGit, gitDir, out); err != nil {
 				return err
 			}
 		}
@@ -108,7 +124,8 @@ func Commit(sitesRoot, name, message string, out io.Writer) error {
 	if err := dropGitlinks(gitDir, siteDir); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(siteDir, ".gitignore"), []byte(gitignore), 0o644); err != nil {
+	ignore := strings.ReplaceAll(gitignore, "/public/", "/"+docroot+"/")
+	if err := os.WriteFile(filepath.Join(siteDir, ".gitignore"), []byte(ignore), 0o644); err != nil {
 		return err
 	}
 	if err := git(gitDir, siteDir, "add", "-A"); err != nil {
@@ -121,9 +138,10 @@ func Commit(sitesRoot, name, message string, out io.Writer) error {
 		"commit", "-q", "--allow-empty", "-m", message)
 }
 
-// moveAside moves a pre-existing <site>/.git out of the site folder without running git in it.
-func moveAside(siteGit, sitesRoot, name string, out io.Writer) error {
-	dest := filepath.Join(sitesRoot, storeDir, name+".alt-"+time.Now().Format("20060102-150405")+".git")
+// moveAside moves a pre-existing <site>/.git next to the snapshot repo without running git in it
+// (<name>.git → <name>.alt-<time>.git).
+func moveAside(siteGit, gitDir string, out io.Writer) error {
+	dest := strings.TrimSuffix(gitDir, ".git") + ".alt-" + time.Now().Format("20060102-150405") + ".git"
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("bisheriges Git-Repo %s ließ sich nicht aus dem Site-Ordner verschieben – nichts ausgeführt: %s existiert bereits",
 			printable(siteGit), printable(dest))

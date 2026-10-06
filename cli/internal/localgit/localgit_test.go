@@ -971,3 +971,53 @@ func TestPrintable(t *testing.T) {
 		t.Fatalf("printable = %q", got)
 	}
 }
+
+// Server-Modus: der Docroot heisst nicht public/, das Snapshot-Repo liegt in <site>/.wpsync/history.git
+// (nur der Docroot ist in die Container gemountet) und bleibt selbst ausserhalb des Schnappschusses.
+func TestCommitTreeWithOtherDocroot(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{
+		"docroot/wp-content/plugins/a/a.php",
+		"docroot/wp-content/uploads/2026/x.jpg",
+		"docroot/wp-config.php",
+		".wpsync/baseline.json",
+		".wpsync/db/tables/wp_options.sql",
+	} {
+		write(t, dir, f)
+	}
+	gitDir := TreeGitDir(dir)
+	if err := CommitTree(gitDir, dir, "docroot", "pull 1", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitTree(gitDir, dir, "docroot", "pull 2", io.Discard); err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+	got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-files"))
+	want := []string{".gitignore", ".wpsync/baseline.json", "docroot/wp-content/plugins/a/a.php"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tracked = %v, want %v", got, want)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("<site>/.git exists after CommitTree: %v", err)
+	}
+	for _, bad := range []string{"../x", "a/b", ".", ""} {
+		if err := CommitTree(gitDir, dir, bad, "pull 3", io.Discard); err == nil {
+			t.Fatalf("docroot %q must be rejected", bad)
+		}
+	}
+}
+
+// Ein vorhandenes <site>/.git wandert im Server-Modus neben das Snapshot-Repo, ohne git darin.
+func TestCommitTreeMovesSiteGitNextToTheRepo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "docroot/wp-content/plugins/a/a.php")
+	attackerRepo(t, dir)
+	var out bytes.Buffer
+	if err := CommitTree(TreeGitDir(dir), dir, "docroot", "pull 1", &out); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := filepath.Glob(filepath.Join(dir, ".wpsync", "history.alt-*.git"))
+	if len(moved) != 1 || !strings.Contains(out.String(), "Bisheriges Site-Git verschoben nach") {
+		t.Fatalf("moved = %v, out = %s", moved, out.String())
+	}
+}
