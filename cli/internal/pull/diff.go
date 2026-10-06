@@ -11,7 +11,7 @@ import (
 )
 
 // DiffFiles returns files that are new or changed since the baseline and baseline files
-// that disappeared. Files unknown to the baseline but already present locally (same size
+// that disappeared (never a VCS path). Files unknown to the baseline but already present locally (same size
 // and mtime) are skipped – that resumes an aborted pull (Spike B20, AC-17). present may be nil.
 func DiffFiles(files []agentapi.File, b *baseline.Baseline, present func(agentapi.File) bool) (changed []agentapi.File, deleted []string) {
 	current := make(map[string]struct{}, len(files))
@@ -28,7 +28,8 @@ func DiffFiles(files []agentapi.File, b *baseline.Baseline, present func(agentap
 		}
 	}
 	for path := range b.Files {
-		if _, ok := current[path]; !ok {
+		// A VCS path from an older baseline is never deleted locally (W11).
+		if _, ok := current[path]; !ok && !isVCSPath(path) {
 			deleted = append(deleted, path)
 		}
 	}

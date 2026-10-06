@@ -196,6 +196,12 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	if err := checkDelta(delta, o.Site.Name); err != nil {
 		return nil, err
 	}
+	// W11: the agent excludes VCS folders but no gitfile; such paths are never requested,
+	// counted, recorded in the baseline or deleted locally.
+	var vcs int
+	if delta.Files, vcs = dropVCSPaths(delta.Files); vcs > 0 {
+		fmt.Fprintf(o.Out, "  ! %d VCS-Pfade der Quelle übersprungen\n", vcs)
+	}
 	if !o.NoAnonymize && delta.Env.Anon == "" {
 		// An agent before 0.3.0 ignores the scope field and would send plain data (AC-36).
 		return nil, &agentapi.OutdatedError{Installed: delta.Env.AgentVersion, Required: agentapi.MinAgentVersion, Err: ErrAgentCannotAnonymize}

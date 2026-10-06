@@ -77,13 +77,40 @@ func PresentLocally(docroot string) func(agentapi.File) bool {
 	}
 }
 
-// SafeJoin rejects paths that would leave docroot/wp-content.
+// SafeJoin rejects paths that would leave docroot/wp-content and VCS paths (W11): a pull never
+// writes or deletes .git/.svn/.hg, not even when the agent sends one unasked.
 func SafeJoin(docroot, rel string) (string, error) {
 	clean := filepath.Clean(rel)
 	if !strings.HasPrefix(clean, "wp-content"+string(filepath.Separator)) || strings.Contains(clean, "..") {
 		return "", fmt.Errorf("refusing path outside wp-content: %q", rel)
 	}
+	if isVCSPath(clean) {
+		return "", fmt.Errorf("refusing VCS path: %q", rel)
+	}
 	return filepath.Join(docroot, clean), nil
+}
+
+// isVCSPath reports whether a segment is .git, .svn or .hg in any case – a folder or a gitfile
+// of a submodule/worktree. .github, .gitignore or a folder git are no VCS paths.
+func isVCSPath(rel string) bool {
+	for _, seg := range strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' }) {
+		switch strings.ToLower(seg) {
+		case ".git", ".svn", ".hg":
+			return true
+		}
+	}
+	return false
+}
+
+// dropVCSPaths removes VCS paths from the delta's file list and returns how many it dropped.
+func dropVCSPaths(files []agentapi.File) ([]agentapi.File, int) {
+	kept := files[:0:0]
+	for _, f := range files {
+		if !isVCSPath(f.Path) {
+			kept = append(kept, f)
+		}
+	}
+	return kept, len(files) - len(kept)
 }
 
 // writeFile writes atomically and sets the source mtime (needed for resume).
