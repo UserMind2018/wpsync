@@ -96,3 +96,15 @@ func TestDoctorJSONHasChecks(t *testing.T) {
 		requireKeys(t, c, "name", "ok", "detail")
 	}
 }
+
+// Spec §10: doctor --server grün, wenn Docker erreichbar und WPSYNC_CONFIG_DIR beschreibbar ist.
+func TestDoctorServerJSON(t *testing.T) {
+	env(t)
+	containerSite(t) // docker auf PATH, antwortet
+	r := run(t, context.Background(), "", "doctor", "--server", "--json")
+	m := lastResult(t, r, "doctor", 0)
+	d := requireKeys(t, m["data"], "checks")
+	if n := len(d["checks"].([]any)); n != 4 {
+		t.Fatalf("checks = %d, want 4", n)
+	}
+}

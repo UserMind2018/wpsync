@@ -39,7 +39,7 @@ import (
 const usage = `wpsync – WordPress Live ↔ Lokal
 
   wpsync setup                         einmalig pro Mac (fragt einmal nach dem Passwort)
-  wpsync doctor                        Umgebung prüfen
+  wpsync doctor [--server]             Umgebung prüfen (--server: nur was im OS-Container zählt)
   wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync; nur https, lokal: --insecure)
   wpsync unpair <site>                 Kopplung lokal entfernen
   wpsync list                          lokale Umgebungen mit Status, lokaler und Live-URL
@@ -210,7 +210,8 @@ func (a *app) cmdSetup() error {
 
 func (a *app) cmdDoctor(args []string) error {
 	fs := a.flags("doctor")
-	if _, err := a.parse(fs, args, exactly(0), "wpsync doctor [--json]"); err != nil {
+	server := fs.Bool("server", false, "nur die Prüfungen des Server-Modus (ohne DNS, Docker-Version, DDEV)")
+	if _, err := a.parse(fs, args, exactly(0), "wpsync doctor [--server] [--json]"); err != nil {
 		return err
 	}
 	source, origin, err := mailguardSource()
@@ -219,7 +220,14 @@ func (a *app) cmdDoctor(args []string) error {
 	}
 	env := setup.SystemEnv(source)
 	env.MailguardOrigin = origin
-	return a.report(setup.Doctor(env))
+	if !*server {
+		return a.report(setup.Doctor(env))
+	}
+	env.Version = agentapi.Version
+	if env.ConfigDir, err = sites.ConfigDir(); err != nil {
+		return err
+	}
+	return a.report(setup.ServerDoctor(env))
 }
 
 // report prints doctor checks and fails with local_env if one is red.
