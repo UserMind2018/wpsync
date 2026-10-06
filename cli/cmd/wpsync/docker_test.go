@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,36 +70,4 @@ func TestTrustStopsWritableContainersFirst(t *testing.T) {
 	if !strings.Contains(out, "ohne ddev gestoppt") {
 		t.Fatalf("output:\n%s", out)
 	}
-}
-
-// M3: wpsync stop prüft neben .ddev auch die Container; kann einer .ddev noch beschreiben, geht
-// die Site über Halt (docker) statt über ddev stop.
-func TestStopGuardRefusesWritableContainers(t *testing.T) {
-	e := newTrustEnv(t)
-	out, _ := runTrust(t, "kunde")
-	fp := regexpFingerprint(t, out)
-	if _, err := runTrust(t, "kunde", "--fingerprint", fp); err != nil {
-		t.Fatal(err)
-	}
-	g := &stopGuard{root: filepath.Dir(e.site), store: e.store}
-
-	useDocker(t, &cmdDocker{})
-	if err := g.Check("kunde"); err != nil {
-		t.Fatalf("no containers: %v", err)
-	}
-	useDocker(t, &cmdDocker{containers: []ddev.Container{writableWeb(e.site)}})
-	if err := g.Check("kunde"); !errors.Is(err, ddev.ErrNotHardened) {
-		t.Fatalf("writable container: %v", err)
-	}
-}
-
-func regexpFingerprint(t *testing.T, out string) string {
-	t.Helper()
-	for _, line := range strings.Split(out, "\n") {
-		if fp, ok := strings.CutPrefix(line, "Fingerprint: "); ok {
-			return fp
-		}
-	}
-	t.Fatalf("no fingerprint in:\n%s", out)
-	return ""
 }

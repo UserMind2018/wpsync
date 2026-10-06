@@ -13,11 +13,7 @@ import (
 	"github.com/usermind/wpsync/internal/sites"
 )
 
-// globalDir is the working directory of global ddev calls (list, stop <names>): never a project
-// directory, whose .ddev ddev would otherwise pick up from the current directory.
-const globalDir = "/"
-
-// dockerCLI runs docker for trust and stop; tests replace it.
+// dockerCLI runs docker for trust, stop and pull; tests replace it.
 var dockerCLI ddev.Docker = ddev.DockerExec{}
 
 // ddevStore is where the trusted .ddev state of every site lives.
@@ -109,54 +105,4 @@ func cmdTrust(args []string) error {
 	}
 	fmt.Println("✓ freigegeben – der nächste Pull nutzt diesen Stand")
 	return nil
-}
-
-// stopGuard lets `wpsync stop` call ddev only for sites whose .ddev matches the trusted state.
-type stopGuard struct {
-	root  string
-	store ddev.Store
-}
-
-func newStopGuard() (*stopGuard, error) {
-	root, err := sites.SitesRoot()
-	if err != nil {
-		return nil, err
-	}
-	store, err := ddevStore(root)
-	if err != nil {
-		return nil, err
-	}
-	return &stopGuard{root: root, store: store}, nil
-}
-
-func (g *stopGuard) Check(name string) error {
-	if !sites.ValidName(name) {
-		return fmt.Errorf("unerwarteter Projektname %q", name)
-	}
-	siteDir := filepath.Join(g.root, name)
-	p, err := ddev.OpenProject(name, siteDir, g.store, dockerCLI)
-	if err != nil {
-		return err
-	}
-	if err := p.Check("stop"); err != nil {
-		return err
-	}
-	// The check is only as good as the containers' read-only .ddev: one that can still write
-	// could add a pre-stop hook after it.
-	cs, err := ddev.Containers(dockerCLI, name)
-	if err != nil {
-		return err
-	}
-	for _, c := range cs {
-		if !ddev.Hardened(c, siteDir) {
-			return fmt.Errorf("%w (%s)", ddev.ErrNotHardened, c.Service)
-		}
-	}
-	return nil
-}
-
-// Halt stops the containers through docker: no ddev, so no pre-stop hooks.
-func (g *stopGuard) Halt(name string) error {
-	_, err := ddev.StopContainers(dockerCLI, name)
-	return err
 }

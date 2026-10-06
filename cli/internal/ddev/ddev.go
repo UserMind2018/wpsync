@@ -12,14 +12,11 @@ import (
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/localenv"
 )
 
 // Runner executes ddev commands in a site directory.
-type Runner interface {
-	Run(args ...string) error
-	Output(args ...string) (string, error)
-	RunStdin(stdin io.Reader, args ...string) error
-}
+type Runner = localenv.Runner
 
 // Exec runs the real ddev binary.
 type Exec struct {

@@ -206,21 +206,39 @@ func cmdUnpair(args []string) error {
 	return nil
 }
 
-// localEnvs lists wpsync's DDEV projects together with the paired sites.
-func localEnvs() ([]localenv.Env, error) {
-	paired, err := sites.List()
-	if err != nil {
-		return nil, err
-	}
+// ddevDriver is the Mac runtime: DDEV projects below the sites root, every project call checked
+// against the trusted .ddev state.
+func ddevDriver(out, errOut io.Writer) (*ddev.Driver, error) {
 	root, err := sites.SitesRoot()
 	if err != nil {
 		return nil, err
 	}
-	return localenv.List(&ddev.Exec{Dir: globalDir}, root, paired)
+	state, err := ddevStore(root)
+	if err != nil {
+		return nil, err
+	}
+	return &ddev.Driver{SitesRoot: root, State: state, Docker: dockerCLI, Out: out, Err: errOut}, nil
+}
+
+// localEnvs lists the driver's environments together with the paired sites.
+func localEnvs(d localenv.Driver) ([]localenv.Env, error) {
+	paired, err := sites.List()
+	if err != nil {
+		return nil, err
+	}
+	found, err := d.List()
+	if err != nil {
+		return nil, err
+	}
+	return localenv.Merge(found, paired), nil
 }
 
 func cmdList() error {
-	envs, err := localEnvs()
+	d, err := ddevDriver(nil, nil)
+	if err != nil {
+		return err
+	}
+	envs, err := localEnvs(d)
 	if err != nil {
 		return err
 	}
@@ -253,15 +271,15 @@ func cmdStop(args []string) error {
 	if *all == (len(names) > 0) {
 		return errors.New("Aufruf: wpsync stop <site>… oder wpsync stop --all")
 	}
-	envs, err := localEnvs()
+	d, err := ddevDriver(os.Stdout, os.Stderr)
 	if err != nil {
 		return err
 	}
-	guard, err := newStopGuard()
+	envs, err := localEnvs(d)
 	if err != nil {
 		return err
 	}
-	n, err := localenv.Stop(&ddev.Exec{Dir: globalDir, Stdout: os.Stdout, Stderr: os.Stderr}, envs, names, *all, guard)
+	n, err := localenv.Stop(d, envs, names, *all)
 	if err != nil {
 		if n > 0 {
 			fmt.Printf("%d Umgebung(en) gestoppt.\n", n)
