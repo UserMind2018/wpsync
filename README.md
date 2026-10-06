@@ -356,6 +356,23 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
 
 - **Pairing:** Einmal-Code (8 Zeichen), 10 Minuten gültig, 5 Versuche. Danach ist der Code verbraucht.
 - **Secret:** liegt lokal nur in der macOS-Keychain (`service=wpsync:<site>`), nie in einer Datei.
+  Auf der Site steht es seit Agent 0.4.1 verschlüsselt in der Tabelle `wpsync_pairings`
+  (libsodium `secretbox`, Format `v1:…`). Der Schlüssel liegt nicht in der Datenbank, sondern
+  kommt aus `wp-config.php`: aus `WPSYNC_KEY` (mindestens 32 Zeichen), sonst aus `AUTH_KEY` und
+  `SECURE_AUTH_KEY`. Wer nur die Datenbank lesen kann (SQL-Injection in einem anderen Plugin,
+  Datenbank-Backup, Hosting-Panel), gewinnt daraus kein nutzbares Secret.
+  - **Eigener Schlüssel empfohlen:** `define('WPSYNC_KEY', '…');` mit mindestens 32 zufälligen
+    Zeichen (z. B. `openssl rand -hex 32`) in `wp-config.php`. Bestehende Kopplungen bleiben
+    dabei gültig und werden bei der nächsten Benutzung mit dem neuen Schlüssel versiegelt.
+  - **Salt-Rotation:** Ohne `WPSYNC_KEY` hängt der Schlüssel an den WordPress-Salts. Werden sie
+    erneuert (auch Sicherheits-Plugins tun das), lassen sich die Secrets nicht mehr entschlüsseln:
+    Die Geräte bekommen „unbekanntes Pairing“ und müssen neu gekoppelt werden. Dasselbe gilt,
+    wenn `WPSYNC_KEY` geändert oder entfernt wird. Die Admin-Seite markiert solche Pairings mit
+    „nicht entschlüsselbar – neu koppeln“.
+  - **Ohne Schlüssel:** Fehlen die Salts oder stehen sie auf dem WordPress-Standardwert, und ist
+    kein `WPSYNC_KEY` gesetzt, speichert der Agent das Secret wie bisher im Klartext und warnt
+    auf der Admin-Seite. Die Spalte „Secret“ in der Geräteliste zeigt pro Pairing
+    „verschlüsselt“, „Klartext“ oder „nicht entschlüsselbar“.
 - **Signatur:** jeder Request ist per HMAC signiert, mit Zeitstempel und Nonce gegen Replays.
   Nicht signierte Requests bekommen `401`.
 - **Antworten der Site:** Die Signatur schützt den Request, nicht die Antwort. Das CLI prüft
