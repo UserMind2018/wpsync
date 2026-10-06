@@ -1,6 +1,10 @@
 package baseline
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestLoadMissingReturnsEmpty(t *testing.T) {
 	b, err := Load(t.TempDir())
@@ -37,5 +41,26 @@ func TestModeFallsBackToFullForOldBaselines(t *testing.T) {
 	loaded, err := Load(dir)
 	if err != nil || loaded.Mode("wp_log") != "structure" {
 		t.Fatalf("loaded = %+v, err = %v", loaded, err)
+	}
+}
+
+// Nach-Review N-d: Load folgt keinem Symlink (Mac: .wpsync/ im DDEV-Mount).
+func TestLoadRefusesSymlinks(t *testing.T) {
+	siteDir, outside := t.TempDir(), t.TempDir()
+	foreign := filepath.Join(outside, "b.json")
+	os.WriteFile(foreign, []byte(`{"source":"https://fremd.example","pulled_at":"2026-01-01T00:00:00Z","files":{},"tables":{}}`), 0o644)
+	os.MkdirAll(filepath.Join(siteDir, ".wpsync"), 0o755)
+	os.Symlink(foreign, filepath.Join(siteDir, ".wpsync", "baseline.json"))
+	if b, err := Load(siteDir); err == nil {
+		t.Fatalf("Load followed a symlink: %+v", b)
+	}
+	site2 := t.TempDir()
+	os.Symlink(outside, filepath.Join(site2, ".wpsync"))
+	os.Rename(foreign, filepath.Join(outside, "baseline.json"))
+	if b, err := Load(site2); err == nil {
+		t.Fatalf("Load through a symlinked .wpsync: %+v", b)
+	}
+	if b, err := Load(t.TempDir()); err != nil || !b.Empty() {
+		t.Fatalf("missing baseline = %+v, %v", b, err)
 	}
 }

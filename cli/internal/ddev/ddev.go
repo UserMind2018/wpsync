@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/localenv"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // Runner executes ddev commands in a site directory.
@@ -145,13 +147,18 @@ const ddevMarker = "#ddev-generated"
 // ClaimWPConfig removes DDEV's marker so DDEV stops regenerating wp-config.php and
 // dropping prefix and constants (Spike B15, AC-20). wp-config-ddev.php stays DDEV-managed.
 func ClaimWPConfig(siteDir string) error {
-	p := filepath.Join(siteDir, "public", "wp-config.php")
-	data, err := os.ReadFile(p)
+	// public/ is the docroot in the DDEV mount: read and write without following a symlink (N-d).
+	root, err := safefs.OpenDir(siteDir, "public")
+	if err != nil {
+		return fmt.Errorf("read wp-config.php: %w", err)
+	}
+	defer root.Close()
+	data, err := safefs.ReadFile(root, "wp-config.php")
 	if err != nil {
 		return fmt.Errorf("read wp-config.php: %w", err)
 	}
 	claimed := strings.Replace(string(data), ddevMarker, "wpsync-managed (DDEV marker removed so DDEV no longer overwrites this file)", 1)
-	return os.WriteFile(p, []byte(claimed), 0o644)
+	return safefs.WriteFile(root, "wp-config.php", strings.NewReader(claimed), int64(len(claimed)), time.Time{}, 0o644)
 }
 
 // DatabaseSpec maps the source server version to a DDEV database spec (Spike B17, AC-19).

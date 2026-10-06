@@ -84,3 +84,28 @@ func TestWriteUploadsProxyRefusesSymlinkedStateDir(t *testing.T) {
 		t.Fatalf("created outside: %v", entries)
 	}
 }
+
+// Nach-Review N-d: die Proxy-Konfiguration wird nicht durch einen Symlink unter .ddev geschrieben.
+func TestWriteUploadsProxyRefusesSymlinkedDdevFolder(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".ddev"), 0o755)
+	os.Symlink(outside, filepath.Join(dir, ".ddev", "nginx"))
+	if _, err := WriteUploadsProxy(dir, "https://kunde.de", "wpsync/0.2.0", true); err == nil {
+		t.Fatal("symlinked .ddev/nginx must be refused")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("wrote outside: %v", entries)
+	}
+}
+
+func TestClaimWPConfigDoesNotFollowSymlink(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "victim.php")
+	os.WriteFile(victim, []byte("<?php #ddev-generated\n"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "public"), 0o755)
+	os.Symlink(victim, filepath.Join(dir, "public", "wp-config.php"))
+	ClaimWPConfig(dir)
+	if b, _ := os.ReadFile(victim); string(b) != "<?php #ddev-generated\n" {
+		t.Fatalf("ClaimWPConfig wrote through a symlink: %q", b)
+	}
+}

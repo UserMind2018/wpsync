@@ -89,8 +89,6 @@ func dropUnit(b *baseline.Baseline, unit string) {
 	}
 }
 
-func journalDir(siteDir string) string { return filepath.Join(siteDir, ".wpsync", "pushes") }
-
 // journalRel is the journal folder below the site folder. On the Mac it lies in the DDEV mount:
 // every access goes through a root on that folder and never follows a symlink (Nach-Review M-2).
 var journalRel = filepath.Join(".wpsync", "pushes")

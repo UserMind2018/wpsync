@@ -51,7 +51,16 @@ func file(siteDir string) string { return filepath.Join(siteDir, ".wpsync", "bas
 
 // Load returns the baseline or an empty one.
 func Load(siteDir string) (*Baseline, error) {
-	data, err := os.ReadFile(file(siteDir))
+	// Read through a root on .wpsync without following a symlink (Mac: DDEV mount, Nach-Review N-d).
+	root, err := safefs.OpenDir(siteDir, ".wpsync")
+	if errors.Is(err, os.ErrNotExist) {
+		return New(""), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	data, err := safefs.ReadFile(root, filepath.Base(file(siteDir)))
 	if errors.Is(err, os.ErrNotExist) {
 		return New(""), nil
 	}
