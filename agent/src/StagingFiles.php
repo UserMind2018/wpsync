@@ -6,10 +6,10 @@ defined('ABSPATH') || exit;
 /**
  * Code der Staging-Kopie (Spec Stufe 2b 5.2 Phase 3): WordPress-Core und die Einheiten des
  * Pull-Profils – nie wp-config.php und ihre Varianten, Drop-ins, uploads, den Agent, Symlinks,
- * VCS-Ordner, Logs oder Dateien mit Zugangsdaten; unter wp-content gilt dazu, was der Pull
- * ausschliesst (Excludes::path). Kopieren und Löschen arbeiten bis zu einer Deadline, mindestens
- * aber eine Datei, und setzen an einem Cursor fort. Jeder Zielpfad läuft durch $check
- * (StagingGuard::path).
+ * VCS-Ordner, Logs, Dateien mit Zugangsdaten oder eine .htaccess mit Rewrite-Direktiven; unter
+ * wp-content gilt dazu, was der Pull ausschliesst (Excludes::path). Kopieren und Löschen arbeiten
+ * bis zu einer Deadline, mindestens aber eine Datei, und setzen an einem Cursor fort. Jeder
+ * Zielpfad läuft durch $check (StagingGuard::path).
  */
 final class StagingFiles
 {
@@ -202,6 +202,21 @@ final class StagingFiles
         @touch($dst, (int) filemtime($src));
     }
 
+    /**
+     * Eine .htaccess, die ihrem Ordner die Cookie-Sperre der Kopie nähme. Jede Direktive von
+     * mod_rewrite genügt dafür – auch ohne RewriteEngine und trotz RewriteOptions Inherit (eine eigene
+     * Regel mit [L] läuft vor den geerbten): der Ordner bekommt dann nur noch die eigenen Regeln.
+     * Was sich nicht lesen lässt, zählt dazu. Auch für Dateien, die ein Push in die Kopie bringt.
+     */
+    public static function liftsTheGate(string $full): bool
+    {
+        if (strtolower(basename($full)) !== '.htaccess') {
+            return false;
+        }
+        $rules = @file_get_contents($full);
+        return $rules === false || stripos($rules, 'Rewrite') !== false;
+    }
+
     private static function isConfig(string $name): bool
     {
         return stripos($name, 'wp-config') === 0;
@@ -210,8 +225,7 @@ final class StagingFiles
     /**
      * Ob eine Datei nie in die Kopie kommt. Unter wp-content dieselbe Entscheidung wie beim Pull
      * (Excludes::path), sonst Excludes::file; überall dazu Varianten der wp-config.php (Zugangsdaten
-     * von Live), .user.ini und jede .htaccess mit RewriteEngine – sie nähme ihrem Ordner die
-     * Cookie-Sperre der Kopie.
+     * von Live), .user.ini und jede .htaccess mit Rewrite-Direktiven (liftsTheGate).
      *
      * @param string $rel relativ zu ABSPATH
      */
@@ -221,11 +235,8 @@ final class StagingFiles
         if (in_array($rel, self::NEVER, true) || self::isConfig($name) || $name === '.user.ini') {
             return true;
         }
-        if ($name === '.htaccess') {
-            $rules = @file_get_contents($full);
-            if ($rules === false || stripos($rules, 'RewriteEngine') !== false) {
-                return true;
-            }
+        if (self::liftsTheGate($full)) {
+            return true;
         }
         $size = (int) @filesize($full);
         if (strpos($rel, 'wp-content/') === 0) {

@@ -242,6 +242,36 @@ final class StagingFilesTest extends TestCase
         $this->assertFileExists($this->to . '/wp-content/plugins/x/inc/.htaccess');
     }
 
+    /**
+     * Jede Direktive von mod_rewrite im Unterordner ersetzt die Regeln des Ordners darüber – auch
+     * ohne RewriteEngine, und RewriteOptions Inherit hilft nicht gegen eine eigene Regel mit [L].
+     * Im E2E gegen Apache 2.4 gemessen: Dateien neben einer solchen .htaccess kommen ohne Cookie.
+     */
+    public function testSkipsAnyRewriteDirective(): void
+    {
+        $open = [
+            'wp-content/plugins/x/a/.htaccess' => "RewriteBase /\n",
+            'wp-content/plugins/x/b/.htaccess' => "RewriteRule ^nothing$ - [L]\n",
+            'wp-content/plugins/x/c/.htaccess' => "RewriteCond %{HTTP_HOST} x\n",
+            'wp-content/plugins/x/d/.htaccess' => "RewriteEngine Off\n",
+            'wp-content/plugins/x/e/.htaccess' => "rewriteoptions Inherit\nRewriteRule ^ - [L]\n",
+            'wp-includes/.htaccess'            => "<IfModule mod_rewrite.c>\nRewriteRule ^ - [L]\n</IfModule>\n",
+        ];
+        foreach ($open as $rel => $rules) {
+            $this->put($rel, $rules, 1700000000);
+        }
+        $this->put('wp-content/plugins/x/f/.htaccess', "Options -Indexes\n<Files *.php>\nRequire all denied\n</Files>\n", 1700000000);
+        $this->copyAll();
+        foreach (array_keys($open) as $rel) {
+            $this->assertFileDoesNotExist($this->to . '/' . $rel, $rel);
+            $this->assertTrue(StagingFiles::liftsTheGate($this->abs . '/' . $rel), $rel);
+        }
+        $this->assertFileExists($this->to . '/wp-content/plugins/x/f/.htaccess');
+        $this->assertFalse(StagingFiles::liftsTheGate($this->abs . '/wp-content/plugins/x/f/.htaccess'));
+        $this->assertFalse(StagingFiles::liftsTheGate($this->abs . '/wp-content/plugins/x/x.php'), 'only a .htaccess counts');
+        $this->assertTrue(StagingFiles::liftsTheGate($this->abs . '/wp-content/plugins/x/missing/.htaccess'), 'unreadable counts as open');
+    }
+
     /** Unter wp-content gilt, was der Pull für denselben Bereich liefert (Excludes::path). */
     public function testContentMatchesThePull(): void
     {
