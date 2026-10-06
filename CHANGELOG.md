@@ -3,9 +3,10 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unveröffentlicht] · Agent 0.4.1
+## [0.2.1] – 2026-10-06 · Agent 0.4.1
 
-**Nur der Agent ändert sich.** Die CLI bleibt unverändert und funktioniert mit Agent 0.4.0 und 0.4.1.
+**Nur der Agent ändert sich.** Agent 0.4.1 ist das eigentliche Update. Die CLI 0.2.1 ändert
+nur ihre Versionsnummer und funktioniert wie 0.2.0 mit Agent 0.4.0 und 0.4.1.
 
 ### Sicherheit
 - Pairing-Secrets stehen nicht mehr im Klartext in der Datenbank (SEC-006). Der Agent speichert
