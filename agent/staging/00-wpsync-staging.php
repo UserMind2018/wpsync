@@ -18,14 +18,26 @@ if (!defined('WPSYNC_STAGING') || !WPSYNC_STAGING) {
     return;
 }
 
+/**
+ * Für jede 403 und für die Antwort auf einen eingelösten Link: nichts davon in einen Cache,
+ * und die Adresse (mit dem Token) nie als Referrer weiter.
+ *
+ * @return list<string>
+ */
+function wpsync_staging_headers(): array
+{
+    return ['Cache-Control: no-store, private', 'Referrer-Policy: no-referrer', 'X-Robots-Tag: noindex, nofollow'];
+}
+
 /** 403, bevor ein Theme oder Plugin etwas ausgibt. */
 function wpsync_staging_deny(string $why): void
 {
     if (!headers_sent()) {
         http_response_code(403);
         header('Content-Type: text/html; charset=utf-8');
-        header('Cache-Control: no-store, private');
-        header('X-Robots-Tag: noindex, nofollow');
+        foreach (wpsync_staging_headers() as $wpsync_staging_header) {
+            header($wpsync_staging_header);
+        }
     }
     echo '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><title>Staging</title>'
         . '<p>Diese Staging-Kopie ist gesperrt. ' . htmlspecialchars($why, ENT_QUOTES, 'UTF-8') . '</p>'
@@ -39,6 +51,26 @@ foreach ([__DIR__ . '/wpsync-staging/StagingAccess.php', __DIR__ . '/wpsync-stag
         wpsync_staging_deny('Der Riegel ist unvollständig.');
     }
     require_once $wpsync_staging_file;
+}
+
+/**
+ * Das Token eines Einmal-Links – nur am Einstieg der Kopie (Staging-Pfad mit oder ohne /, index.php),
+ * unabhängig von der .htaccess. An jeder anderen Stelle gilt die Anfrage als eine ohne Token, und
+ * das Token bleibt unverbraucht.
+ *
+ * @param array<mixed> $query
+ */
+function wpsync_staging_login_token(array $query, string $requestUri, string $stagingPath): ?string
+{
+    if (!isset($query['wpsync_login']) || !is_string($query['wpsync_login'])) {
+        return null;
+    }
+    $base = rtrim($stagingPath, '/');
+    $path = explode('?', $requestUri, 2)[0];
+    if ($base === '' || !in_array($path, [$base, $base . '/', $base . '/index.php'], true)) {
+        return null;
+    }
+    return $query['wpsync_login'];
 }
 
 /**
@@ -117,6 +149,9 @@ function wpsync_staging_login(): void
         $user->set_role('administrator');
     }
     wp_set_auth_cookie((int) $id, false, is_ssl());
+    foreach (wpsync_staging_headers() as $header) {
+        header($header);
+    }
     wp_safe_redirect(admin_url());
     exit;
 }
@@ -128,7 +163,8 @@ $wpsync_staging_state = $wpsync_staging->read();
 if (PHP_SAPI !== 'cli') {
     $wpsync_now = time();
     // phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
-    $wpsync_login = isset($_GET['wpsync_login']) && is_string($_GET['wpsync_login']) ? (string) $_GET['wpsync_login'] : null;
+    $wpsync_uri   = isset($_SERVER['REQUEST_URI']) && is_string($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+    $wpsync_login = wpsync_staging_login_token($_GET, $wpsync_uri, $wpsync_staging_state['staging_path']);
     $wpsync_value = isset($_COOKIE[\WpSync\StagingAccess::COOKIE]) && is_string($_COOKIE[\WpSync\StagingAccess::COOKIE]) ? (string) $_COOKIE[\WpSync\StagingAccess::COOKIE] : '';
     // phpcs:enable
     $wpsync_gate = wpsync_staging_gate($wpsync_staging, $wpsync_login, $wpsync_value, $wpsync_now);

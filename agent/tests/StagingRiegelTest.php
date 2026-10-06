@@ -30,7 +30,15 @@ function add_filter(...$args): void {}
 function add_action(...$args): void {}
 require __DIR__ . '/mu-plugins/00-wpsync-staging.php';
 $access = new \WpSync\StagingAccess($argv[1]);
-echo "\n" . json_encode(wpsync_staging_gate($access, $argv[2] === '-' ? null : $argv[2], $argv[3], (int) $argv[4]));
+if ($argv[1] === 'headers') {
+    echo "\n" . json_encode(wpsync_staging_headers());
+    exit;
+}
+$login = $argv[2] === '-' ? null : $argv[2];
+if (isset($argv[5])) {
+    $login = wpsync_staging_login_token(['wpsync_login' => $argv[2]], $argv[5], '/wpsync-staging-0123456789ab');
+}
+echo "\n" . json_encode(wpsync_staging_gate($access, $login, $argv[3], (int) $argv[4]));
 PHP);
     }
 
@@ -53,10 +61,10 @@ PHP);
     }
 
     /** @return list<string> */
-    private function php(string $file, string $login, string $cookie, int $now): array
+    private function php(string $file, string $login, string $cookie, int $now, ?string $uri = null): array
     {
         $cmd = escapeshellarg(PHP_BINARY) . ' -d error_log=' . escapeshellarg($this->root . '/php.log') . ' ' . escapeshellarg($this->root . '/run.php');
-        foreach ([$file, $login, $cookie, (string) $now] as $arg) {
+        foreach (array_merge([$file, $login, $cookie, (string) $now], $uri === null ? [] : [$uri]) as $arg) {
             $cmd .= ' ' . escapeshellarg($arg);
         }
         exec($cmd . ' 2>&1', $out);
@@ -64,9 +72,9 @@ PHP);
     }
 
     /** @return array{0: string, 1: string} */
-    private function gate(string $file, string $login, string $cookie, int $now): array
+    private function gate(string $file, string $login, string $cookie, int $now, ?string $uri = null): array
     {
-        $out    = $this->php($file, $login, $cookie, $now);
+        $out    = $this->php($file, $login, $cookie, $now, $uri);
         $result = json_decode((string) end($out), true);
         $this->assertIsArray($result, implode("\n", $out));
         return $result;
@@ -161,6 +169,52 @@ PHP);
         $readonly = $this->gate($file, '-', $cookie, self::NOW + 2 * StagingAccess::TOUCH_EVERY);
         $this->assertSame('deny', $readonly[0]);
         $this->assertStringNotContainsString($this->root, $readonly[1], 'no server path in the answer');
+    }
+
+    /** T1: ein Link gilt nur am Einstieg der Kopie – woanders zählt er nicht und bleibt gültig. */
+    public function testTokenIsRedeemedOnlyAtTheEntryPoint(): void
+    {
+        $this->withClasses();
+        $file   = $this->root . '/content/wpsync-staging.json';
+        $access = new StagingAccess($file);
+        $access->init('https://kunde.example', '', '/wpsync-staging-0123456789ab', self::NOW, self::NOW);
+        $token = $access->issueToken(self::NOW);
+        $base  = '/wpsync-staging-0123456789ab';
+
+        foreach ([
+            $base . '/wp-login.php',
+            $base . '/wp-admin/',
+            $base . '/wp-json/wp/v2/users',
+            $base . '/index.php/wp-json/',
+            $base . '//',
+            $base . 'x/',
+            '/',
+            '/index.php',
+            '',
+        ] as $path) {
+            $this->assertSame(['deny', 'Kein gültiger Zugang.'], $this->gate($file, $token, '', self::NOW, $path . '?wpsync_login=' . $token), $path);
+        }
+        foreach ([$base, $base . '/', $base . '/index.php'] as $path) {
+            $token = $access->issueToken(self::NOW);
+            $this->assertSame('login', $this->gate($file, $token, '', self::NOW, $path . '?wpsync_login=' . $token)[0], $path);
+        }
+    }
+
+    /** Das Token steht in der Adresse: keine Antwort des Riegels darf sie als Referrer weitergeben oder im Cache landen. */
+    public function testDenialAndLoginSendNoReferrerAndNoStore(): void
+    {
+        $this->withClasses();
+        $out     = $this->php('headers', '-', '', self::NOW);
+        $headers = json_decode((string) end($out), true);
+        $this->assertIsArray($headers, implode("\n", $out));
+        $this->assertContains('Referrer-Policy: no-referrer', $headers);
+        $this->assertContains('Cache-Control: no-store, private', $headers);
+
+        $src = $this->source();
+        $this->assertSame(3, substr_count($src, 'wpsync_staging_headers()'), 'defined once, sent by the denial and by the login');
+        $login = substr($src, (int) strpos($src, 'function wpsync_staging_login('));
+        $this->assertLessThan(strpos($login, 'wp_safe_redirect('), strpos($login, 'wpsync_staging_headers()'), 'before the redirect');
+        $this->assertStringNotContainsString("\$_GET['wpsync_login']", $src, 'the token is read in one place only');
     }
 
     public function testDeniesWithoutItsClasses(): void
