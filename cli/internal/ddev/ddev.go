@@ -163,9 +163,15 @@ func ClaimWPConfig(siteDir string) error {
 
 // DatabaseSpec maps the source server version to a DDEV database spec (Spike B17, AC-19).
 func DatabaseSpec(server string) string {
+	maria := strings.Contains(strings.ToLower(server), "mariadb")
+	if maria {
+		// MariaDB ≥ 10 announces itself as "5.5.5-10.11.19-MariaDB" so that old replication clients
+		// accept it; PHP before 8.0.16 passes that on unchanged.
+		server = strings.TrimPrefix(server, "5.5.5-")
+	}
 	version := MajorMinor(strings.SplitN(server, "-", 2)[0])
 	switch {
-	case strings.Contains(strings.ToLower(server), "mariadb"):
+	case maria:
 		return "mariadb:" + version
 	case version == "5.7" || version == "8.0" || version == "8.4":
 		return "mysql:" + version
