@@ -96,7 +96,7 @@ final class StagingConfig
             '<IfModule mod_headers.c>',
             'Header always set X-Robots-Tag "noindex, nofollow"',
             '</IfModule>',
-            '<FilesMatch "^(wp-config\.php|wpsync-staging\.json|\.htaccess)$|\.(log|sql)$">',
+            '<FilesMatch "^(wp-config|\.env)|^(wpsync-staging\.json|\.htaccess)$|\.(log|sql)$">',
             self::DENY,
             '</FilesMatch>',
             '<IfModule mod_rewrite.c>',

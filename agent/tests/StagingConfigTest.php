@@ -49,13 +49,27 @@ final class StagingConfigTest extends TestCase
         $this->assertStringNotContainsString('HTTP_X_FORWARDED_PROTO', $config);
     }
 
+    /** Jede Variante der wp-config.php und jede .env* bleibt gesperrt, auch mit Zugangs-Cookie. */
+    public function testHtaccessDeniesConfigVariantsAndEnvFiles(): void
+    {
+        $rules = StagingConfig::htaccess(self::PATH, 'https://example.com/wp-content/uploads');
+        $this->assertSame(1, preg_match('/^<FilesMatch "(.+)">$/m', $rules, $m));
+        $pattern = '~' . $m[1] . '~';
+        foreach (['wp-config.php', 'wp-config-old.php', 'wp-config.php.bak', 'wp-config-sample.php', '.env', '.env.local', '.envrc', 'wpsync-staging.json', '.htaccess', 'debug.log', 'dump.sql'] as $name) {
+            $this->assertSame(1, preg_match($pattern, $name), $name);
+        }
+        foreach (['index.php', 'wp-login.php', 'wp-settings.php', 'style.css', 'my.env.php', 'old-wp-config.txt'] as $name) {
+            $this->assertSame(0, preg_match($pattern, $name), $name);
+        }
+    }
+
     /** Spec 5.4, V6 */
     public function testHtaccessLocksEverythingButTheLoginLink(): void
     {
         $rules = StagingConfig::htaccess(self::PATH, 'https://example.com/wp-content/uploads');
         $this->assertStringContainsString('RewriteBase ' . self::PATH . '/', $rules);
         $this->assertStringContainsString('Header always set X-Robots-Tag "noindex, nofollow"', $rules);
-        $this->assertStringContainsString('<FilesMatch "^(wp-config\.php|wpsync-staging\.json|\.htaccess)$|\.(log|sql)$">', $rules);
+        $this->assertStringContainsString('<FilesMatch "^(wp-config|\.env)|^(wpsync-staging\.json|\.htaccess)$|\.(log|sql)$">', $rules);
         $this->assertStringContainsString('RewriteCond %{HTTP_COOKIE} !(^|;\s*)wpsync_stg=', $rules);
         $this->assertStringContainsString('RewriteRule ^(index\.php)?$ - [S=1]', $rules);
         $this->assertStringContainsString('RewriteRule ^ - [F]', $rules);

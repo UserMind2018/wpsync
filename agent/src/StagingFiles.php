@@ -5,9 +5,11 @@ defined('ABSPATH') || exit;
 
 /**
  * Code der Staging-Kopie (Spec Stufe 2b 5.2 Phase 3): WordPress-Core und die Einheiten des
- * Pull-Profils – nie wp-config.php, Drop-ins, uploads, den Agent, Symlinks, VCS-Ordner, Logs oder
- * Dateien mit Zugangsdaten. Kopieren und Löschen arbeiten bis zu einer Deadline, mindestens aber
- * eine Datei, und setzen an einem Cursor fort. Jeder Zielpfad läuft durch $check (StagingGuard::path).
+ * Pull-Profils – nie wp-config.php und ihre Varianten, Drop-ins, uploads, den Agent, Symlinks,
+ * VCS-Ordner, Logs oder Dateien mit Zugangsdaten; unter wp-content gilt dazu, was der Pull
+ * ausschliesst (Excludes::path). Kopieren und Löschen arbeiten bis zu einer Deadline, mindestens
+ * aber eine Datei, und setzen an einem Cursor fort. Jeder Zielpfad läuft durch $check
+ * (StagingGuard::path).
  */
 final class StagingFiles
 {
@@ -25,7 +27,7 @@ final class StagingFiles
             if (is_link($full)) {
                 continue;
             }
-            $isCoreFile = $name === 'index.php' || $name === 'xmlrpc.php' || (preg_match('/^wp-[a-z-]+\.php\z/', $name) === 1 && $name !== 'wp-config.php');
+            $isCoreFile = $name === 'index.php' || $name === 'xmlrpc.php' || (preg_match('/^wp-[a-z-]+\.php\z/', $name) === 1 && !self::isConfig($name));
             if ((is_file($full) && $isCoreFile) || (is_dir($full) && in_array($name, self::CORE_DIRS, true))) {
                 $out[] = $name;
             }
@@ -83,17 +85,14 @@ final class StagingFiles
                 if ($files > 0 && microtime(true) > $deadline) {
                     return ['next' => [$i, ''], 'files' => $files];
                 }
-                if ($after === '') {
+                if ($after === '' && !self::skips($items[$i], $src)) {
                     self::file($src, $to . '/' . $items[$i], $check);
                     $files++;
                 }
                 continue;
             }
             $last = $after;
-            foreach (self::walk($src, $after) as $rel) {
-                if (in_array($items[$i] . '/' . $rel, self::NEVER, true)) {
-                    continue;
-                }
+            foreach (self::walk($src, $after, $items[$i] . '/') as $rel) {
                 if ($files > 0 && microtime(true) > $deadline) {
                     return ['next' => [$i, $last], 'files' => $files];
                 }
@@ -122,10 +121,10 @@ final class StagingFiles
                 return null;
             }
             if (is_file($src)) {
-                $bytes += (int) @filesize($src);
+                $bytes += self::skips($item, $src) ? 0 : (int) @filesize($src);
                 continue;
             }
-            foreach (self::walk($src, '') as $rel) {
+            foreach (self::walk($src, '', $item . '/') as $rel) {
                 if (microtime(true) > $deadline) {
                     return null;
                 }
@@ -158,7 +157,12 @@ final class StagingFiles
 
     private static function removeBounded(string $path, float $deadline, callable $check, int &$removed): bool
     {
-        $path = $check($path);
+        // Ein Symlink wird selbst entfernt, nie betreten: geprüft wird der Ordner, in dem er liegt.
+        if (is_link($path)) {
+            $check(dirname($path));
+        } else {
+            $path = $check($path);
+        }
         if (is_link($path) || is_file($path)) {
             if ($removed > 0 && microtime(true) > $deadline) {
                 return false;
@@ -198,13 +202,46 @@ final class StagingFiles
         @touch($dst, (int) filemtime($src));
     }
 
+    private static function isConfig(string $name): bool
+    {
+        return stripos($name, 'wp-config') === 0;
+    }
+
+    /**
+     * Ob eine Datei nie in die Kopie kommt. Unter wp-content dieselbe Entscheidung wie beim Pull
+     * (Excludes::path), sonst Excludes::file; überall dazu Varianten der wp-config.php (Zugangsdaten
+     * von Live), .user.ini und jede .htaccess mit RewriteEngine – sie nähme ihrem Ordner die
+     * Cookie-Sperre der Kopie.
+     *
+     * @param string $rel relativ zu ABSPATH
+     */
+    private static function skips(string $rel, string $full): bool
+    {
+        $name = strtolower(basename($rel));
+        if (in_array($rel, self::NEVER, true) || self::isConfig($name) || $name === '.user.ini') {
+            return true;
+        }
+        if ($name === '.htaccess') {
+            $rules = @file_get_contents($full);
+            if ($rules === false || stripos($rules, 'RewriteEngine') !== false) {
+                return true;
+            }
+        }
+        $size = (int) @filesize($full);
+        if (strpos($rel, 'wp-content/') === 0) {
+            return Excludes::path(substr($rel, strlen('wp-content/')), $size) !== null;
+        }
+        return Excludes::file(basename($rel), $size) !== null;
+    }
+
     /**
      * Dateien unter $dir in strcmp-Reihenfolge, relativ zu $dir, nur die hinter $after. Keine
-     * Symlinks, keine VCS-Ordner, keine Logs und Dateien mit Zugangsdaten (Excludes::file).
+     * Symlinks, keine VCS-Ordner und nichts, was skips() ausschliesst.
      *
+     * @param string $item Pfad von $dir relativ zu ABSPATH, mit „/“ am Ende
      * @return \Generator<int, string>
      */
-    private static function walk(string $dir, string $after, string $prefix = ''): \Generator
+    private static function walk(string $dir, string $after, string $item, string $prefix = ''): \Generator
     {
         $parts = explode('/', $after, 2);
         foreach (self::entries($dir) as $name) {
@@ -218,11 +255,11 @@ final class StagingFiles
             }
             if (is_dir($full)) {
                 if (!in_array(strtolower($name), Excludes::ANY_DIRS, true)) {
-                    yield from self::walk($full, $cmp === 0 ? ($parts[1] ?? '') : '', $prefix . $name . '/');
+                    yield from self::walk($full, $cmp === 0 ? ($parts[1] ?? '') : '', $item, $prefix . $name . '/');
                 }
                 continue;
             }
-            if ($cmp > 0 && Excludes::file($name, (int) @filesize($full)) === null) {
+            if ($cmp > 0 && !self::skips($item . $prefix . $name, $full)) {
                 yield $prefix . $name;
             }
         }
