@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/cliout"
+	"github.com/usermind/wpsync/internal/container"
 	"github.com/usermind/wpsync/internal/ddev"
 	"github.com/usermind/wpsync/internal/keychain"
 	"github.com/usermind/wpsync/internal/localenv"
@@ -57,6 +59,9 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 
   Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version) schreibt JSON auf stdout,
   Meldungen auf stderr, und fragt nie nach; --secret-stdin liest das Secret von stdin.
+  pull/status/list/stop --driver container --container c --docroot d --db-host h --db-name n
+  --db-user u --local-url url [--cli-image i]: vorhandener WordPress-Container statt DDEV
+  (DB-Passwort als zweite Zeile von stdin). push, pushes und rollback nur mit DDEV.
 `
 
 // jsonCommands accept --json (Spec Server-Modus §4). push, pushes, rollback, trust, list, stop
@@ -129,7 +134,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 	case "unpair":
 		return a.cmdUnpair(args)
 	case "list":
-		return a.cmdList()
+		return a.cmdList(args)
 	case "stop":
 		return a.cmdStop(args)
 	case "scan":
@@ -365,8 +370,112 @@ func localEnvs(d localenv.Driver) ([]localenv.Env, error) {
 	return localenv.Merge(found, paired), nil
 }
 
-func (a *app) cmdList() error {
-	d, err := ddevDriver(nil, nil)
+// driverFlags are the switches of the container mode (Spec Server-Modus §3).
+type driverFlags struct {
+	driver, container, docroot, dbHost, dbName, dbUser, localURL, cliImage *string
+}
+
+func addDriverFlags(fs *flag.FlagSet) *driverFlags {
+	return &driverFlags{
+		driver:    fs.String("driver", "ddev", "Laufzeit: ddev (Mac) oder container (Server)"),
+		container: fs.String("container", "", "Container-Modus: WordPress-Container der Site"),
+		docroot:   fs.String("docroot", "", "Container-Modus: Docroot (Pfad auf dem Host = im OS-Container)"),
+		dbHost:    fs.String("db-host", "", "Container-Modus: Datenbank-Host"),
+		dbName:    fs.String("db-name", "", "Container-Modus: Datenbank"),
+		dbUser:    fs.String("db-user", "", "Container-Modus: Datenbank-Benutzer (Passwort: zweite Zeile von stdin)"),
+		localURL:  fs.String("local-url", "", "Container-Modus: Ziel-URL für Search-Replace"),
+		cliImage:  fs.String("cli-image", "", "Container-Modus: WP-CLI-Image (Standard: wordpress:cli-php<PHP der Quelle>)"),
+	}
+}
+
+// isContainer reports whether --driver container is set.
+func (f *driverFlags) isContainer() (bool, error) {
+	switch *f.driver {
+	case "ddev":
+		return false, nil
+	case "container":
+		return true, nil
+	}
+	return false, cliout.Usage(fmt.Errorf("unbekannter --driver %q (ddev, container)", *f.driver))
+}
+
+// needsSecretStdin: the container mode stores nothing, secret and DB password come from stdin.
+func (f *driverFlags) needsSecretStdin(secretStdin bool) error {
+	inContainer, err := f.isContainer()
+	if err != nil {
+		return err
+	}
+	if inContainer && !secretStdin {
+		return cliout.Usage(errors.New("--driver container braucht --secret-stdin (Secret und DB-Passwort über stdin)"))
+	}
+	return nil
+}
+
+// siteDriver builds the driver of one site for pull and returns it with site folder and docroot
+// ("" = the DDEV layout below the sites root). DDEV: the trusted .ddev state, docker for the
+// hardening checks and the takeover question on a terminal. Container mode: the DB password is
+// the next stdin line after the secret (the caller checked --secret-stdin and loaded the secret),
+// baseline and snapshot repo live next to the docroot, and the caller mounts the mailguard
+// read-only – wpsync only checks that it is active.
+func (a *app) siteDriver(f *driverFlags, site *sites.Site, root string) (localenv.Driver, string, string, error) {
+	inContainer, err := f.isContainer()
+	if err != nil {
+		return nil, "", "", err
+	}
+	if !inContainer {
+		guard, _, err := mailguardSource()
+		if err != nil {
+			return nil, "", "", localenv.Wrap("mailguard", fmt.Errorf("local-mailguard nicht verfügbar – ohne Mail-Schutz kein Pull: %w", err))
+		}
+		state, err := ddevStore(root)
+		if err != nil {
+			return nil, "", "", err
+		}
+		d := &ddev.Driver{SitesRoot: root, MailguardSource: guard, State: state, Docker: dockerCLI, Out: a.out(), Err: a.out()}
+		if a.interactive() {
+			d.Confirm = a.confirm
+		}
+		return d, "", "", nil
+	}
+	password, err := a.stdinSecrets.DBPassword()
+	if err != nil {
+		return nil, "", "", cliout.Usage(err)
+	}
+	docroot := *f.docroot
+	if docroot != "" {
+		docroot = filepath.Clean(docroot)
+	}
+	cfg := container.Config{
+		Site: site.Name, Container: *f.container, Docroot: docroot,
+		DBHost: *f.dbHost, DBName: *f.dbName, DBUser: *f.dbUser, DBPassword: password,
+		LocalURL: *f.localURL, CLIImage: *f.cliImage,
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, "", "", cliout.Usage(err)
+	}
+	d := &container.Driver{Config: cfg, Ctx: a.ctx, Out: a.out(), Err: a.out()}
+	return d, filepath.Dir(cfg.Docroot), cfg.Docroot, nil
+}
+
+// listDriver is the driver for list and stop: DDEV projects or labelled containers.
+func (a *app) listDriver(f *driverFlags, out, errOut io.Writer) (localenv.Driver, error) {
+	inContainer, err := f.isContainer()
+	if err != nil {
+		return nil, err
+	}
+	if inContainer {
+		return &container.Driver{Ctx: a.ctx, Out: out, Err: errOut}, nil
+	}
+	return ddevDriver(out, errOut)
+}
+
+func (a *app) cmdList(args []string) error {
+	fs := a.flags("list")
+	df := addDriverFlags(fs)
+	if _, err := a.parse(fs, args, exactly(0), "wpsync list [--driver ddev|container]"); err != nil {
+		return err
+	}
+	d, err := a.listDriver(df, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -396,6 +505,7 @@ func (a *app) cmdList() error {
 func (a *app) cmdStop(args []string) error {
 	fs := a.flags("stop")
 	all := fs.Bool("all", false, "alle laufenden wpsync-Umgebungen stoppen")
+	df := addDriverFlags(fs)
 	names, err := a.parse(fs, args, nil, "")
 	if err != nil {
 		return err
@@ -403,7 +513,7 @@ func (a *app) cmdStop(args []string) error {
 	if *all == (len(names) > 0) {
 		return cliout.Usage(errors.New("Aufruf: wpsync stop <site>… oder wpsync stop --all"))
 	}
-	d, err := ddevDriver(a.stdout, a.stderr)
+	d, err := a.listDriver(df, a.stdout, a.stderr)
 	if err != nil {
 		return err
 	}
@@ -444,7 +554,7 @@ func (a *app) cmdScan(args []string) error {
 	fs := a.flags("scan")
 	refresh := fs.Bool("refresh", false, "Infosheet auf der Site neu erstellen")
 	preset := fs.String("preset", "", "ohne Rückfrage: ohne-transaktionen | nur-content | vollstaendig")
-	since := fs.String("uploads-since", "", "Uploads ab diesem Jahr ziehen, ältere per Proxy (nur mit --preset)")
+	since := fs.String("uploads-since", "", "Uploads ab diesem Jahr ziehen, ältere per Proxy; alle = jedes Jahr ziehen (nur mit --preset)")
 	var plugins, postTypes listFlag
 	fs.Var(&plugins, "exclude-plugin", "Plugin nicht ziehen, mehrfach möglich (nur mit --preset)")
 	fs.Var(&postTypes, "exclude-post-type", "Post-Typ nicht ziehen, mehrfach möglich (nur mit --preset)")
@@ -456,8 +566,11 @@ func (a *app) cmdScan(args []string) error {
 	if *preset == "" && (len(plugins) > 0 || len(postTypes) > 0 || *since != "") {
 		return cliout.Usage(errors.New("--exclude-plugin, --exclude-post-type und --uploads-since nur zusammen mit --preset"))
 	}
-	if *since != "" && !profile.IsYear(*since) {
-		return cliout.Usage(errors.New("--uploads-since erwartet ein Jahr, z. B. 2025"))
+	allUploads := *since == "alle"
+	if allUploads {
+		*since = ""
+	} else if *since != "" && !profile.IsYear(*since) {
+		return cliout.Usage(errors.New("--uploads-since erwartet ein Jahr, z. B. 2025, oder alle"))
 	}
 	site, secret, err := loadSite(positional[0], a.secretStore(*secretStdin))
 	if err != nil {
@@ -473,7 +586,7 @@ func (a *app) cmdScan(args []string) error {
 		Now:     time.Now(),
 		Refresh: *refresh,
 		Preset:  *preset,
-		Adjust:  scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since},
+		Adjust:  scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since, AllUploads: allUploads},
 		OnSheet: func(s *agentapi.Infosheet) { res.Infosheet = s },
 	}
 	if *preset == "" && a.interactive() {
@@ -508,8 +621,12 @@ func (a *app) cmdPull(args []string) error {
 	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	secretStdin := secretStdinFlag(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--json] [--secret-stdin]")
+	df := addDriverFlags(fs)
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--json] [--secret-stdin] [--driver container …]")
 	if err != nil {
+		return err
+	}
+	if err := df.needsSecretStdin(*secretStdin); err != nil {
 		return err
 	}
 	site, secret, err := loadSite(positional[0], a.secretStore(*secretStdin))
@@ -523,21 +640,18 @@ func (a *app) cmdPull(args []string) error {
 	if err != nil {
 		return err
 	}
-	guard, _, err := mailguardSource()
-	if err != nil {
-		return localenv.Wrap("mailguard", fmt.Errorf("local-mailguard nicht verfügbar – ohne Mail-Schutz kein Pull: %w", err))
-	}
-	state, err := ddevStore(root)
+	drv, siteDir, docroot, err := a.siteDriver(df, site, root)
 	if err != nil {
 		return err
 	}
-	drv := &ddev.Driver{SitesRoot: root, MailguardSource: guard, State: state, Docker: dockerCLI, Out: a.out(), Err: a.out()}
 	var report pull.Result
 	opts := pull.Options{
 		Site:            *site,
 		Secret:          secret,
 		SitesRoot:       root,
 		Driver:          drv,
+		SiteDir:         siteDir,
+		Docroot:         docroot,
 		Full:            *full,
 		Yes:             *yes,
 		NoAnonymize:     *noAnon,
@@ -551,7 +665,6 @@ func (a *app) cmdPull(args []string) error {
 	}
 	if a.interactive() {
 		opts.Confirm = a.confirm
-		drv.Confirm = a.confirm
 	}
 	if a.json {
 		opts.Progress = a.jw.Phase
@@ -569,7 +682,8 @@ func (a *app) cmdPull(args []string) error {
 func (a *app) cmdStatus(args []string) error {
 	fs := a.flags("status")
 	secretStdin := secretStdinFlag(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync status <site> [--json] [--secret-stdin]")
+	df := addDriverFlags(fs)
+	positional, err := a.parse(fs, args, exactly(1), "wpsync status <site> [--json] [--secret-stdin] [--driver container --docroot d]")
 	if err != nil {
 		return err
 	}
@@ -581,7 +695,19 @@ func (a *app) cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.status(pull.Options{Site: *site, Secret: secret, SitesRoot: root, Out: a.out(), Ctx: a.ctx}, site)
+	opts := pull.Options{Site: *site, Secret: secret, SitesRoot: root, Out: a.out(), Ctx: a.ctx}
+	inContainer, err := df.isContainer()
+	if err != nil {
+		return err
+	}
+	if inContainer {
+		if *df.docroot == "" || !filepath.IsAbs(*df.docroot) {
+			return cliout.Usage(errors.New("--driver container braucht --docroot (absoluter Pfad)"))
+		}
+		opts.Docroot = filepath.Clean(*df.docroot)
+		opts.SiteDir = filepath.Dir(opts.Docroot)
+	}
+	return a.status(opts, site)
 }
 
 // status prints the changes since the last pull, or returns them as JSON data.
