@@ -75,8 +75,13 @@ type Result struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// WarningSnapshotFailed: site, baseline and DB are pulled, but the snapshot commit failed.
-const WarningSnapshotFailed = "snapshot_failed"
+// Values of Result.Warnings.
+const (
+	// WarningSnapshotFailed: site, baseline and DB are pulled, but the snapshot commit failed.
+	WarningSnapshotFailed = "snapshot_failed"
+	// WarningSymlinkSkipped: files below a symlinked folder of the docroot were not written.
+	WarningSymlinkSkipped = "symlink_skipped"
+)
 
 func (o *Options) progress(phase string, done, total int) {
 	if o.Progress != nil {
@@ -361,8 +366,14 @@ func run(o Options) error {
 	fmt.Fprintf(o.Out, "Dateien: %d neu/geändert, %d gelöscht\n", len(changed), len(deleted))
 	o.progress(PhaseFiles, 0, len(changed))
 	fileProgress := func(done, total int) { o.progress(PhaseFiles, done, total) }
-	if err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out, fileProgress); err != nil {
+	var warnings []string
+	skipped, err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out, fileProgress)
+	if err != nil {
 		return err
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(o.Out, "  ! %d Dateien unter symbolischen Links übersprungen – lokal veraltet oder fehlend, der nächste Pull versucht es erneut\n", len(skipped))
+		warnings = append(warnings, WarningSymlinkSkipped)
 	}
 	RemoveFiles(docroot, deleted)
 	RemoveDropIns(docroot)
@@ -415,8 +426,15 @@ func run(o Options) error {
 	o.progress(PhaseMailguard, 1, 1)
 
 	next := baseline.New(o.Site.URL)
+	notWritten := make(map[string]bool, len(skipped))
+	for _, p := range skipped {
+		notWritten[p] = true
+	}
 	for _, f := range delta.Files {
-		next.Files[f.Path] = baseline.FileStamp{Size: f.Size, MTime: f.MTime}
+		// A skipped file stays out of the baseline, so the next pull asks for it again.
+		if !notWritten[f.Path] {
+			next.Files[f.Path] = baseline.FileStamp{Size: f.Size, MTime: f.MTime}
+		}
 	}
 	for _, t := range delta.Tables {
 		next.Modes[t.Name] = t.Mode
@@ -428,7 +446,6 @@ func run(o Options) error {
 		return fmt.Errorf("save baseline: %w", err)
 	}
 	// The pull itself is done: a failed snapshot is a warning, not a failed pull (Review M2).
-	var warnings []string
 	if err := o.commit(siteDir, docroot, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); err != nil {
 		fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – die Site ist gezogen, der Stand fehlt in der Historie: %v\n", err)
 		warnings = append(warnings, WarningSnapshotFailed)

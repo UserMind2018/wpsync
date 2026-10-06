@@ -1,6 +1,7 @@
 package pull
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,18 +14,20 @@ import (
 )
 
 // DownloadFiles fetches files in bundles of at most bundleBytes and writes them below docroot.
-// progress (may be nil) gets the number of finished files after every bundle.
-func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer, progress func(done, total int)) error {
+// progress (may be nil) gets the number of finished files after every bundle. A file below a
+// symlinked folder is skipped, reported on out and returned in skipped (Nach-Review N-c): nothing
+// is written through the link, and the pull of everything else goes on.
+func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer, progress func(done, total int)) (skipped []string, err error) {
 	if len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 	// The site folder belongs to wpsync (the site only reaches the docroot, on the Mac its content).
 	if err := os.MkdirAll(filepath.Dir(filepath.Clean(docroot)), 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	root, err := openDocroot(docroot, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer root.Close()
 	done := 0
@@ -34,12 +37,18 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 			paths[i] = f.Path
 		}
 		err := c.Files(paths, func(path string, size, mtime int64, body io.Reader) error {
-			return writeFileIn(root, path, body, size, mtime)
+			err := writeFileIn(root, path, body, size, mtime)
+			if errors.Is(err, safefs.ErrSymlink) {
+				fmt.Fprintf(out, "  ! übersprungen (symbolischer Link im Pfad, wpsync schreibt nicht hindurch): %s\n", agentapi.Printable(path))
+				skipped = append(skipped, path)
+				return nil
+			}
+			return err
 		}, func(path string) {
 			fmt.Fprintf(out, "  ! übersprungen (fehlt oder ungültig): %s\n", path)
 		})
 		if err != nil {
-			return fmt.Errorf("bundle with %d files (first: %s): %w", len(paths), paths[0], err)
+			return skipped, fmt.Errorf("bundle with %d files (first: %s): %w", len(paths), paths[0], err)
 		}
 		done += len(group)
 		fmt.Fprintf(out, "  Dateien %d/%d\n", done, len(files))
@@ -47,7 +56,7 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 			progress(done, len(files))
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
 // bundles groups files so a bundle stays below limit (a single larger file gets its own bundle).

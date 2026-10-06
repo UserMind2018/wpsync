@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/usermind/wpsync/internal/baseline"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/localgit"
 )
@@ -163,5 +164,44 @@ func TestRunRefusesReservedDocroot(t *testing.T) {
 		if err := Run(o); err == nil || !strings.Contains(err.Error(), "reserv") {
 			t.Errorf("%s: err = %v", name, err)
 		}
+	}
+}
+
+// Nach-Review N-c: ein per Symlink eingebundener Ordner im Docroot (etwa ein Plugin in Entwicklung)
+// bricht den Pull nicht ab. Die Dateien darunter werden übersprungen – nichts wird außerhalb
+// geschrieben – und als symlink_skipped gemeldet.
+func TestSymlinkedFolderIsSkippedWithWarning(t *testing.T) {
+	srv := agentServer(t, nil)
+	defer srv.Close()
+	o := pullOptions(t, srv.URL, newFakeDriver(false))
+	o.SiteDir = t.TempDir()
+	o.Docroot = filepath.Join(o.SiteDir, "html")
+	var res Result
+	o.Report = &res
+	outside := t.TempDir()
+	os.MkdirAll(filepath.Join(o.Docroot, "wp-content", "plugins"), 0o755)
+	os.Symlink(outside, filepath.Join(o.Docroot, "wp-content", "plugins", "a"))
+	if err := Run(o); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("wrote through the symlink: %v", entries)
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0] != WarningSymlinkSkipped {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "wp-content/plugins/a/a.php") {
+		t.Fatalf("skipped path not reported:\n%s", out)
+	}
+	base, err := baseline.Load(o.SiteDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := base.Files["wp-content/plugins/a/a.php"]; ok {
+		t.Fatal("skipped file recorded in the baseline – the next pull would not retry it")
+	}
+	res = Result{}
+	if err := Run(o); err != nil || len(res.Warnings) != 1 {
+		t.Fatalf("second pull: %v, warnings = %v", err, res.Warnings)
 	}
 }
