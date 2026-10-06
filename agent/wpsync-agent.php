@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       wpsync Agent
  * Description:       Signierte Schnittstelle für wpsync: pull (Live → Lokal) und push von Code im Push-Fenster.
- * Version:           0.4.0
+ * Version:           0.4.1
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -12,12 +12,12 @@
 
 defined('ABSPATH') || exit;
 
-const WPSYNC_VERSION = '0.4.0';
+const WPSYNC_VERSION = '0.4.1';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
-    'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'Store', 'WpProbe', 'Infosheet', 'Protection',
-    'PushUnits', 'PushManifest', 'PushSwap', 'PushRescue', 'PushWindow', 'Push', 'Rest', 'Admin',
+    'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
+    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushSwap', 'PushRescue', 'PushWindow', 'Push', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }

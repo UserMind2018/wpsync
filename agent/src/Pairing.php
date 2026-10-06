@@ -32,6 +32,12 @@ final class Pairing
         return bin2hex(random_bytes(32));
     }
 
+    /** Ein Secret im Klartext, wie newSecret() es liefert (Altbestand vor Agent 0.4.1). */
+    public static function isSecret(string $value): bool
+    {
+        return preg_match('/^[a-f0-9]{64}\z/', $value) === 1;
+    }
+
     public static function hashCode(string $code): string
     {
         return hash('sha256', strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $code)));

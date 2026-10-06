@@ -11,6 +11,13 @@ final class Store
     /** Autoload-Option, damit die Prüfung keine Query kostet; „wpsync_%“ verlässt den Server nie (AC-27). */
     public const SCHEMA_OPTION = 'wpsync_schema';
 
+    /** Zustand eines gespeicherten Pairing-Secrets (SEC-006). */
+    public const SECRET_SEALED = 'sealed';
+    public const SECRET_PLAIN  = 'plain';
+    public const SECRET_BROKEN = 'broken';
+    /** Versiegelt mit dem Rückfall-Schlüssel (Salts), obwohl WPSYNC_KEY inzwischen gesetzt ist. */
+    private const SECRET_STALE = 'stale';
+
     public static function table(string $name): string
     {
         global $wpdb;
@@ -54,7 +61,7 @@ final class Store
         $collate = $wpdb->get_charset_collate();
         $wpdb->query('CREATE TABLE IF NOT EXISTS `' . self::table('pairings') . '` (
             key_id CHAR(16) NOT NULL PRIMARY KEY,
-            secret CHAR(64) NOT NULL,
+            secret VARCHAR(255) NOT NULL,
             device VARCHAR(100) NOT NULL,
             created INT UNSIGNED NOT NULL,
             last_used INT UNSIGNED NULL,
@@ -85,10 +92,16 @@ final class Store
             KEY created (created)
         ) ' . $collate);
         // Update von einem Agent vor 0.4.0: die Tabelle existiert schon ohne die Spalte.
-        $columns = (array) $wpdb->get_col('SHOW COLUMNS FROM `' . self::table('pairings') . '`', 0);
-        if (!in_array('push_until', $columns, true)) {
+        $columns = self::pairingColumns();
+        if (!isset($columns['push_until'])) {
             $wpdb->query('ALTER TABLE `' . self::table('pairings') . '` ADD COLUMN push_until INT UNSIGNED NOT NULL DEFAULT 0');
         }
+        // Update von einem Agent vor 0.4.1: CHAR(64) fasst nur das Secret im Klartext (SEC-006).
+        if (!self::secretColumnFits($columns)) {
+            $wpdb->query('ALTER TABLE `' . self::table('pairings') . '` MODIFY secret VARCHAR(255) NOT NULL');
+        }
+        self::sealPlainSecrets();
+        delete_option('wpsync_secret'); // Altlast aus dem Spike, Secret im Klartext (SEC-006)
         update_option(self::SCHEMA_OPTION, WPSYNC_VERSION, true);
     }
 
@@ -156,13 +169,19 @@ final class Store
         return $code;
     }
 
-    /** @return bool false, wenn die Zeile nicht geschrieben wurde */
+    /**
+     * Speichert das Secret versiegelt, wenn wp-config.php einen Schlüssel hergibt (SEC-006).
+     * Ohne Schlüssel im Klartext wie vor 0.4.1 – die Admin-Seite warnt dann.
+     *
+     * @return bool false, wenn die Zeile nicht geschrieben wurde
+     */
     public static function addPairing(string $keyId, string $secret, string $device): bool
     {
         global $wpdb;
+        $key = SecretKey::current();
         return 1 === $wpdb->insert(self::table('pairings'), [
             'key_id'  => $keyId,
-            'secret'  => $secret,
+            'secret'  => $key !== null && self::secretColumnFits() ? SecretBox::seal($secret, $key) : $secret,
             'device'  => $device,
             'created' => time(),
         ]);
@@ -175,11 +194,97 @@ final class Store
         return 'wpsync_' . $purpose . '_' . substr(md5(DB_NAME . '|' . $wpdb->base_prefix), 0, 12);
     }
 
+    /**
+     * Secret eines Pairings; null für unbekannte und nicht entschlüsselbare Pairings (z. B. nach
+     * einer Rotation der WordPress-Salts) – beides heisst für das Gerät: neu koppeln.
+     * Klartext aus der Zeit vor 0.4.1 gilt weiter und wird bei Gelegenheit versiegelt.
+     */
     public static function secretFor(string $keyId): ?string
     {
         global $wpdb;
-        $secret = $wpdb->get_var($wpdb->prepare('SELECT secret FROM `' . self::table('pairings') . '` WHERE key_id = %s', $keyId));
-        return $secret === null ? null : (string) $secret;
+        $stored = $wpdb->get_var($wpdb->prepare('SELECT secret FROM `' . self::table('pairings') . '` WHERE key_id = %s', $keyId));
+        if ($stored === null) {
+            return null;
+        }
+        $keys = SecretKey::fromConfig();
+        list($secret, $state) = self::unseal((string) $stored, $keys);
+        if ($secret !== null && $state !== self::SECRET_SEALED && $keys !== []) {
+            self::reseal($keyId, (string) $stored, $secret, $keys[0]);
+        }
+        return $secret;
+    }
+
+    /**
+     * @param list<string> $keys
+     * @return array{0: string|null, 1: string} [Secret, Zustand]
+     */
+    private static function unseal(string $stored, array $keys): array
+    {
+        if (!SecretBox::isSealed($stored)) {
+            return Pairing::isSecret($stored) ? [$stored, self::SECRET_PLAIN] : [null, self::SECRET_BROKEN];
+        }
+        foreach ($keys as $i => $key) {
+            $secret = SecretBox::open($stored, $key);
+            if ($secret !== null && Pairing::isSecret($secret)) {
+                return [$secret, $i === 0 ? self::SECRET_SEALED : self::SECRET_STALE];
+            }
+        }
+        return [null, self::SECRET_BROKEN];
+    }
+
+    /** Ersetzt die Zeile nur, wenn sie noch den gelesenen Wert hat – parallele Requests sind harmlos. */
+    private static function reseal(string $keyId, string $stored, string $secret, string $key): void
+    {
+        global $wpdb;
+        if (!self::secretColumnFits()) {
+            return; // ALTER fehlgeschlagen: versiegelt passte der Wert nicht in CHAR(64)
+        }
+        $wpdb->query($wpdb->prepare(
+            'UPDATE `' . self::table('pairings') . '` SET secret = %s WHERE key_id = %s AND secret = %s',
+            SecretBox::seal($secret, $key),
+            $keyId,
+            $stored
+        ));
+    }
+
+    /** Migration beim Update auf 0.4.1: Klartext-Secrets versiegeln, sofern ein Schlüssel da ist. */
+    private static function sealPlainSecrets(): void
+    {
+        global $wpdb;
+        $key = SecretKey::current();
+        if ($key === null) {
+            return;
+        }
+        $rows = (array) $wpdb->get_results('SELECT key_id, secret FROM `' . self::table('pairings') . '`', ARRAY_A);
+        foreach ($rows as $row) {
+            $stored = (string) $row['secret'];
+            if (!SecretBox::isSealed($stored) && Pairing::isSecret($stored)) {
+                self::reseal((string) $row['key_id'], $stored, $stored, $key);
+            }
+        }
+    }
+
+    /** @return array<string, string> Spaltenname → Typ */
+    private static function pairingColumns(): array
+    {
+        global $wpdb;
+        $columns = [];
+        foreach ((array) $wpdb->get_results('SHOW COLUMNS FROM `' . self::table('pairings') . '`', ARRAY_A) as $row) {
+            $columns[(string) $row['Field']] = strtolower((string) $row['Type']);
+        }
+        return $columns;
+    }
+
+    /**
+     * Fasst die Spalte einen versiegelten Wert (rund 150 Zeichen)? Nach einem fehlgeschlagenen
+     * ALTER nicht – dann bleibt es beim Klartext, statt das Secret abzuschneiden.
+     *
+     * @param array<string, string>|null $columns
+     */
+    public static function secretColumnFits(?array $columns = null): bool
+    {
+        $columns = $columns ?? self::pairingColumns();
+        return preg_match('/^varchar\((\d+)\)/', $columns['secret'] ?? '', $m) === 1 && (int) $m[1] >= 255;
     }
 
     public static function touchPairing(string $keyId): void
@@ -188,18 +293,25 @@ final class Store
         $wpdb->update(self::table('pairings'), ['last_used' => time()], ['key_id' => $keyId]);
     }
 
-    /** @return list<array{key_id: string, device: string, created: int, last_used: int|null, push_until: int}> */
+    /**
+     * Ohne das Secret selbst; secret_state ist SECRET_SEALED, SECRET_PLAIN oder SECRET_BROKEN.
+     *
+     * @return list<array{key_id: string, device: string, created: int, last_used: int|null, push_until: int, secret_state: string}>
+     */
     public static function pairings(): array
     {
         global $wpdb;
-        $rows = $wpdb->get_results('SELECT key_id, device, created, last_used, push_until FROM `' . self::table('pairings') . '` ORDER BY created', ARRAY_A);
-        return array_map(static function (array $row): array {
+        $keys = SecretKey::fromConfig();
+        $rows = $wpdb->get_results('SELECT key_id, secret, device, created, last_used, push_until FROM `' . self::table('pairings') . '` ORDER BY created', ARRAY_A);
+        return array_map(static function (array $row) use ($keys): array {
+            $state = self::unseal((string) $row['secret'], $keys)[1];
             return [
-                'key_id'     => (string) $row['key_id'],
-                'device'     => (string) $row['device'],
-                'created'    => (int) $row['created'],
-                'last_used'  => $row['last_used'] === null ? null : (int) $row['last_used'],
-                'push_until' => (int) $row['push_until'],
+                'key_id'       => (string) $row['key_id'],
+                'device'       => (string) $row['device'],
+                'created'      => (int) $row['created'],
+                'last_used'    => $row['last_used'] === null ? null : (int) $row['last_used'],
+                'push_until'   => (int) $row['push_until'],
+                'secret_state' => $state === self::SECRET_STALE ? self::SECRET_SEALED : $state,
             ];
         }, (array) $rows);
     }

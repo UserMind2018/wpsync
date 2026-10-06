@@ -3,6 +3,36 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unveröffentlicht] · Agent 0.4.1
+
+**Nur der Agent ändert sich.** Die CLI bleibt unverändert und funktioniert mit Agent 0.4.0 und 0.4.1.
+
+### Sicherheit
+- Pairing-Secrets stehen nicht mehr im Klartext in der Datenbank (SEC-006). Der Agent speichert
+  sie verschlüsselt (libsodium `secretbox`, Format `v1:…`) in `wpsync_pairings`. Der Schlüssel
+  kommt aus `wp-config.php` – aus `WPSYNC_KEY`, sonst aus `AUTH_KEY` und `SECURE_AUTH_KEY` – und
+  nie aus der Datenbank. Bisher genügte reiner Lesezugriff auf die Datenbank (SQL-Injection in
+  einem anderen Plugin, Datenbank-Backup, Hosting-Panel), um Requests im Namen eines Geräts zu
+  signieren und bei offenem Push-Fenster Code zu pushen
+- Beim Update erweitert der Agent die Spalte `secret` auf `VARCHAR(255)` und verschlüsselt alle
+  vorhandenen Secrets einmal. Bestehende Kopplungen bleiben gültig. Ein Secret, das noch im
+  Klartext steht, gilt weiter und wird bei der nächsten Benutzung verschlüsselt
+- Fehlen die Salts oder stehen sie auf dem WordPress-Standardwert und ist kein `WPSYNC_KEY`
+  gesetzt, speichert der Agent wie bisher im Klartext und warnt auf der Admin-Seite
+- Die Admin-Seite zeigt pro Gerät, ob sein Secret verschlüsselt, im Klartext oder nicht mehr
+  entschlüsselbar ist. Ein nicht entschlüsselbares Pairing wird wie ein widerrufenes behandelt
+  (`401 wpsync_unpaired`, die CLI fordert zum neuen Koppeln auf)
+
+### Zu tun nach dem Update
+- **Agent 0.4.1 installieren** auf den gekoppelten Sites (Plugin-ZIP im WP-Admin hochladen und
+  ersetzen). Neu koppeln ist nicht nötig.
+- **Optional, empfohlen:** in `wp-config.php` einen eigenen Schlüssel setzen,
+  `define('WPSYNC_KEY', '…');` mit mindestens 32 zufälligen Zeichen (z. B. `openssl rand -hex 32`).
+  Dann überstehen die Kopplungen eine Rotation der WordPress-Salts.
+- **Nach einer Rotation der Salts** (ohne `WPSYNC_KEY`) oder nach Ändern bzw. Entfernen von
+  `WPSYNC_KEY` alle Geräte neu koppeln. Die Admin-Seite markiert betroffene Pairings mit
+  „nicht entschlüsselbar – neu koppeln“; alte Einträge dort widerrufen.
+
 ## [0.2.0] – 2026-10-06 · Agent 0.4.0
 
 **Agent und CLI gemeinsam aktualisieren.** `wpsync push` braucht Agent 0.4.0. Pull, Scan und
