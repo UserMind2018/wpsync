@@ -190,6 +190,8 @@ trust_ddev
 ddev restart >/dev/null
 body="$(curl -s "$TARGET_URL/wp-content/uploads/2019/01/wpsync-proxy.txt")"
 [ "$body" = "wpsync-proxy-ok" ] || fail "AC-16 proxy returned '$body'"
+# nginx legt die Datei im Container ab; über den Bind-Mount kommt sie auf dem Host verzögert an.
+for _ in $(seq 20); do [ -f public/wp-content/uploads/2019/01/wpsync-proxy.txt ] && break; sleep 0.5; done
 [ -f public/wp-content/uploads/2019/01/wpsync-proxy.txt ] || fail "AC-16 proxied file not stored locally"
 
 echo "== Folge-Pull"

@@ -3,6 +3,16 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unreleased]
+
+**Nur die CLI ändert sich.** Agent 0.4.1 bleibt.
+
+### Behoben
+- Container-Modus: Der Pull scheiterte mit Exit 22, wenn der Aufrufer `wp-config.php`
+  read-only mountet. Das Post-Setup liest `WP_ENVIRONMENT_TYPE` und `DISABLE_WP_CRON` jetzt
+  zuerst mit `wp config get` und setzt sie nur, wenn sie fehlen oder abweichen. Weicht ein Wert
+  ab und ist die Datei nicht beschreibbar, bleibt es ein Fehler (Exit 22)
+
 ## [0.3.0] – 2026-10-06 · Agent 0.4.1
 
 **Nur die CLI ändert sich (CLI 0.3.0).** Agent 0.4.1 bleibt; Pull, Scan und Status brauchen
