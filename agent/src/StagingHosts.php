@@ -36,14 +36,21 @@ final class StagingHosts
     public const NEWSLETTER = ['api.cleverreach.com', 'api.klaviyo.com', 'api-us1.com', 'api.hubapi.com', 'rest.clicksend.com'];
 
     /**
-     * Grund der Sperre (mail, payment, newsletter, live) oder null. Live selbst ist gesperrt bis
-     * auf die Uploads; Anfragen an die Kopie selbst sind erlaubt.
+     * Grund der Sperre (mail, payment, newsletter, live, invalid) oder null. Live selbst ist
+     * gesperrt bis auf die Uploads; Anfragen an die Kopie selbst sind erlaubt. Der Riegel fragt
+     * nur, ob null zurückkommt – im Zweifel also einen Grund liefern.
      */
     public static function blocked(string $url, string $liveUrl, string $stagingPath, string $uploadsUrl): ?string
     {
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $url = trim($url);
+        // Steuerzeichen, Leerraum, Backslash: parse_url und der HTTP-Client lesen das verschieden.
+        if (preg_match('/[\x00-\x20\x7f\\\\]/', $url) === 1) {
+            return 'invalid';
+        }
+        $host = self::host($url);
         if ($host === '') {
-            return null;
+            // Ohne http(s) und ohne // schickt WordPress nichts ab (relative Pfade, leer).
+            return preg_match('#^(https?:|//)#i', $url) === 1 ? 'invalid' : null;
         }
         foreach (['mail' => self::MAIL, 'payment' => self::PAYMENT, 'newsletter' => self::NEWSLETTER] as $why => $hosts) {
             foreach ($hosts as $needle) {
@@ -52,16 +59,25 @@ final class StagingHosts
                 }
             }
         }
-        if (preg_match('/^email(-smtp)?\.[a-z0-9-]+\.amazonaws\.com\z/', $host) === 1) {
-            return 'mail'; // Amazon SES in jeder Region
+        // Amazon SES in jeder Region: auch SMTP, FIPS, China und die Dual-Stack-Endpunkte.
+        if (preg_match('/^email(-smtp)?(-fips)?\.[a-z0-9-]+\.(amazonaws\.com(\.cn)?|api\.aws)\z/', $host) === 1) {
+            return 'mail';
         }
-        if (self::origin($url) !== self::origin($liveUrl)) {
+        $live = self::origin($liveUrl);
+        if ($live === '') {
+            return 'live'; // ohne lesbare Live-URL ist nicht zu sagen, was Live ist
+        }
+        if (self::origin($url) !== $live) {
             return null;
         }
-        $path    = (string) parse_url($url, PHP_URL_PATH);
+        $path = rawurldecode((string) parse_url($url, PHP_URL_PATH));
+        // Doppelt kodiert, NUL, Backslash oder ein ..-Segment: der Pfad bleibt nicht, wo er anfängt.
+        if (preg_match('/%[0-9a-f]{2}|[\x00\\\\]|(^|\/)\.\.(\/|\z)/i', $path) === 1) {
+            return 'live';
+        }
         $allowed = [rtrim($stagingPath, '/')];
-        if (self::origin($uploadsUrl) === self::origin($liveUrl)) {
-            $allowed[] = rtrim((string) parse_url($uploadsUrl, PHP_URL_PATH), '/');
+        if (self::origin($uploadsUrl) === $live) {
+            $allowed[] = rtrim((string) parse_url(trim($uploadsUrl), PHP_URL_PATH), '/');
         }
         foreach ($allowed as $prefix) {
             if ($prefix !== '' && ($path === $prefix || strpos($path, $prefix . '/') === 0)) {
@@ -71,13 +87,31 @@ final class StagingHosts
         return 'live';
     }
 
-    /** Host mit Port, ohne Schema: http und https von Live sind dasselbe Ziel. */
+    /** Host in Kleinbuchstaben, ohne abschliessenden Punkt; '' wenn keiner zu lesen ist. */
+    private static function host(string $url): string
+    {
+        return rtrim(strtolower((string) parse_url($url, PHP_URL_HOST)), '.');
+    }
+
+    /**
+     * Host mit Port, ohne Schema: http und https von Live sind dasselbe Ziel, ebenso mit und
+     * ohne www. und mit oder ohne den Standardport des Schemas.
+     */
     private static function origin(string $url): string
     {
-        $parts = parse_url($url);
-        if (!is_array($parts) || ($parts['host'] ?? '') === '') {
+        $url  = trim($url);
+        $host = self::host($url);
+        if ($host === '') {
             return '';
         }
-        return strtolower((string) $parts['host']) . ':' . ($parts['port'] ?? '');
+        if (strpos($host, 'www.') === 0) {
+            $host = substr($host, 4);
+        }
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $port   = (string) parse_url($url, PHP_URL_PORT);
+        if (($scheme === 'http' && $port === '80') || ($scheme === 'https' && $port === '443')) {
+            $port = '';
+        }
+        return $host . ':' . $port;
     }
 }
