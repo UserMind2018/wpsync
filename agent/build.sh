@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-for f in wpsync-agent.php rescue.php src/*.php; do
+for f in wpsync-agent.php rescue.php src/*.php staging/*.php; do
   php -l "$f" >/dev/null
 done
 
@@ -17,9 +17,10 @@ if [ -n "$missing" ]; then
 fi
 
 rm -rf dist
-mkdir -p dist/wpsync-agent/src
+mkdir -p dist/wpsync-agent/src dist/wpsync-agent/staging
 cp wpsync-agent.php rescue.php dist/wpsync-agent/
 cp src/*.php dist/wpsync-agent/src/
+cp staging/*.php dist/wpsync-agent/staging/ # Riegel der Staging-Kopie (Spec 2b 5.5)
 cp ../LICENSE dist/wpsync-agent/LICENSE # MIT verlangt den Lizenztext in jeder Kopie (CR-14)
 (cd dist && zip -qr wpsync-agent.zip wpsync-agent && rm -rf wpsync-agent)
 echo "dist/wpsync-agent.zip"
