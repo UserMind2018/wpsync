@@ -617,8 +617,13 @@ Versionen: Tag `vX.Y.Z` = Version der CLI. Der Agent hat eine eigene Version
        -o wpsync ./cmd/wpsync && tar -czf wpsync_X.Y.Z_darwin_$a.tar.gz wpsync
    done
    ```
-4. `gh release create vX.Y.Z` mit den Tarballs, der Agent-ZIP und `checksums.txt`.
-5. Im Tap `UserMind2018/homebrew-tap` in `Formula/wpsync.rb` `url` auf den neuen Tag setzen
+4. Linux-Binary für den OS-Container (Agentic OS): `scripts/build-linux.sh X.Y.Z` (arm64;
+   `amd64` als zweites Argument). Gleiche Quelle und gleiche Go-Version ergeben dieselbe Prüfsumme.
+5. `gh release create vX.Y.Z` mit den Tarballs, der Agent-ZIP, `checksums.txt`,
+   `dist/wpsync_X.Y.Z_linux_arm64` und `dist/wpsync_X.Y.Z_linux_arm64.sha256`. Version, SHA-256,
+   Go-Version und Commit aus der Ausgabe von Schritt 4 gehören in die Release-Notiz; das OS lädt
+   das Binary per Release-Download und pinnt Version und Prüfsumme im Dockerfile.
+6. Im Tap `UserMind2018/homebrew-tap` in `Formula/wpsync.rb` `url` auf den neuen Tag setzen
    und `sha256` anpassen (Befehl steht in der Tap-README). Die Formel baut das Agent-ZIP selbst:
    Sie muss dieselben Dateien einpacken wie `agent/build.sh` (seit 0.4.0 auch `rescue.php`).
 
