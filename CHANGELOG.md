@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unreleased]
+## [0.3.1] – 2026-10-06 · Agent 0.4.1
 
 **Nur die CLI ändert sich.** Agent 0.4.1 bleibt.
 
