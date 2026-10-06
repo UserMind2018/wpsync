@@ -115,6 +115,10 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 		fmt.Fprintf(out, "  ! %s ist nicht lesbar – wpsync konnte darin nicht nach einem eigenen .git suchen.\n",
 			printable(filepath.Join(siteDir, filepath.FromSlash(rel))))
 	}
+	// writeExclude is the first write into the repo that does not go through run.
+	if err := sanitizeRepo(gitDir); err != nil {
+		return err
+	}
 	if err := writeExclude(gitDir, nested); err != nil {
 		return err
 	}
@@ -282,11 +286,13 @@ func writeExclude(gitDir string, nested []string) error {
 			b.WriteString(p + "\n")
 		}
 	}
-	info := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(info, 0o700); err != nil {
+	root, err := os.OpenRoot(gitDir)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(info, "exclude"), []byte(b.String()), 0o600)
+	defer root.Close()
+	content := b.String()
+	return safefs.WriteFile(root, filepath.Join("info", "exclude"), strings.NewReader(content), int64(len(content)), time.Time{}, 0o600)
 }
 
 // excludePattern escapes glob characters so the pattern matches the folder literally. A line break
@@ -331,7 +337,7 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
 	cmd := exec.Command("git", append(base, args...)...)
 	cmd.Dir = gitDir
-	cmd.Env = gitEnv()
+	cmd.Env = gitEnv(gitDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -344,7 +350,7 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 // emptyTree is git's well-known empty tree; it exists in every SHA-1 repo without being stored.
 const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-func gitEnv() []string {
+func gitEnv(gitDir string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "GIT_") {
@@ -355,7 +361,10 @@ func gitEnv() []string {
 		// git ≥ 2.40 reads attributes from this tree instead of the work tree and index: a
 		// .gitattributes of the site never names a filter, diff driver or merge driver (SEC-113).
 		// Older git ignores it; sanitizeRepo then still keeps every driver definition out of the config.
-		"GIT_ATTR_SOURCE="+emptyTree)
+		"GIT_ATTR_SOURCE="+emptyTree,
+		// The common dir is the repo itself: a file <G>/commondir would otherwise point git at a
+		// config and info/attributes elsewhere, e.g. in the docroot (Nach-Review K-2).
+		"GIT_COMMON_DIR="+gitDir)
 }
 
 // allowedCore are the config entries git init writes; wpsync sets nothing else in the repo.
@@ -369,11 +378,28 @@ var (
 	configEntryRe   = regexp.MustCompile(`^([A-Za-z]+) = ([A-Za-z0-9]+)$`)
 )
 
-// sanitizeRepo runs before every git call: <G>/config may hold only the [core] entries of git init
-// with plain values, and <G>/info/attributes must not exist. Anything else – a filter, diff or merge
-// driver, include, core.fsmonitor, core.sshCommand … – would run commands in the wpsync process
-// (on the server: the OS container with the docker socket). Such a config is rewritten with the
-// allowed entries only (SEC-113, defence in depth behind the symlink checks of package safefs).
+// repoEntries are the top-level entries of a wpsync snapshot repo; true marks folders. Stale locks
+// (*.lock, gc.pid) stay for ClearStaleLocks, temp files of safefs (*.wpsync-tmp) are removed.
+var repoEntries = map[string]bool{
+	"HEAD": false, "config": false, "description": false, "index": false, "packed-refs": false,
+	"ORIG_HEAD": false, "COMMIT_EDITMSG": false, "gc.pid": false, "gc.log": false,
+	"info": true, "objects": true, "refs": true, "logs": true,
+}
+
+// ErrRepoSymlink: an entry of the snapshot repo is a symlink; wpsync runs no git in it.
+var ErrRepoSymlink = errors.New("ist ein symbolischer Link – wpsync führt in diesem Snapshot-Repo kein git aus")
+
+// sanitizeRepo runs before every git call and keeps the snapshot repo to what git init and commit
+// create (SEC-113, Nach-Review K-2), as defence in depth behind the symlink checks of safefs:
+//   - top level: only repoEntries and stale locks. Anything else is removed – commondir,
+//     config.worktree, worktrees/, gitdir would point git at a config or info/attributes elsewhere.
+//     Removing instead of aborting: the repo belongs to wpsync alone, and an abort would let
+//     whoever planted the file block every later pull.
+//   - an allowed entry that is a symlink (or of the wrong kind) aborts: it cannot be repaired
+//     without losing history, and following it could write or read outside the repo.
+//   - info/ holds only exclude; objects/info/(http-)alternates are removed (foreign object stores).
+//   - config holds only the [core] entries of git init with plain values; anything else – a
+//     filter, diff or merge driver, include, core.fsmonitor … – is dropped by rewriting it.
 func sanitizeRepo(gitDir string) error {
 	root, err := os.OpenRoot(gitDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -383,8 +409,32 @@ func sanitizeRepo(gitDir string) error {
 		return err
 	}
 	defer root.Close()
-	if err := root.Remove(filepath.Join("info", "attributes")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove %s/info/attributes: %w", printable(gitDir), err)
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		isDir, known := repoEntries[name]
+		switch {
+		case !known && strings.HasSuffix(name, ".lock") && e.Type().IsRegular():
+			continue
+		case !known:
+			if err := root.RemoveAll(name); err != nil {
+				return fmt.Errorf("remove %s/%s: %w", printable(gitDir), printable(name), err)
+			}
+			continue
+		case e.Type()&fs.ModeSymlink != 0, isDir != e.IsDir():
+			return fmt.Errorf("%s/%s %w", printable(gitDir), printable(name), ErrRepoSymlink)
+		}
+	}
+	if err := keepOnly(root, "info", "exclude"); err != nil {
+		return fmt.Errorf("%s/info: %w", printable(gitDir), err)
+	}
+	for _, alt := range []string{"alternates", "http-alternates"} {
+		if err := root.RemoveAll(filepath.Join("objects", "info", alt)); err != nil {
+			return fmt.Errorf("remove %s/objects/info/%s: %w", printable(gitDir), alt, err)
+		}
 	}
 	info, err := root.Lstat("config")
 	if errors.Is(err, os.ErrNotExist) {
@@ -404,6 +454,26 @@ func sanitizeRepo(gitDir string) error {
 		return nil
 	}
 	return safefs.WriteFile(root, "config", strings.NewReader(clean), int64(len(clean)), time.Time{}, 0o600)
+}
+
+// keepOnly removes every entry of dir except the regular file keep (a missing dir is fine).
+func keepOnly(root *os.Root, dir, keep string) error {
+	entries, err := fs.ReadDir(root.FS(), dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == keep && e.Type().IsRegular() {
+			continue
+		}
+		if err := root.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // cleanConfig returns the allowed core entries as a fresh config and whether data had nothing else.
