@@ -574,30 +574,35 @@ als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
 
 Das Ergebnis von `pull --json` (`data`) enthält `warnings`, sobald etwas ohne Abbruch scheiterte;
-fehlt das Feld, gab es keine. Bisher einziger Wert: `snapshot_failed` – Site, Datenbank und
-Baseline sind gezogen, nur der Schnappschuss im internen Git fehlt (Meldung auf stderr). Der
-nächste Pull committet wieder.
+fehlt das Feld, gab es keine. Werte:
 
-**Site-Lock.** Pro Site läuft nur ein `pull` gleichzeitig (`flock` auf `<slug>/.wpsync/lock`,
-auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet sofort mit Exit 20
-(`local_env`, „läuft bereits“), ohne die Quelle zu fragen. Der Lock gilt bis zum Prozessende,
-auch nach SIGKILL. Unter dem Lock räumt der Pull Reste eines gekillten Vorgängers weg:
-liegengebliebene git-Locks im internen Repo und – im Container-Modus – Hilfscontainer mit dem
-Label `wpsync.site=<site>`.
+- `snapshot_failed` – Site, Datenbank und Baseline sind gezogen, nur der Schnappschuss im
+  internen Git fehlt (Meldung auf stderr). Der nächste Pull committet wieder.
+- `symlink_skipped` – Dateien unter einem symbolischen Link im Docroot wurden nicht geschrieben
+  (Pfade auf stderr). Sie fehlen in der Baseline, der nächste Pull fragt sie erneut an.
+
+**Site-Lock.** Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (`flock` auf
+`<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
+sofort mit Exit 20 (`local_env`, „für diese Site läuft bereits ein wpsync-Vorgang“), ohne die
+Quelle zu fragen. Der Lock gilt bis zum Prozessende, auch nach SIGKILL. Unter dem Lock räumen
+die Befehle Reste eines gekillten Vorgängers weg: liegengebliebene git-Locks im internen Repo
+und – beim Pull im Container-Modus – Hilfscontainer mit dem Label `wpsync.site=<Schlüssel>`.
+Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Site-Ordners
+(`<slug>/`); das Label `wpsync.site` ist für wpsync reserviert.
 
 **Exit-Codes** (gelten für alle Befehle, auch ohne `--json`):
 
 | Code | Name | Beispiel |
 |---|---|---|
 | 0 | ok | |
-| 1 | unknown | |
-| 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus |
+| 1 | unknown | auch: die Quelle meldet unzulässige Werte (Tabellenpräfix, `home`/`siteurl`, PHP-Version, Tabellennamen) |
+| 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus, ungültiger `--docroot` |
 | 10 | agent_unreachable | Site oder Plugin nicht erreichbar |
 | 11 | agent_outdated | Agent unter der Mindestversion; `error.installed`, `error.required` |
 | 12 | pair_rejected | Pairing-Code falsch oder abgelaufen |
 | 13 | auth_failed | Kopplung widerrufen |
 | 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
-| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, Pull der Site läuft bereits, PHP-Version der Quelle unbrauchbar |
+| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits |
 | 21 | disk_full | |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
@@ -626,12 +631,12 @@ Pflichten des Aufrufers:
   Sonst Exit 2.
 
 wpsync startet WP-CLI und Import als `docker run --rm --init --name wpsync-<site>-<zufall>
---label wpsync.site=<site> …`. Nach SIGTERM entfernt es den laufenden Hilfscontainer mit
+--label wpsync.site=<Schlüssel des Site-Ordners> …`. Nach SIGTERM entfernt es den laufenden Hilfscontainer mit
 `docker rm -f`; überlebt einer (SIGKILL), räumt ihn der nächste Pull der Site weg.
 
-Der Docroot ist für die Site beschreibbar. wpsync folgt dort keinem Symlink: Liegt einer auf dem
-Weg zu einer Datei der Quelle, scheitert der Pull mit einer Meldung, statt ausserhalb zu
-schreiben; Löschen überspringt solche Pfade.
+Der Docroot ist für die Site beschreibbar. Jede Dateioperation des Pulls ist auf den Docroot
+selbst begrenzt (nie auf `<slug>/`), und wpsync folgt dort keinem Symlink: Dateien unter einem
+Symlink werden übersprungen und als `symlink_skipped` gemeldet, Löschen lässt solche Pfade aus.
 
 Ablage: Der Docroot ist `<slug>/<docroot>`, alles von wpsync liegt daneben unter `<slug>/.wpsync/`,
 nichts davon im Docroot:
