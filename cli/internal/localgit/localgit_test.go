@@ -971,3 +971,193 @@ func TestPrintable(t *testing.T) {
 		t.Fatalf("printable = %q", got)
 	}
 }
+
+// Server-Modus: der Docroot heisst nicht public/, das Snapshot-Repo liegt in <site>/.wpsync/history.git
+// (nur der Docroot ist in die Container gemountet) und bleibt selbst ausserhalb des Schnappschusses.
+func TestCommitTreeWithOtherDocroot(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{
+		"docroot/wp-content/plugins/a/a.php",
+		"docroot/wp-content/uploads/2026/x.jpg",
+		"docroot/wp-config.php",
+		".wpsync/baseline.json",
+		".wpsync/db/tables/wp_options.sql",
+	} {
+		write(t, dir, f)
+	}
+	gitDir := TreeGitDir(dir)
+	if err := CommitTree(gitDir, dir, "docroot", "pull 1", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitTree(gitDir, dir, "docroot", "pull 2", io.Discard); err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+	got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-files"))
+	want := []string{".gitignore", ".wpsync/baseline.json", "docroot/wp-content/plugins/a/a.php"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tracked = %v, want %v", got, want)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("<site>/.git exists after CommitTree: %v", err)
+	}
+	for _, bad := range []string{"../x", "a/b", ".", ""} {
+		if err := CommitTree(gitDir, dir, bad, "pull 3", io.Discard); err == nil {
+			t.Fatalf("docroot %q must be rejected", bad)
+		}
+	}
+}
+
+// Ein vorhandenes <site>/.git wandert im Server-Modus neben das Snapshot-Repo, ohne git darin.
+func TestCommitTreeMovesSiteGitNextToTheRepo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "docroot/wp-content/plugins/a/a.php")
+	attackerRepo(t, dir)
+	var out bytes.Buffer
+	if err := CommitTree(TreeGitDir(dir), dir, "docroot", "pull 1", &out); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := filepath.Glob(filepath.Join(dir, ".wpsync", "history.alt-*.git"))
+	if len(moved) != 1 || !strings.Contains(out.String(), "Bisheriges Site-Git verschoben nach") {
+		t.Fatalf("moved = %v, out = %s", moved, out.String())
+	}
+}
+
+// Container-Modus: wpsync endet mit dem Container. Ein Auto-gc während des Commits stürbe mit und
+// liesse HEAD.lock zurück (Abnahme Server-Modus, Folge-Pull; Review M2): kein Auto-gc und keine
+// Auto-Maintenance in den git-Aufrufen, abgekoppelt schon gar nicht.
+func TestNoAutoMaintenanceInGitCalls(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), "history.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", gitDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false", "gc.autoDetach": "false", "maintenance.autoDetach": "false"} {
+		out, err := run(gitDir, "", "config", "--get", key)
+		if err != nil || strings.TrimSpace(string(out)) != want {
+			t.Errorf("%s = %q, %v; want %s", key, out, err, want)
+		}
+	}
+}
+
+// Review M2: ein hart beendeter Commit oder gc hinterlässt Locks im Snapshot-Repo; ohne Aufräumen
+// scheiterte jeder weitere Pull. ClearStaleLocks entfernt nur die Top-Level-Locks des git-dir.
+func TestClearStaleLocks(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{"index.lock", "HEAD.lock", "refs/heads/main.lock", "gc.pid"}
+	for _, rel := range stale {
+		os.WriteFile(filepath.Join(gitDir, filepath.FromSlash(rel)), nil, 0o644)
+	}
+	keep := filepath.Join(gitDir, "refs", "heads", "x", "y.lock")
+	os.MkdirAll(filepath.Dir(keep), 0o755)
+	os.WriteFile(keep, nil, 0o644)
+	write(t, siteDir, "html/wp-content/b.php")
+	if err := CommitTree(gitDir, siteDir, "html", "blocked", io.Discard); err == nil {
+		t.Fatal("commit with index.lock must fail (test setup)")
+	}
+	if err := ClearStaleLocks(gitDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range stale {
+		if _, err := os.Lstat(filepath.Join(gitDir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("%s still there", rel)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("nested lock removed")
+	}
+	os.Remove(keep)
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatalf("commit after cleanup: %v", err)
+	}
+	if err := ClearStaleLocks(filepath.Join(t.TempDir(), "missing.git")); err != nil {
+		t.Fatalf("missing repo: %v", err)
+	}
+}
+
+// Mac: der Site-Ordner liegt im DDEV-Mount. Ein .gitignore-Symlink der Site lenkt das Schreiben
+// der wpsync-.gitignore nicht auf eine Datei außerhalb.
+func TestCommitTreeReplacesGitignoreSymlink(t *testing.T) {
+	siteDir, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep"), 0o644)
+	write(t, siteDir, "html/wp-content/a.php")
+	if err := os.Symlink(victim, filepath.Join(siteDir, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitTree(TreeGitDir(siteDir), siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("CommitTree wrote through the .gitignore symlink: %q", b)
+	}
+	if info, err := os.Lstat(filepath.Join(siteDir, ".gitignore")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf(".gitignore = %v, %v", info, err)
+	}
+}
+
+// SEC-113, Tiefenverteidigung: auch ohne Symlink-Weg führt ein manipuliertes history.git/config
+// (Filter, include, core.*) zusammen mit einer .gitattributes im Baum nichts aus.
+func TestManipulatedConfigAndAttributesRunNothing(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	markers := t.TempDir()
+	inc := filepath.Join(t.TempDir(), "inc")
+	os.WriteFile(inc, []byte("[filter \"inc\"]\n\tclean = touch "+filepath.Join(markers, "include")+" && cat\n"), 0o644)
+	cfgPath := filepath.Join(gitDir, "config")
+	cfg, _ := os.ReadFile(cfgPath)
+	evil := string(cfg) +
+		"[filter \"pwn\"]\n\tclean = touch " + filepath.Join(markers, "filter") + " && cat\n" +
+		"[include]\n\tpath = " + inc + "\n" +
+		"[core]\n\tfsmonitor = touch " + filepath.Join(markers, "fsmonitor") + "\n" +
+		"[diff \"x\"]\n\ttextconv = touch " + filepath.Join(markers, "textconv") + "\n"
+	if err := os.WriteFile(cfgPath, []byte(evil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(gitDir, "info"), 0o755)
+	os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte("* filter=pwn\n"), 0o644)
+	os.WriteFile(filepath.Join(siteDir, "html", "wp-content", ".gitattributes"), []byte("* filter=pwn\n*.php filter=inc diff=x\n"), 0o644)
+	write(t, siteDir, "html/wp-content/b.php")
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if entries, _ := os.ReadDir(markers); len(entries) != 0 {
+		t.Fatalf("git ran commands from a manipulated repo: %v", entries)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	for _, bad := range []string{"filter", "include", "fsmonitor", "textconv"} {
+		if strings.Contains(string(after), bad) {
+			t.Errorf("config still contains %s:\n%s", bad, after)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "info", "attributes")); !os.IsNotExist(err) {
+		t.Error("info/attributes must be removed")
+	}
+	if got := hostGit(t, "--git-dir="+gitDir, "show", "--name-only", "--format=", "HEAD"); !strings.Contains(got, "html/wp-content/b.php") {
+		t.Fatalf("second commit misses b.php: %q", got)
+	}
+}
+
+// Die eigenen Einträge von git init bleiben erhalten; eine saubere config wird nicht angefasst.
+func TestCleanConfigStaysUntouched(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(gitDir, "config")); string(after) != string(before) {
+		t.Fatalf("config changed:\n%s\n->\n%s", before, after)
+	}
+}

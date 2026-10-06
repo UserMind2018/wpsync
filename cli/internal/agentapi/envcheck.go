@@ -24,6 +24,21 @@ const (
 // here: the local site would not find its tables.
 var tablePrefixRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
+// phpVersionRe is <major>.<minor> of the source's PHP version (ValidPHPVersion).
+var phpVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+
+// PHPMajorMinor returns <major>.<minor> of a PHP version ("8.3.35-1ubuntu" → "8.3") and whether it
+// has that form. The value comes from the site and becomes --php-version (DDEV) or part of the
+// WP-CLI image name (container mode).
+func PHPMajorMinor(version string) (string, bool) {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return version, false
+	}
+	mm := parts[0] + "." + parts[1]
+	return mm, phpVersionRe.MatchString(mm)
+}
+
 // ErrInvalidEnv: /delta carried a value the CLI must not pass to WP-CLI.
 var ErrInvalidEnv = errors.New("site env value not usable as WP-CLI argument")
 
@@ -47,7 +62,7 @@ func ValidSiteURL(s string) bool {
 // EnvField is one Env value by its /delta key.
 type EnvField struct{ Key, Value string }
 
-// InvalidArgs lists the Env values that reach WP-CLI as arguments and break their rule, in a
+// InvalidArgs lists the Env values that reach WP-CLI, ddev or docker as arguments and break their rule, in a
 // fixed order. An empty siteurl is allowed: PostSetup then only uses home.
 func (e Env) InvalidArgs() []EnvField {
 	var bad []EnvField
@@ -59,6 +74,10 @@ func (e Env) InvalidArgs() []EnvField {
 	}
 	if e.SiteURL != "" && !ValidSiteURL(e.SiteURL) {
 		bad = append(bad, EnvField{"siteurl", e.SiteURL})
+	}
+	// An empty version is left to the driver (DDEV picks its default, the container mode refuses it).
+	if _, ok := PHPMajorMinor(e.PHPVersion); e.PHPVersion != "" && !ok {
+		bad = append(bad, EnvField{"php_version", e.PHPVersion})
 	}
 	return bad
 }

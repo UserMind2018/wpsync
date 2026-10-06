@@ -2,11 +2,14 @@
 package baseline
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // FileStamp identifies a file version.
@@ -48,7 +51,16 @@ func file(siteDir string) string { return filepath.Join(siteDir, ".wpsync", "bas
 
 // Load returns the baseline or an empty one.
 func Load(siteDir string) (*Baseline, error) {
-	data, err := os.ReadFile(file(siteDir))
+	// Read through a root on .wpsync without following a symlink (Mac: DDEV mount, Nach-Review N-d).
+	root, err := safefs.OpenDir(siteDir, ".wpsync")
+	if errors.Is(err, os.ErrNotExist) {
+		return New(""), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	data, err := safefs.ReadFile(root, filepath.Base(file(siteDir)))
 	if errors.Is(err, os.ErrNotExist) {
 		return New(""), nil
 	}
@@ -64,10 +76,6 @@ func Load(siteDir string) (*Baseline, error) {
 
 // Save writes the baseline atomically.
 func Save(siteDir string, b *Baseline) error {
-	p := file(siteDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
 	if b.PulledAt.IsZero() {
 		b.PulledAt = time.Now()
 	}
@@ -75,8 +83,15 @@ func Save(siteDir string, b *Baseline) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(p+".tmp", data, 0o644); err != nil {
+	// On the Mac .wpsync/ lies in the DDEV mount: never write through a symlink there (SEC-113).
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
 		return err
 	}
-	return os.Rename(p+".tmp", p)
+	// The root is <siteDir>/.wpsync, not the site folder: it never spans the docroot (Nach-Review K-1).
+	root, err := safefs.OpenTree(siteDir, ".wpsync")
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return safefs.WriteFile(root, filepath.Base(file(siteDir)), bytes.NewReader(data), int64(len(data)), time.Time{}, 0o644)
 }

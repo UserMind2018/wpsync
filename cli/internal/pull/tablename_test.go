@@ -336,7 +336,7 @@ func TestRunWithInvalidTableNameLeavesNoTrace(t *testing.T) {
 	if got, err := os.ReadFile(calls); err == nil {
 		t.Errorf("ddev called:\n%s", got)
 	}
-	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+	if entries := sitesRootTrace(root, "kunde"); len(entries) != 0 {
 		t.Errorf("SitesRoot not empty: %v", entries)
 	}
 	if _, err := os.Stat(filepath.Join(root, "kunde", ".wpsync", "baseline.json")); err == nil {

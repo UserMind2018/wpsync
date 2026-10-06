@@ -4,11 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/profile"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // DBOptions controls chunking and the pull scope.
@@ -16,6 +20,8 @@ type DBOptions struct {
 	RowsPerChunk int
 	BundleBytes  int64
 	Scope        agentapi.Scope
+	// Progress (may be nil) gets the number of finished tables, already downloaded ones included.
+	Progress func(done, total int)
 }
 
 const (
@@ -27,19 +33,55 @@ const (
 // Small tables travel together (Spike B16), large ones per keyset chunk (Spike B26).
 func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o DBOptions) error {
 	// All names first: a valid table must not be requested before an invalid one aborts the run.
-	for _, t := range tables {
-		if _, err := tablePath(dir, t.Name, sqlSuffix); err != nil {
-			return err
-		}
+	if err := checkTableFiles(tables); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return downloadTables(c, root, tables, o)
+}
+
+// openTables opens the DB cache <siteDir>/.wpsync/db/tables. On the Mac it lies in the DDEV
+// mount: no folder on the way may be a symlink, and every file operation stays inside (SEC-113).
+func openTables(siteDir string) (*os.Root, error) {
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
+		return nil, err
+	}
+	return safefs.OpenTree(siteDir, filepath.Join(".wpsync", "db", "tables"))
+}
+
+func checkTableFiles(tables []agentapi.Table) error {
+	for _, t := range tables {
+		if _, err := tableFile(t.Name, sqlSuffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// downloadTables is DownloadTables on the opened cache folder.
+func downloadTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o DBOptions) error {
+	if err := checkTableFiles(tables); err != nil {
+		return err
+	}
+	done := 0
+	tick := func() {
+		done++
+		if o.Progress != nil {
+			o.Progress(done, len(tables))
+		}
 	}
 	var small, large []agentapi.Table
 	for _, t := range tables {
 		switch {
 		case markerMatches(dir, t):
-			continue
+			tick()
 		case t.Mode == profile.ModeStructure || (t.Rows <= int64(o.RowsPerChunk) && t.Bytes <= o.BundleBytes):
 			small = append(small, t)
 		default:
@@ -47,7 +89,7 @@ func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o D
 		}
 	}
 	for _, group := range tableGroups(small, o.BundleBytes) {
-		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope); err != nil {
+		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope, tick); err != nil {
 			return err
 		}
 	}
@@ -55,6 +97,7 @@ func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o D
 		if err := fetchChunks(c, dir, t, o.RowsPerChunk, o.Scope); err != nil {
 			return err
 		}
+		tick()
 	}
 	return nil
 }
@@ -85,7 +128,7 @@ func transferBytes(t agentapi.Table) int64 {
 	return t.Bytes
 }
 
-func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit int, scope agentapi.Scope) error {
+func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limit int, scope agentapi.Scope, tick func()) error {
 	byName := map[string]agentapi.Table{}
 	remaining := make([]string, 0, len(group))
 	for _, t := range group {
@@ -98,7 +141,11 @@ func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit 
 			if !ok {
 				return fmt.Errorf("unexpected table %s", name)
 			}
-			return storeTable(dir, t, sql)
+			if err := storeTable(dir, t, sql); err != nil {
+				return err
+			}
+			tick()
+			return nil
 		})
 		if err != nil {
 			return err
@@ -121,16 +168,16 @@ func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit 
 	return nil
 }
 
-func fetchChunks(c *agentapi.Client, dir string, t agentapi.Table, limit int, scope agentapi.Scope) error {
-	part, err := tablePath(dir, t.Name, partSuffix)
+func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, scope agentapi.Scope) error {
+	part, err := tableFile(t.Name, partSuffix)
 	if err != nil {
 		return err
 	}
-	final, err := tablePath(dir, t.Name, sqlSuffix)
+	final, err := tableFile(t.Name, sqlSuffix)
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(part)
+	f, err := createFresh(dir, part)
 	if err != nil {
 		return err
 	}
@@ -157,31 +204,39 @@ func fetchChunks(c *agentapi.Client, dir string, t agentapi.Table, limit int, sc
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(part, final); err != nil {
+	if err := dir.Rename(part, final); err != nil {
 		return err
 	}
 	return writeMarker(dir, t)
 }
 
-func storeTable(dir string, t agentapi.Table, sql io.Reader) error {
-	tmp, err := tablePath(dir, t.Name, partSuffix)
+// createFresh creates name anew without following a symlink that is already there.
+func createFresh(dir *os.Root, name string) (*os.File, error) {
+	if err := dir.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	return dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+}
+
+func storeTable(dir *os.Root, t agentapi.Table, sql io.Reader) error {
+	tmp, err := tableFile(t.Name, partSuffix)
 	if err != nil {
 		return err
 	}
-	final, err := tablePath(dir, t.Name, sqlSuffix)
+	final, err := tableFile(t.Name, sqlSuffix)
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(tmp)
+	f, err := createFresh(dir, tmp)
 	if err != nil {
 		return err
 	}
 	_, copyErr := io.Copy(f, sql)
 	if err := f.Close(); err != nil || copyErr != nil {
-		os.Remove(tmp)
+		dir.Remove(tmp)
 		return errors.Join(err, copyErr)
 	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := dir.Rename(tmp, final); err != nil {
 		return err
 	}
 	return writeMarker(dir, t)
@@ -196,29 +251,46 @@ func markerValue(t agentapi.Table) string {
 	return t.Mode + ":" + checksum
 }
 
-func writeMarker(dir string, t agentapi.Table) error {
-	path, err := tablePath(dir, t.Name, doneSuffix)
+func writeMarker(dir *os.Root, t agentapi.Table) error {
+	name, err := tableFile(t.Name, doneSuffix)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(markerValue(t)), 0o644)
+	return safefs.WriteFile(dir, name, strings.NewReader(markerValue(t)), -1, time.Time{}, 0o644)
 }
 
-func markerMatches(dir string, t agentapi.Table) bool {
+func markerMatches(dir *os.Root, t agentapi.Table) bool {
 	if t.Checksum == nil && t.Mode != profile.ModeStructure {
 		return false
 	}
-	path, err := tablePath(dir, t.Name, doneSuffix)
+	name, err := tableFile(t.Name, doneSuffix)
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(path)
+	data, err := safefs.ReadFile(dir, name)
 	return err == nil && strings.TrimSpace(string(data)) == markerValue(t)
 }
 
 // ImportReader concatenates header, all table files and footer for one `ddev mysql` import.
 // The table files are unchecked server content; importTables feeds them to a hardened client.
 func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error, error) {
+	if err := checkTableFiles(tables); err != nil {
+		return nil, nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, closeAll, err := importReader(root, tables)
+	if err != nil {
+		root.Close()
+		return nil, nil, err
+	}
+	return r, func() error { return errors.Join(closeAll(), root.Close()) }, nil
+}
+
+// importReader is ImportReader on the opened cache folder; a table file that is a symlink is refused.
+func importReader(dir *os.Root, tables []agentapi.Table) (io.Reader, func() error, error) {
 	readers := []io.Reader{strings.NewReader(importHeader)}
 	var files []*os.File
 	closeAll := func() error {
@@ -229,12 +301,12 @@ func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error,
 		return errors.Join(errs...)
 	}
 	for _, t := range tables {
-		path, err := tablePath(dir, t.Name, sqlSuffix)
+		name, err := tableFile(t.Name, sqlSuffix)
 		if err != nil {
 			closeAll()
 			return nil, nil, err
 		}
-		f, err := os.Open(path)
+		f, err := safefs.Open(dir, name)
 		if err != nil {
 			closeAll()
 			return nil, nil, fmt.Errorf("table %s not downloaded: %w", t.Name, err)

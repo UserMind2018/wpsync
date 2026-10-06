@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,7 @@ func (d *guardDocker) Output(args ...string) (string, error) {
 
 type guardFixture struct {
 	opts    Options
+	drv     *ddev.Driver
 	site    string
 	store   ddev.Store
 	ddevLog string
@@ -139,18 +141,17 @@ func pulledSite(t *testing.T, config string, trusted bool) *guardFixture {
 		}
 	}
 	out := &bytes.Buffer{}
+	drv := &ddev.Driver{SitesRoot: root, MailguardSource: mg, State: store, Docker: docker, Out: out, Err: out}
 	return &guardFixture{
 		opts: Options{
-			Site:            sites.Site{Name: "kunde", URL: srv.URL, KeyID: "0123456789abcdef", RPS: 1000, Profile: anonProfile(t)},
-			Secret:          "secret",
-			SitesRoot:       root,
-			MailguardSource: mg,
-			DDEVState:       store,
-			Docker:          docker,
-			Yes:             true,
-			Out:             out,
+			Site:      sites.Site{Name: "kunde", URL: srv.URL, KeyID: "0123456789abcdef", RPS: 1000, Profile: anonProfile(t)},
+			Secret:    "secret",
+			SitesRoot: root,
+			Driver:    drv,
+			Yes:       true,
+			Out:       out,
 		},
-		site: site, store: store, ddevLog: ddevLog, docker: docker, out: out,
+		drv: drv, site: site, store: store, ddevLog: ddevLog, docker: docker, out: out,
 	}
 }
 
@@ -171,16 +172,20 @@ func TestRunMailguardErrorPathDoesNotStopChangedProject(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.site, ".ddev", "config.evil.yaml")); err != nil {
 		t.Fatal("fake did not manipulate .ddev")
 	}
+	// Driver.Stop hält die Site ohne ddev an, statt sie ohne Mail-Riegel laufen zu lassen.
+	if got := strings.Join(f.docker.calls, " "); !strings.HasSuffix(got, "stop") || f.docker.running {
+		t.Fatalf("docker calls = %s, running = %v", got, f.docker.running)
+	}
 }
 
-// Gegenprobe: ohne Manipulation läuft der stop im Fehlerpfad.
+// Gegenprobe: ohne Manipulation läuft der stop im Fehlerpfad – geprüft wie bei wpsync stop.
 func TestRunMailguardErrorPathStopsUnchangedProject(t *testing.T) {
 	f := pulledSite(t, "name: kunde\n", true)
 	if err := Run(f.opts); !errors.Is(err, ErrMailguardMissing) {
 		t.Fatalf("err = %v", err)
 	}
 	calls := readCalls(f.ddevLog)
-	if len(calls) < 3 || !strings.HasPrefix(calls[len(calls)-2], "wp eval") || calls[len(calls)-1] != "stop" {
+	if len(calls) < 3 || !strings.HasPrefix(calls[len(calls)-2], "wp eval") || calls[len(calls)-1] != "stop kunde" {
 		t.Fatalf("ddev calls = %q", calls)
 	}
 }
@@ -228,7 +233,7 @@ func TestRunTakeoverNeedsConfirmation(t *testing.T) {
 		t.Fatal("no terminal: state saved")
 	}
 
-	f.opts.Confirm = func(string) bool { return false }
+	f.drv.Confirm = func(string) bool { return false }
 	if err := Run(f.opts); !errors.Is(err, ErrAborted) {
 		t.Fatalf("declined: err = %v", err)
 	}
@@ -240,7 +245,7 @@ func TestRunTakeoverNeedsConfirmation(t *testing.T) {
 	}
 
 	var asked []string
-	f.opts.Confirm = func(q string) bool { asked = append(asked, q); return true }
+	f.drv.Confirm = func(q string) bool { asked = append(asked, q); return true }
 	Run(f.opts)
 	if len(asked) != 1 || !strings.Contains(asked[0], ".ddev") {
 		t.Fatalf("questions = %q", asked)
@@ -289,7 +294,7 @@ func TestRunWithInvalidTableNameRunsNoDocker(t *testing.T) {
 		Site:      sites.Site{Name: "kunde", URL: srv.URL, KeyID: "0123456789abcdef", RPS: 1000, Profile: anonProfile(t)},
 		Secret:    "secret",
 		SitesRoot: root,
-		DDEVState: store,
+		Driver:    &ddev.Driver{SitesRoot: root, State: store, Out: io.Discard},
 		Yes:       true,
 		Out:       &bytes.Buffer{},
 	})

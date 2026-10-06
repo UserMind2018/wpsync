@@ -1,7 +1,9 @@
 package profile
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -219,5 +221,19 @@ func TestPlainPII(t *testing.T) {
 	}
 	if got, want := mustNew(t, PresetFull).PlainPII(s.Tables), []string{"wp_e_submissions_values"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("PlainPII = %v, want %v", got, want)
+	}
+}
+
+// scan --json gibt das Profil mit denselben Feldnamen aus wie die Site-Datei.
+func TestProfileJSONUsesSnakeCase(t *testing.T) {
+	p := &Profile{Preset: PresetFull, PostTypes: Choice{Exclude: []string{"revision"}}, Uploads: Uploads{Since: "2024", Proxy: true}}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"preset":"vollstaendig"`, `"post_types":{"exclude":["revision"]}`, `"uploads":{"since":"2024","proxy":true}`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing %s in %s", want, data)
+		}
 	}
 }

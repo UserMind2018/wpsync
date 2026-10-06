@@ -1,11 +1,15 @@
 package ddev
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 const (
@@ -65,28 +69,45 @@ func WriteUploadsProxy(siteDir, sourceURL, userAgent string, enabled bool) (bool
 			return false, err
 		}
 		files[zonePath], files[serverPath] = zone, server
-		if err := os.MkdirAll(filepath.Join(siteDir, ".wpsync", "proxy-tmp"), 0o755); err != nil {
+		// .wpsync/ lies in the DDEV mount: a symlink there is refused, not followed (SEC-113).
+		tmp, err := safefs.OpenTree(siteDir, filepath.Join(".wpsync", "proxy-tmp"))
+		if err != nil {
 			return false, err
 		}
+		tmp.Close()
 	}
 	changed := false
 	for path, content := range files {
-		old, err := os.ReadFile(path)
+		rel, err := filepath.Rel(siteDir, filepath.Dir(path))
+		if err != nil {
+			return false, err
+		}
+		// .ddev lies in the site folder: never write or delete through a symlink there (N-d).
+		open := safefs.OpenTree
+		if content == "" {
+			open = safefs.OpenDir // removing creates no folder
+		}
+		root, err := open(siteDir, rel)
+		if content == "" && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		name := filepath.Base(path)
+		old, err := safefs.ReadFile(root, name)
 		exists := err == nil
 		switch {
 		case content == "" && exists:
-			if err := os.Remove(path); err != nil {
-				return false, err
-			}
+			err = safefs.Remove(root, name)
 			changed = true
 		case content != "" && (!exists || string(old) != content):
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				return false, err
-			}
-			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-				return false, err
-			}
+			err = safefs.WriteFile(root, name, strings.NewReader(content), int64(len(content)), time.Time{}, 0o644)
 			changed = true
+		}
+		root.Close()
+		if err != nil {
+			return false, err
 		}
 	}
 	return changed, nil

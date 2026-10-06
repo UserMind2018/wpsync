@@ -1,9 +1,10 @@
 package push
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 var (
@@ -87,7 +89,9 @@ func dropUnit(b *baseline.Baseline, unit string) {
 	}
 }
 
-func journalDir(siteDir string) string { return filepath.Join(siteDir, ".wpsync", "pushes") }
+// journalRel is the journal folder below the site folder. On the Mac it lies in the DDEV mount:
+// every access goes through a root on that folder and never follows a symlink (Nach-Review M-2).
+var journalRel = filepath.Join(".wpsync", "pushes")
 
 // SaveJournal writes the journal atomically.
 func SaveJournal(siteDir string, j *Journal) error {
@@ -97,18 +101,19 @@ func SaveJournal(siteDir string, j *Journal) error {
 	if !saltRe.MatchString(j.Salt) {
 		return fmt.Errorf("der Agent nennt einen ungültigen Rescue-Salt %s", agentapi.Printable(j.Salt))
 	}
-	if err := os.MkdirAll(journalDir(siteDir), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
 	}
-	p := filepath.Join(journalDir(siteDir), j.PushID+".json")
-	if err := os.WriteFile(p+".tmp", data, 0o600); err != nil {
+	root, err := safefs.OpenTree(siteDir, journalRel)
+	if err != nil {
 		return err
 	}
-	return os.Rename(p+".tmp", p)
+	defer root.Close()
+	if err := root.Chmod(".", 0o700); err != nil {
+		return err
+	}
+	return safefs.WriteFile(root, j.PushID+".json", bytes.NewReader(data), int64(len(data)), time.Time{}, 0o600)
 }
 
 // LoadJournal reads the journal of a push made from this machine. The journal lies in the site
@@ -118,7 +123,7 @@ func LoadJournal(siteDir, pushID string) (*Journal, error) {
 	if !pushIDRe.MatchString(pushID) {
 		return nil, fmt.Errorf("ungültige Push-ID %q", pushID)
 	}
-	data, err := os.ReadFile(filepath.Join(journalDir(siteDir), pushID+".json"))
+	data, err := readJournal(siteDir, pushID)
 	if err != nil {
 		return nil, fmt.Errorf("zu Push %s gibt es auf diesem Rechner kein Journal", pushID)
 	}
@@ -129,13 +134,27 @@ func LoadJournal(siteDir, pushID string) (*Journal, error) {
 	return &j, nil
 }
 
+func readJournal(siteDir, pushID string) ([]byte, error) {
+	root, err := safefs.OpenDir(siteDir, journalRel)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return safefs.ReadFile(root, pushID+".json")
+}
+
 // LatestJournal returns the id of the newest push made from this machine, "" if there is none.
 // Push ids start with the date, so the name order is the time order within a day's precision.
 func LatestJournal(siteDir string) string {
-	entries, _ := os.ReadDir(journalDir(siteDir))
+	root, err := safefs.OpenDir(siteDir, journalRel)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	entries, _ := fs.ReadDir(root.FS(), ".")
 	var ids []string
 	for _, e := range entries {
-		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && pushIDRe.MatchString(id) {
+		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && pushIDRe.MatchString(id) && e.Type().IsRegular() {
 			ids = append(ids, id)
 		}
 	}
@@ -143,8 +162,8 @@ func LatestJournal(siteDir string) string {
 		return ""
 	}
 	sort.Slice(ids, func(i, j int) bool {
-		a, _ := os.Stat(filepath.Join(journalDir(siteDir), ids[i]+".json"))
-		b, _ := os.Stat(filepath.Join(journalDir(siteDir), ids[j]+".json"))
+		a, _ := root.Lstat(ids[i] + ".json")
+		b, _ := root.Lstat(ids[j] + ".json")
 		if a == nil || b == nil || a.ModTime().Equal(b.ModTime()) {
 			return ids[i] < ids[j]
 		}

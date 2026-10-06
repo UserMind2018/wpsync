@@ -25,6 +25,7 @@ var invalidEnvCases = map[string]struct{ env, field string }{
 	"table_prefix": {`{"table_prefix":"--path=/x","home":"https://kunde.example","anon":"1.abcd1234"}`, "table_prefix"},
 	"home":         {`{"table_prefix":"wp_","home":"--exec=x","anon":"1.abcd1234"}`, "home"},
 	"siteurl":      {`{"table_prefix":"wp_","home":"https://kunde.example","siteurl":"--exec=x","anon":"1.abcd1234"}`, "siteurl"},
+	"php_version":  {`{"table_prefix":"wp_","home":"https://kunde.example","php_version":"8.3@sha256:x","anon":"1.abcd1234"}`, "php_version"},
 }
 
 func statusRoot(t *testing.T, url string) string {
@@ -218,7 +219,7 @@ func TestRunWithInvalidEnvLeavesNoTrace(t *testing.T) {
 				Site:      sites.Site{Name: "kunde", URL: srv.URL, KeyID: "0123456789abcdef", RPS: 1000, Profile: anonProfile(t)},
 				Secret:    "secret",
 				SitesRoot: root,
-				DDEVState: store,
+				Driver:    &ddev.Driver{SitesRoot: root, State: store, Out: io.Discard},
 				Yes:       true,
 				Out:       &bytes.Buffer{},
 			})
@@ -231,7 +232,7 @@ func TestRunWithInvalidEnvLeavesNoTrace(t *testing.T) {
 			if calls := readCalls(dockerLog); len(calls) != 0 {
 				t.Errorf("docker called: %q", calls)
 			}
-			if entries, _ := os.ReadDir(root); len(entries) != 0 {
+			if entries := sitesRootTrace(root, "kunde"); len(entries) != 0 {
 				t.Errorf("SitesRoot not empty: %v", entries)
 			}
 			if _, err := os.Stat(store.Dir); err == nil {

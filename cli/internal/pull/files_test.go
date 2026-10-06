@@ -57,3 +57,33 @@ func TestBundlesRespectLimit(t *testing.T) {
 		t.Fatalf("bundles = %v", got)
 	}
 }
+
+// W11: kein Segment .git/.svn/.hg (Ordner oder Gitfile) darf aus einem Pull in den Docroot.
+func TestSafeJoinRejectsVCSPaths(t *testing.T) {
+	for _, bad := range []string{"wp-content/plugins/a/.git/config", "wp-content/themes/t/.GIT", "wp-content/x/.svn/entries", "wp-content/x/.hg/hgrc", "wp-content/plugins/a/.git"} {
+		if _, err := SafeJoin("/root", bad); err == nil {
+			t.Errorf("SafeJoin(%q) must fail", bad)
+		}
+	}
+	for _, good := range []string{"wp-content/plugins/a/.github/x.yml", "wp-content/plugins/a/.gitignore", "wp-content/plugins/a/.gitattributes", "wp-content/plugins/git/a.php"} {
+		if _, err := SafeJoin("/root", good); err != nil {
+			t.Errorf("SafeJoin(%q) = %v", good, err)
+		}
+	}
+}
+
+// Lokale VCS-Pfade überlebt jedes Löschen, auch wenn eine alte Baseline sie kennt.
+func TestRemoveFilesKeepsLocalVCSPaths(t *testing.T) {
+	docroot := t.TempDir()
+	gitfile := filepath.Join(docroot, "wp-content", "plugins", "a", ".git")
+	if err := os.MkdirAll(filepath.Dir(gitfile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitfile, []byte("gitdir: ../x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	RemoveFiles(docroot, []string{"wp-content/plugins/a/.git"})
+	if _, err := os.Stat(gitfile); err != nil {
+		t.Fatalf("local gitfile removed: %v", err)
+	}
+}

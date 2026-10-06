@@ -7,3 +7,4 @@ cli/*.tar.gz
 agent/vendor/
 agent/dist/
 agent/.phpunit.result.cache
+dist/

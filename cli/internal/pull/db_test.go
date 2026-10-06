@@ -108,7 +108,11 @@ func TestDownloadTablesSendsScope(t *testing.T) {
 }
 
 func TestMarkerWithoutChecksumNeverMatches(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
 	tb := agentapi.Table{Name: "wp_x"}
 	writeMarker(dir, tb)
 	if markerMatches(dir, tb) {

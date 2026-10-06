@@ -34,39 +34,39 @@ var Presets = []struct{ Name, Label string }{
 // UploadsBudget: presets pull the newest upload years up to this size, older ones come via proxy.
 const UploadsBudget int64 = 1 << 30
 
-// Profile is the pull scope of one site.
+// Profile is the pull scope of one site. The JSON names (scan --json) follow the YAML names.
 type Profile struct {
-	Preset    string  `yaml:"preset"`
-	Tables    Tables  `yaml:"tables,omitempty"`
-	PostTypes Choice  `yaml:"post_types,omitempty"`
-	Plugins   Choice  `yaml:"plugins,omitempty"`
-	Themes    Choice  `yaml:"themes,omitempty"`
-	Uploads   Uploads `yaml:"uploads"`
-	Seen      Seen    `yaml:"seen,omitempty"`
+	Preset    string  `yaml:"preset" json:"preset"`
+	Tables    Tables  `yaml:"tables,omitempty" json:"tables"`
+	PostTypes Choice  `yaml:"post_types,omitempty" json:"post_types"`
+	Plugins   Choice  `yaml:"plugins,omitempty" json:"plugins"`
+	Themes    Choice  `yaml:"themes,omitempty" json:"themes"`
+	Uploads   Uploads `yaml:"uploads" json:"uploads"`
+	Seen      Seen    `yaml:"seen,omitempty" json:"seen"`
 }
 
 // Tables overrides the preset mode of single tables (full, structure, skip).
 type Tables struct {
-	Overrides map[string]string `yaml:"overrides,omitempty"`
+	Overrides map[string]string `yaml:"overrides,omitempty" json:"overrides,omitempty"`
 }
 
 // Choice overrides the preset rule for single post types, plugins or themes.
 type Choice struct {
-	Include []string `yaml:"include,omitempty"`
-	Exclude []string `yaml:"exclude,omitempty"`
+	Include []string `yaml:"include,omitempty" json:"include,omitempty"`
+	Exclude []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
 }
 
 // Uploads: Since is the oldest year pulled ("" = all years); older years come via proxy.
 type Uploads struct {
-	Since string `yaml:"since,omitempty"`
-	Proxy bool   `yaml:"proxy"`
+	Since string `yaml:"since,omitempty" json:"since"`
+	Proxy bool   `yaml:"proxy" json:"proxy"`
 }
 
 // Seen is what the profile was decided on – new entries are reported by scan and pull.
 type Seen struct {
-	Tables    []string `yaml:"tables,omitempty"`
-	Plugins   []string `yaml:"plugins,omitempty"`
-	PostTypes []string `yaml:"post_types,omitempty"`
+	Tables    []string `yaml:"tables,omitempty" json:"tables,omitempty"`
+	Plugins   []string `yaml:"plugins,omitempty" json:"plugins,omitempty"`
+	PostTypes []string `yaml:"post_types,omitempty" json:"post_types,omitempty"`
 }
 
 // New creates a profile from a preset.

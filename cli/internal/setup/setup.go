@@ -19,10 +19,10 @@ const ResolverContent = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
 
 // Check is one doctor result.
 type Check struct {
-	Name   string
-	OK     bool
-	Detail string
-	Fix    string
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	Fix    string `json:"fix,omitempty"`
 }
 
 // Env abstracts the system for tests.
@@ -33,6 +33,11 @@ type Env struct {
 	Stat            func(string) (os.FileInfo, error)
 	MailguardSource string
 	MailguardOrigin string // shown in doctor: env or bundled copy
+
+	// Server mode (doctor --server).
+	Version   string                 // CLI version
+	ConfigDir string                 // WPSYNC_CONFIG_DIR
+	Writable  func(dir string) error // nil error if a file can be created in dir
 }
 
 // SystemEnv uses the real system.
@@ -46,7 +51,21 @@ func SystemEnv(mailguardSource string) Env {
 		},
 		Stat:            os.Stat,
 		MailguardSource: mailguardSource,
+		Writable:        writable,
 	}
+}
+
+// writable creates and removes a file in dir.
+func writable(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".doctor-*")
+	if err != nil {
+		return err
+	}
+	f.Close()
+	return os.Remove(f.Name())
 }
 
 // DockerVersionOK requires Docker ≥ 25 (DDEV, Spike B3).
@@ -102,6 +121,45 @@ func Doctor(e Env) []Check {
 		OK:     err == nil,
 		Detail: detail,
 		Fix:    "WPSYNC_MAILGUARD auf eine vorhandene Datei setzen oder die Variable entfernen (dann nutzt wpsync den mitgelieferten Riegel)",
+	})
+	return checks
+}
+
+// ServerDoctor checks only what counts in the server mode (Spec Server-Modus §6): no DNS for
+// *.ddev.site, no Docker version floor, no DDEV.
+func ServerDoctor(e Env) []Check {
+	checks := []Check{{Name: "wpsync-Version", OK: e.Version != "", Detail: e.Version, Fix: "Binary neu bauen (scripts/build-linux.sh)"}}
+
+	_, err := e.Stat(e.MailguardSource)
+	detail := e.MailguardSource
+	if e.MailguardOrigin != "" {
+		detail = strings.TrimSpace(detail + " (" + e.MailguardOrigin + ")")
+	}
+	checks = append(checks, Check{
+		Name:   "local-mailguard vorhanden",
+		OK:     err == nil,
+		Detail: detail,
+		Fix:    "WPSYNC_CONFIG_DIR beschreibbar machen (wpsync legt den Riegel dort ab) oder WPSYNC_MAILGUARD auf eine vorhandene Datei setzen",
+	})
+
+	docker, err := e.Output("docker", "version", "--format", "{{.Server.Version}}")
+	checks = append(checks, Check{
+		Name:   "Docker-CLI erreicht den Docker-Daemon",
+		OK:     err == nil && strings.TrimSpace(docker) != "",
+		Detail: strings.TrimSpace(docker),
+		Fix:    "docker-CLI im Image installieren und den Docker-Socket in den Container reichen",
+	})
+
+	err = e.Writable(e.ConfigDir)
+	detail = e.ConfigDir
+	if err != nil {
+		detail += " (" + err.Error() + ")"
+	}
+	checks = append(checks, Check{
+		Name:   "WPSYNC_CONFIG_DIR beschreibbar",
+		OK:     err == nil && e.ConfigDir != "",
+		Detail: detail,
+		Fix:    "WPSYNC_CONFIG_DIR auf ein beschreibbares Verzeichnis setzen",
 	})
 	return checks
 }

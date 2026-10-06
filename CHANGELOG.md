@@ -3,6 +3,79 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unreleased]
+
+**Nur die CLI ändert sich (CLI 0.3.0).** Agent 0.4.1 bleibt; Pull, Scan und Status brauchen
+weiterhin Agent 0.3.0 oder neuer, `push` 0.4.0.
+
+### Sicherheit
+- Pull schreibt keine VCS-Pfade der Quelle (`.git`, `.svn`, `.hg`, auch `.git`-Dateien) in den
+  Docroot (W11). Sie fallen schon aus der Delta-Liste („n VCS-Pfade der Quelle übersprungen“),
+  ungefragt gelieferte VCS-Pfade brechen den Pull ab, und lokal löscht wpsync keinen. Bisher
+  konnte ein manipulierter Agent etwa `wp-content/plugins/a/.git/config` in den Docroot legen
+- Pull folgt keinem Symlink mehr (SEC-113). Bisher prüfte er nur den Pfadtext: Legte Code der
+  Site einen Symlink in den Docroot (etwa `wp-content/plugins/evil -> ../../.wpsync/history.git`),
+  überschrieb die Quelle damit `history.git/config`, und der nächste Schnappschuss führte einen
+  Git-Filter im wpsync-Prozess aus – im Server-Modus im OS-Container mit Docker-Socket. Jetzt
+  laufen alle Dateioperationen des Pulls über ein `os.Root` auf dem Docroot selbst – nie auf dem
+  Site-Ordner darüber, der auch `.wpsync/` enthält. Dateien unter einem Symlink werden
+  übersprungen und gemeldet, eine Datei, die ein Symlink ist, wird ersetzt statt ihr Ziel.
+  Dasselbe gilt für DB-Zwischenablage, `baseline.json` (Lesen und Schreiben), Push-Journal,
+  `.gitignore` des Schnappschusses, `proxy-tmp`, die Uploads-Proxy-Konfiguration unter `.ddev`
+  und `wp-config.php` beim DDEV-Setup – auf dem Mac liegt `<site>/` im DDEV-Mount
+- Tiefenverteidigung im internen Git: Attribute kommen aus dem leeren Baum (`GIT_ATTR_SOURCE`,
+  git ≥ 2.40), eine `.gitattributes` der Site benennt also keinen Filter mehr;
+  `info/attributes` wird entfernt und die `config` des Repos vor jedem Aufruf auf die Einträge
+  von `git init` zurückgesetzt, falls dort Filter, `include`, `core.fsmonitor` o. Ä. stehen.
+  `GIT_COMMON_DIR` zeigt auf das Repo selbst; fremde Einträge (`commondir`, `worktrees/`,
+  `config.worktree`, `objects/info/alternates` …) werden entfernt, ein Symlink im Repo bricht ab.
+  Bisher genügte eine Datei `commondir`, um Config und Attribute aus dem Docroot zu laden
+- Die PHP-Version der Quelle wird mit Präfix und Adressen geprüft (`<major>.<minor>[.…]`), bevor
+  sie Teil des WP-CLI-Image-Namens (Container-Modus) bzw. von `--php-version` (DDEV) wird.
+  Unzulässige Werte der Quelle enden einheitlich mit Exit 1
+- Container-Modus: `--docroot` darf nicht `/`, nicht direkt unter `/` und nicht `.wpsync` oder
+  `.git` sein (Exit 2)
+
+### Neu
+- **Server-Modus** für den Aufruf als Subprozess (Agentic OS): `--json` für `pair`, `scan`, `pull`,
+  `status`, `unpair`, `doctor`, `version` mit Fortschrittszeilen beim Pull, `--secret-stdin`,
+  `pair --json --secret-out`, `doctor --server`
+- `--driver container` für `pull`, `status`, `list`, `stop`: Pull in einen vorhandenen
+  WordPress-Container statt in ein DDEV-Projekt; der SQL-Import läuft dort mit derselben Härtung
+  (`--binary-mode --local-infile=0`) wie unter DDEV
+- Container-Modus: Fehlt `<docroot>/.htaccess`, legt wpsync den WordPress-Standardblock an
+  (sonst 404 auf `/wp-json/`, Elementor-Editor lädt nicht); eine vorhandene bleibt unberührt.
+  Einzige Datei, die wpsync ausserhalb von `wp-content/` in den Docroot schreibt
+- `scan --uploads-since alle` zieht jedes Upload-Jahr
+- Linux-Binary `wpsync_0.3.0_linux_arm64` mit `.sha256` am GitHub-Release
+  (`scripts/build-linux.sh`, reproduzierbar)
+
+### Geändert
+- Feste Exit-Codes für alle Befehle (README → Server-Modus); bisher endete jeder Fehler mit 1,
+  Aufruffehler mit 2. Skripte, die nur „≠ 0“ prüfen, sind nicht betroffen
+- SIGTERM bricht einen Pull fortsetzbar ab (Exit 30)
+- Das interne Git wartet sich nicht mehr während des Commits (`gc.auto=0`), sondern danach im
+  Vordergrund; liegengebliebene Locks eines abgebrochenen Laufs (`index.lock`, `HEAD.lock`,
+  `refs/heads/*.lock`, `gc.pid`) räumt der nächste Pull weg. Bisher blockierte ein solcher Lock
+  jeden weiteren Pull mit Exit 1
+- Scheitert nur der Schnappschuss im internen Git, bleibt der Pull erfolgreich: Warnung auf der
+  Ausgabe und `"warnings": ["snapshot_failed"]` im Ergebnis von `pull --json`
+- Dateien unter einem per Symlink eingebundenen Ordner im Docroot überspringt der Pull, statt
+  abzubrechen: Meldung je Pfad, `"warnings": ["symlink_skipped"]`, der nächste Pull fragt sie
+  erneut an
+- Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (Site-Lock); ein zweiter
+  endet sofort mit Exit 20 und `error.reason: "site_locked"` im JSON. Push und Rollback räumen alte git-Locks wie der Pull weg
+- Container-Modus: Jeder `docker run` von wpsync läuft mit `--init`, Namen `wpsync-<site>-…` und
+  Label `wpsync.site=<Schlüssel des Site-Ordners>`. Nach SIGTERM entfernt wpsync den laufenden Hilfscontainer, beim
+  nächsten Pull auch verwaiste eines gekillten Laufs; bisher lief er nach dem Abbruch weiter
+- Ist der Mail-Riegel nach einem Pull nicht aktiv und weicht `.ddev` vom geprüften Stand ab,
+  hält wpsync die Container jetzt per `docker stop` an, statt die Site laufen zu lassen
+- Intern: DDEV-Verhalten inklusive `.ddev`-Prüfung steckt hinter einem Laufzeittreiber; auf dem
+  Mac ändern sich Ablage, Meldungen und Rückfragen nicht
+
+### Zu tun nach dem Update
+- Nichts auf dem Mac (`brew upgrade wpsync`). Keine Agent-Aktualisierung nötig.
+
 ## [0.2.1] – 2026-10-06 · Agent 0.4.1
 
 **Nur der Agent ändert sich.** Agent 0.4.1 ist das eigentliche Update. Die CLI 0.2.1 ändert
