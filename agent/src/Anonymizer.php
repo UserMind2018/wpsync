@@ -57,6 +57,12 @@ final class Anonymizer
         return array_key_exists(self::name($table, $prefix), self::rules());
     }
 
+    /** Ersetzt eine Regel in der Tabelle Werte? Geprüfte Tabellen ohne Personendaten sind abgedeckt, ändern aber nichts. */
+    public static function changes(string $table, string $prefix): bool
+    {
+        return (self::rules()[self::name($table, $prefix)] ?? []) !== [];
+    }
+
     /**
      * @param list<array<string, string|null>> $rows Zeilen mit Spaltennamen als Schlüssel
      * @return list<array<string, string|null>>

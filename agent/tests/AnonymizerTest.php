@@ -127,6 +127,16 @@ final class AnonymizerTest extends TestCase
         $this->assertFalse(Anonymizer::covers('wp_terms', 'wp_'));
     }
 
+    /** Staging anonymisiert in der Datenbank und braucht nur dort einen Primärschlüssel, wo etwas ersetzt wird. */
+    public function testChangesOnlyWhereARuleReplacesValues(): void
+    {
+        $this->assertTrue(Anonymizer::changes('wp_users', 'wp_'));
+        $this->assertTrue(Anonymizer::changes('stgabc123_wc_orders', 'stgabc123_'));
+        $this->assertFalse(Anonymizer::changes('wp_wc_order_tax_lookup', 'wp_'));
+        $this->assertFalse(Anonymizer::changes('wp_terms', 'wp_'));
+        $this->assertFalse(Anonymizer::changes('wp_users', 'stgabc123_'));
+    }
+
     public function testIdCombinesRulesVersionAndKeyFingerprint(): void
     {
         $id = Anonymizer::id(self::KEY);

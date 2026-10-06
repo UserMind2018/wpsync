@@ -538,7 +538,8 @@ final class Rest
         ];
     }
 
-    private static function singlePrimaryKey(string $table): ?string
+    /** Name des Primärschlüssels, wenn er aus genau einer Spalte besteht – auch für Staging (StagingDb). */
+    public static function singlePrimaryKey(string $table): ?string
     {
         global $wpdb;
         $columns = $wpdb->get_col('SHOW KEYS FROM `' . $table . "` WHERE Key_name = 'PRIMARY'", 4);
