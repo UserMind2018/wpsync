@@ -25,6 +25,7 @@ var invalidEnvCases = map[string]struct{ env, field string }{
 	"table_prefix": {`{"table_prefix":"--path=/x","home":"https://kunde.example","anon":"1.abcd1234"}`, "table_prefix"},
 	"home":         {`{"table_prefix":"wp_","home":"--exec=x","anon":"1.abcd1234"}`, "home"},
 	"siteurl":      {`{"table_prefix":"wp_","home":"https://kunde.example","siteurl":"--exec=x","anon":"1.abcd1234"}`, "siteurl"},
+	"php_version":  {`{"table_prefix":"wp_","home":"https://kunde.example","php_version":"8.3@sha256:x","anon":"1.abcd1234"}`, "php_version"},
 }
 
 func statusRoot(t *testing.T, url string) string {

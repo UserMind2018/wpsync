@@ -64,6 +64,8 @@ func TestEnvInvalidArgs(t *testing.T) {
 		"empty home":        {Env{TablePrefix: "wp_", SiteURL: "https://kunde.example"}, []EnvField{{"home", ""}}},
 		"empty prefix":      {Env{Home: "https://kunde.example"}, []EnvField{{"table_prefix", ""}}},
 		"bad siteurl":       {Env{TablePrefix: "wp_", Home: "https://kunde.example", SiteURL: "--exec=x"}, []EnvField{{"siteurl", "--exec=x"}}},
+		"bad php_version":   {Env{TablePrefix: "wp_", Home: "https://kunde.example", PHPVersion: "8.3/../x.1"}, []EnvField{{"php_version", "8.3/../x.1"}}},
+		"php patch level":   {Env{TablePrefix: "wp_", Home: "https://kunde.example", PHPVersion: "8.3.35-1ubuntu"}, nil},
 		"all three invalid": {Env{TablePrefix: "--path=/x", Home: "--exec=x", SiteURL: "-x"}, []EnvField{{"table_prefix", "--path=/x"}, {"home", "--exec=x"}, {"siteurl", "-x"}}},
 	}
 	for name, tc := range cases {

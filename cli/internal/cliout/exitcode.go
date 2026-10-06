@@ -103,8 +103,12 @@ func classify(err error) int {
 	case errors.Is(err, pull.ErrInterrupted), errors.Is(err, context.Canceled):
 		return ExitInterrupted
 	case errors.As(err, &usage), errors.Is(err, pull.ErrNeedsConfirmation), errors.Is(err, pull.ErrPlainNeedsConfirmation),
-		errors.Is(err, pull.ErrUploadsWithoutProxy):
+		errors.Is(err, pull.ErrUploadsWithoutProxy), errors.Is(err, pull.ErrInvalidDocroot):
 		return ExitUsage
+	case errors.Is(err, agentapi.ErrInvalidEnv), errors.Is(err, pull.ErrInvalidTableName):
+		// Values of the source that wpsync refuses (prefix, URLs, PHP version, table names) are
+		// neither a local problem nor a call error, and no retry helps: unknown, wherever they surface.
+		return ExitUnknown
 	case errors.Is(err, syscall.ENOSPC):
 		return ExitDiskFull
 	case errors.As(err, &outdated):

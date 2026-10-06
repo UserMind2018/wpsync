@@ -71,7 +71,7 @@ func (e *invalidEnvError) Error() string {
 		shown[i] = f.Key + " = " + agentapi.Printable(f.Value)
 	}
 	return "die Site meldet Angaben in unzulässiger Form: " + strings.Join(shown, ", ") + "\n" +
-		"  Erwartet: Tabellenpräfix aus Buchstaben, Ziffern und _ (höchstens 64 Zeichen), Adressen als http(s)-URL.\n" +
+		"  Erwartet: Tabellenpräfix aus Buchstaben, Ziffern und _ (höchstens 64 Zeichen), Adressen als http(s)-URL, PHP-Version als <Major>.<Minor>[.…].\n" +
 		"  Die Angaben stammen von der Site, deshalb läuft der Pull nicht. Es wurden keine Daten geladen und im Site-Ordner nichts verändert.\n" +
 		"  Auf der Site $table_prefix in wp-config.php und unter Einstellungen → Allgemein die WordPress- und Website-Adresse prüfen."
 }

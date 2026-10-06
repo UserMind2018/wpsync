@@ -38,7 +38,11 @@ func TestExitCodes(t *testing.T) {
 		{"rate_limited_ban", fmt.Errorf("%w: connection reset", agentapi.ErrSuspectedBan), ExitRateLimited},
 		{"local_env", localenv.Wrap("exists", errors.New("container ws-dev-x fehlt")), ExitLocalEnv},
 		{"local_env_pull_running", localenv.Wrap("lock", pull.ErrPullRunning), ExitLocalEnv},
-		{"local_env_invalid_php", localenv.Wrap("configure", fmt.Errorf("%w: php_version 8.3/x", agentapi.ErrInvalidEnv)), ExitLocalEnv},
+		// Nach-Review N-b: unzulässige Werte der Quelle sind einheitlich unknown, auch aus Configure.
+		{"invalid_env_unknown", fmt.Errorf("%w: php_version 8.3/x", agentapi.ErrInvalidEnv), ExitUnknown},
+		{"invalid_env_from_configure_unknown", localenv.Wrap("configure", fmt.Errorf("%w: php_version 8.3/x", agentapi.ErrInvalidEnv)), ExitUnknown},
+		{"invalid_table_name_unknown", fmt.Errorf("%w: refusing ../x", pull.ErrInvalidTableName), ExitUnknown},
+		{"usage_reserved_docroot", fmt.Errorf("%w: .wpsync", pull.ErrInvalidDocroot), ExitUsage},
 		{"disk_full", &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, ExitDiskFull},
 		{"disk_full_wins_over_local_env", localenv.Wrap("db import", &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}), ExitDiskFull},
 		{"postsetup_failed", &pull.PostSetupError{Err: pull.ErrMailguardMissing}, ExitPostSetupFailed},

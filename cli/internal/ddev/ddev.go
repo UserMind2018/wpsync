@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -177,14 +176,11 @@ func MajorMinor(version string) string {
 	return parts[0] + "." + parts[1]
 }
 
-var phpVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
-
-// PHPMajorMinor returns <major>.<minor> of the source's PHP version. The value comes from the site
-// and becomes --php-version (DDEV) or part of the WP-CLI image name (container mode); anything
-// else than two numbers is ErrInvalidEnv.
+// PHPMajorMinor returns <major>.<minor> of the source's PHP version; anything else than two
+// numbers is ErrInvalidEnv (agentapi.PHPMajorMinor).
 func PHPMajorMinor(version string) (string, error) {
-	mm := MajorMinor(version)
-	if !phpVersionRe.MatchString(mm) {
+	mm, ok := agentapi.PHPMajorMinor(version)
+	if !ok {
 		return "", fmt.Errorf("%w: php_version %s", agentapi.ErrInvalidEnv, agentapi.Printable(version))
 	}
 	return mm, nil

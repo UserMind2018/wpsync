@@ -103,10 +103,10 @@ func (o *Options) dirs() (siteDir, docroot string, err error) {
 		docroot = filepath.Join(siteDir, "public")
 	}
 	if filepath.Dir(docroot) != filepath.Clean(siteDir) {
-		return "", "", fmt.Errorf("docroot %s must lie directly below %s", docroot, siteDir)
+		return "", "", fmt.Errorf("%w: docroot %s must lie directly below %s", ErrInvalidDocroot, docroot, siteDir)
 	}
 	if name := filepath.Base(docroot); strings.EqualFold(name, ".wpsync") || strings.EqualFold(name, ".git") {
-		return "", "", fmt.Errorf("docroot %s: der Name %s ist für wpsync bzw. git reserviert", docroot, name)
+		return "", "", fmt.Errorf("%w: docroot %s – der Name %s ist für wpsync bzw. git reserviert", ErrInvalidDocroot, docroot, name)
 	}
 	return siteDir, docroot, nil
 }
@@ -126,6 +126,9 @@ func (o *Options) commit(siteDir, docroot, message string) error {
 	}
 	return localgit.CommitTree(gitDir, siteDir, filepath.Base(docroot), message, o.Out)
 }
+
+// ErrInvalidDocroot: docroot and site folder do not fit together (exit code usage).
+var ErrInvalidDocroot = errors.New("ungültiger Docroot")
 
 // ErrNoProfile: a pull needs a profile from wpsync scan (Spec 5.1).
 var ErrNoProfile = errors.New("noch kein Pull-Profil")
