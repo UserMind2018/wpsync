@@ -101,6 +101,7 @@ final class Store
             $wpdb->query('ALTER TABLE `' . self::table('pairings') . '` MODIFY secret VARCHAR(255) NOT NULL');
         }
         self::sealPlainSecrets();
+        delete_option('wpsync_secret'); // Altlast aus dem Spike, Secret im Klartext (SEC-006)
         update_option(self::SCHEMA_OPTION, WPSYNC_VERSION, true);
     }
 
