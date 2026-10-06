@@ -37,7 +37,12 @@ type Options struct {
 	Adjust  Adjust
 	// Select asks the user; nil without a terminal.
 	Select func(sheet *agentapi.Infosheet, current *profile.Profile) (*profile.Profile, error)
+	// OnSheet receives the infosheet the profile was decided on (scan --json); nil = not needed.
+	OnSheet func(sheet *agentapi.Infosheet)
 }
+
+// ErrNeedsPreset: without a terminal (or with --json) the selection needs --preset.
+var ErrNeedsPreset = errors.New("kein Terminal für die Auswahl – Preset angeben, z. B. --preset ohne-transaktionen")
 
 // maxRefreshRounds bounds the refresh loop (1 request per second by default).
 const maxRefreshRounds = 2000
@@ -56,6 +61,9 @@ func Run(o Options) (*profile.Profile, error) {
 		}
 	} else if job.Running {
 		fmt.Fprintf(o.Out, "Hinweis: Die Site aktualisiert ihr Infosheet gerade (%s) – angezeigt wird der letzte fertige Stand.\n\n", progressLine(job))
+	}
+	if o.OnSheet != nil {
+		o.OnSheet(sheet)
 	}
 	Render(o.Out, sheet, o.Now)
 	if o.Current != nil {
@@ -82,7 +90,7 @@ func Run(o Options) (*profile.Profile, error) {
 		next = o.Current
 		fmt.Fprintln(o.Out, "\nProfil unverändert (ändern: wpsync scan im Terminal oder mit --preset).")
 	default:
-		return nil, errors.New("kein Terminal für die Auswahl – Preset angeben, z. B. --preset ohne-transaktionen")
+		return nil, ErrNeedsPreset
 	}
 	RenderSummary(o.Out, sheet, next)
 	fmt.Fprintf(o.Out, "\nRequests: %d\n", o.Client.Stats.Requests)
