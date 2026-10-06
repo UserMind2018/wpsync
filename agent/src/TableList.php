@@ -14,10 +14,11 @@ final class TableList
     private const OWN = '/wpsync_(pairings|nonces|state|pushes)\z/';
 
     /**
-     * @param list<array{0: string, 1: string}> $rows Zeilen aus SHOW FULL TABLES: Name, Typ
+     * @param list<array{0: string, 1: string}> $rows   Zeilen aus SHOW FULL TABLES: Name, Typ
+     * @param list<string>                      $hidden Präfixe, die nie ausgeliefert werden (Staging, Leitplanke 3)
      * @return list<string>
      */
-    public static function filter(array $rows, string $prefix): array
+    public static function filter(array $rows, string $prefix, array $hidden = []): array
     {
         $names = [];
         foreach ($rows as $row) {
@@ -27,7 +28,11 @@ final class TableList
             }
         }
 
-        $foreign = self::nestedPrefixes($names, $prefix);
+        // Wörtlicher Präfixvergleich, kein LIKE: "_" im Staging-Präfix ist hier kein Platzhalter.
+        $hidden  = array_values(array_filter($hidden, static function ($p): bool {
+            return is_string($p) && $p !== '';
+        }));
+        $foreign = array_merge(self::nestedPrefixes($names, $prefix), $hidden);
         $out     = [];
         foreach ($names as $name) {
             if (preg_match(self::OWN, $name) === 1) {

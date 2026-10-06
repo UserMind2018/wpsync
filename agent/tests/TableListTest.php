@@ -58,4 +58,20 @@ final class TableListTest extends TestCase
         $rows = $this->base(['wp_options', 'wp_wpsync_pushes', 'wp_wpsync_pushes_archive']);
         $this->assertSame(['wp_options', 'wp_wpsync_pushes_archive'], TableList::filter($rows, 'wp_'));
     }
+
+    /** AC-83, Spec 5.10 */
+    public function testHiddenPrefixesNeverLeaveTheServer(): void
+    {
+        $rows = [['wp_options', 'BASE TABLE'], ['wp_posts', 'BASE TABLE'], ['stgabc123_options', 'BASE TABLE'], ['wp_stgx_options', 'BASE TABLE']];
+        $this->assertSame(['wp_options', 'wp_posts', 'wp_stgx_options'], TableList::filter($rows, 'wp_', ['stgabc123_']));
+        $this->assertSame(['wp_options', 'wp_posts'], TableList::filter($rows, 'wp_', ['wp_stgx_']));
+        $this->assertSame(['wp_options', 'wp_posts', 'wp_stgx_options'], TableList::filter($rows, 'wp_'));
+    }
+
+    /** Leeres Live-Präfix: nur das versteckte Präfix trennt die Kopie; "_" ist kein Platzhalter. */
+    public function testHiddenPrefixIsComparedLiterally(): void
+    {
+        $rows = $this->base(['options', 'posts', 'stgabc123_options', 'stgabc123xoptions']);
+        $this->assertSame(['options', 'posts', 'stgabc123xoptions'], TableList::filter($rows, '', ['stgabc123_', '']));
+    }
 }
