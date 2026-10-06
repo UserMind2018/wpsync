@@ -256,6 +256,8 @@ type pairResult struct {
 	AgentVersion         string `json:"agent_version"`
 	RequiredAgentVersion string `json:"required_agent_version"`
 	AgentOK              bool   `json:"agent_ok"`
+	// Secret only with --secret-out: the caller stores it, wpsync keeps no copy (Spec §5).
+	Secret string `json:"secret,omitempty"`
 }
 
 func (a *app) cmdPair(args []string) error {
@@ -263,9 +265,13 @@ func (a *app) cmdPair(args []string) error {
 	name := fs.String("name", "", "lokaler Name der Site (Standard: aus der URL)")
 	device := fs.String("device", "", "Gerätename im WP-Admin (Standard: Rechnername)")
 	insecure := fs.Bool("insecure", false, "http:// zulassen – nur für lokale Testumgebungen")
-	positional, err := a.parse(fs, args, exactly(2), "wpsync pair <url> <code> [--name n] [--insecure] [--json]")
+	secretOut := fs.Bool("secret-out", false, "Secret einmal im JSON-Ergebnis ausgeben statt in der Keychain speichern (nur mit --json)")
+	positional, err := a.parse(fs, args, exactly(2), "wpsync pair <url> <code> [--name n] [--insecure] [--json [--secret-out]]")
 	if err != nil {
 		return err
+	}
+	if *secretOut && !a.json {
+		return cliout.Usage(errors.New("--secret-out nur zusammen mit --json – sonst stünde das Secret im Terminal"))
 	}
 	hc := &http.Client{Timeout: 30 * time.Second}
 	base, err := agentapi.Discover(hc, positional[0])
@@ -295,14 +301,20 @@ func (a *app) cmdPair(args []string) error {
 		}
 		return fmt.Errorf("Kopplung fehlgeschlagen: %w", err)
 	}
-	if err := a.keychainStore().Set(*name, res.Secret); err != nil {
-		return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
+	if !*secretOut {
+		if err := a.keychainStore().Set(*name, res.Secret); err != nil {
+			return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
+		}
 	}
 	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1}); err != nil {
 		return err
 	}
-	a.data = pairResult{Site: *name, URL: base, KeyID: res.KeyID, AgentVersion: res.AgentVersion,
+	data := pairResult{Site: *name, URL: base, KeyID: res.KeyID, AgentVersion: res.AgentVersion,
 		RequiredAgentVersion: agentapi.MinAgentVersion, AgentOK: agentapi.VersionAtLeast(res.AgentVersion, agentapi.MinAgentVersion)}
+	if *secretOut {
+		data.Secret = res.Secret
+	}
+	a.data = data
 	fmt.Fprintf(a.out(), "✓ %s gekoppelt als %q (Agent %s)\n  Nächster Schritt: wpsync scan %s\n", base, *name, res.AgentVersion, *name)
 	return nil
 }
