@@ -24,6 +24,7 @@ import (
 	"github.com/usermind/wpsync/internal/pull"
 	"github.com/usermind/wpsync/internal/push"
 	"github.com/usermind/wpsync/internal/scan"
+	"github.com/usermind/wpsync/internal/secretstore"
 	"github.com/usermind/wpsync/internal/setup"
 	"github.com/usermind/wpsync/internal/sites"
 )
@@ -180,7 +181,7 @@ func cmdPair(args []string) error {
 		}
 		return fmt.Errorf("Kopplung fehlgeschlagen: %w", err)
 	}
-	if err := (keychain.MacOS{}).Set(sites.KeychainService(*name), *name, res.Secret); err != nil {
+	if err := keychainStore().Set(*name, res.Secret); err != nil {
 		return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
 	}
 	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1}); err != nil {
@@ -198,7 +199,7 @@ func cmdUnpair(args []string) error {
 	if err != nil {
 		return err
 	}
-	(keychain.MacOS{}).Delete(sites.KeychainService(site.Name), site.Name)
+	keychainStore().Delete(site.Name)
 	if err := sites.Delete(site.Name); err != nil {
 		return err
 	}
@@ -305,6 +306,7 @@ func cmdScan(args []string) error {
 	var plugins, postTypes listFlag
 	fs.Var(&plugins, "exclude-plugin", "Plugin nicht ziehen, mehrfach möglich (nur mit --preset)")
 	fs.Var(&postTypes, "exclude-post-type", "Post-Typ nicht ziehen, mehrfach möglich (nur mit --preset)")
+	secretStdin := secretStdinFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
@@ -318,7 +320,7 @@ func cmdScan(args []string) error {
 	if *since != "" && !profile.IsYear(*since) {
 		return errors.New("--uploads-since erwartet ein Jahr, z. B. 2025")
 	}
-	site, secret, err := loadSite(positional[0])
+	site, secret, err := loadSite(positional[0], secretStore(*secretStdin))
 	if err != nil {
 		return err
 	}
@@ -353,6 +355,7 @@ func cmdPull(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was sich geändert hat (wie wpsync status)")
 	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
+	secretStdin := secretStdinFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
@@ -360,7 +363,7 @@ func cmdPull(args []string) error {
 	if len(positional) != 1 {
 		return errors.New("Aufruf: wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]")
 	}
-	site, secret, err := loadSite(positional[0])
+	site, secret, err := loadSite(positional[0], secretStore(*secretStdin))
 	if err != nil {
 		return err
 	}
@@ -405,10 +408,16 @@ func cmdPull(args []string) error {
 }
 
 func cmdStatus(args []string) error {
-	if len(args) != 1 {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	secretStdin := secretStdinFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
 		return errors.New("Aufruf: wpsync status <site>")
 	}
-	site, secret, err := loadSite(args[0])
+	site, secret, err := loadSite(positional[0], secretStore(*secretStdin))
 	if err != nil {
 		return err
 	}
@@ -421,7 +430,7 @@ func cmdStatus(args []string) error {
 
 // pushOptions loads the site and builds the options shared by push, pushes and rollback.
 func pushOptions(name string) (push.Options, *sites.Site, error) {
-	site, secret, err := loadSite(name)
+	site, secret, err := loadSite(name, keychainStore())
 	if err != nil {
 		return push.Options{}, nil, err
 	}
@@ -581,15 +590,39 @@ type listFlag []string
 func (l *listFlag) String() string     { return strings.Join(*l, ",") }
 func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
-// loadSite returns a paired site and its secret from the keychain.
-func loadSite(name string) (*sites.Site, string, error) {
+// secretStdinFlag registers --secret-stdin (Spec Server-Modus §5).
+func secretStdinFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("secret-stdin", false, "Kopplungs-Secret als erste Zeile von stdin lesen (Server-Modus), DB-Passwort als zweite")
+}
+
+// stdinSecrets is created once: secret and DB password are two lines of the same stdin.
+var stdinSecrets *secretstore.Stdin
+
+// secretStore is stdin with --secret-stdin, else the macOS keychain.
+func secretStore(fromStdin bool) secretstore.Store {
+	if !fromStdin {
+		return keychainStore()
+	}
+	if stdinSecrets == nil {
+		stdinSecrets = secretstore.NewStdin(os.Stdin)
+	}
+	return stdinSecrets
+}
+
+func keychainStore() secretstore.Store { return secretstore.Keychain{KC: keychain.MacOS{}} }
+
+// loadSite returns a paired site and its secret.
+func loadSite(name string, store secretstore.Store) (*sites.Site, string, error) {
 	site, err := sites.Load(name)
 	if err != nil {
 		return nil, "", fmt.Errorf("%v – zuerst wpsync pair ausführen", err)
 	}
-	secret, err := (keychain.MacOS{}).Get(sites.KeychainService(site.Name), site.Name)
-	if err != nil {
+	secret, err := store.Get(site.Name)
+	if errors.Is(err, secretstore.ErrNotFound) {
 		return nil, "", fmt.Errorf("kein Secret für %q in der Keychain – neu koppeln mit wpsync pair", site.Name)
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("Secret für %q nicht lesbar: %w", site.Name, err)
 	}
 	return site, secret, nil
 }
