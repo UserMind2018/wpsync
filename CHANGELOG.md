@@ -3,67 +3,12 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unveröffentlicht] · Agent 0.4.0
+## [0.2.0] – 2026-10-06 · Agent 0.4.0
 
 **Agent und CLI gemeinsam aktualisieren.** `wpsync push` braucht Agent 0.4.0. Pull, Scan und
-Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
-
-### Neu
-- **Code pushen:** `wpsync push <site> code` bringt lokal geänderte Plugins, Themes und
-  mu-plugins als ganze Verzeichnisse auf die Site. Hochgeladen werden nur geänderte Dateien,
-  getauscht wird per `rename`, das alte Verzeichnis bleibt als Snapshot.
-- **Lokal neue Verzeichnisse** (vom letzten Pull nicht geliefert) gehen nur mit, wenn sie
-  ausdrücklich genannt sind (`wpsync push <site> code plugins/<slug>`); ohne Nennung meldet die
-  CLI sie als übersprungen. Liegt ein gleichnamiges Verzeichnis schon auf der Site, ist das ein
-  Konflikt.
-- **Push-Fenster:** Schreiben geht nur, solange ein Administrator im WP-Admin für das Gerät ein
-  Fenster geöffnet hat (15 Minuten, 1 Stunde oder 8 Stunden).
-- **Health-Check und automatischer Rollback:** Die CLI ruft Startseite, Login und bei
-  WooCommerce Shop, Warenkorb und Kasse vor und nach dem Tausch auf und rollt zurück, wenn eine
-  Seite schlechter wird. Weitere Seiten: `health_urls` in der Site-Konfiguration.
-- **`rescue.php`:** Rollback ohne WordPress, falls der gepushte Code die Site lahmlegt – nur für
-  den unbestätigten Push (nach dem Tausch, vor der Bestätigung).
-- **`wpsync rollback <site> [push-id]`** und **`wpsync pushes <site>`**; Snapshots der letzten
-  3 bestätigten Pushes bleiben bis zu 14 Tage.
-- **Konflikterkennung:** Hat sich eine Einheit auf der Site seit dem letzten Pull geändert,
-  bricht der Push ab (`--force` überschreibt bewusst).
-- **Admin-Seite:** Push-Fenster pro Gerät, Protokoll der Pushes, Zurückrollen.
-
-### Geändert
-- Der Agent ist nicht mehr rein lesend: im Push-Fenster schreibt er Code-Verzeichnisse unter
-  `wp-content/plugins`, `themes` und `mu-plugins`. Datenbank und Uploads schreibt er weiterhin nie.
-- `/ping` und `/delta` liefern `health_urls`.
-- Neue eigene Tabelle `wpsync_pushes`, neue Spalte `push_until` in `wpsync_pairings`, neuer
-  Ordner `wp-content/wpsync-push-<zufall>/`. Alles davon bleibt bei Pull und Scan auf dem Server.
-- Das Plugin-ZIP enthält zusätzlich `rescue.php`.
-
-### Sicherheit
-- Der Header `X-Wpsync-Timestamp` muss aus 1–10 Ziffern bestehen; Werte wie `<ts>abc`,
-  ` <ts>` oder `+<ts>` lehnt der Agent mit 401 ab (SEC-129).
-- Angaben der Site in den Ausgaben von `push`, `pushes` und `rollback` (Pfade, Versionen, Gerät,
-  Push-ID, Health-URLs, Fehler von `rescue.php`) erscheinen wie bei `pull` maskiert in
-  Anführungszeichen; Steuerzeichen erreichen das Terminal nicht.
-- Health-Seiten des Agenten ruft `push` nur auf der gekoppelten Site ab (gleiches Schema, gleicher
-  Host mit Port), `health_urls` der Site-Konfiguration nur über http(s); Weiterleitungen nur auf
-  denselben Host. Andere Seiten werden mit Hinweis verworfen.
-- Ein bestätigter Push lässt sich über `/push/rollback` nur bei offenem Push-Fenster des Geräts
-  zurückrollen (sonst 403 `wpsync_push_window`, kein Umweg über `rescue.php`); ein unbestätigter
-  immer. Im WP-Admin geht der Rollback weiterhin ohne Fenster (U18).
-- `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
-  Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
-  des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.
-- `push` bricht ab, wenn `public`, `wp-content` oder `plugins`/`themes`/`mu-plugins` ein Symlink
-  ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan, bricht der
-  Push vor dem Tausch ab. Ist eine Einheit selbst ein Symlink (z. B. `plugins/x`), überspringt
-  `push` sie mit Hinweis und liest sie nie; ausdrücklich genannt bricht der Push ab (U19).
-- Fehlermeldungen des Agenten (Code, Text, Weiterleitungsziel) erreichen das Terminal ohne
-  Steuer- und Bidi-Zeichen; Umlaute bleiben lesbar. Gilt zentral für alle Befehle.
-- Dateinamen mit C1- oder Bidi-Steuerzeichen pusht die CLI nicht und lehnt der Agent ab; die
-  Dateiliste im Push-Plan zeigt Namen nur maskiert, wenn sie nicht sicher darstellbar sind.
-
-## [Unveröffentlicht]
-
-**Nur CLI, Agent unverändert.**
+Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus. Die CLI schließt
+zusätzlich mehrere Wege, über die Code einer gezogenen Site den Mac erreichen konnte (siehe
+Sicherheit).
 
 ### Sicherheit
 - Der DB-Import führte Client-Kommandos aus dem Dump der Site aus: Eine Zeile `\! …` lief als
@@ -99,23 +44,73 @@ Status funktionieren mit dem neuen Agent auch von einer älteren CLI aus.
   bei jedem Pull gemeldet. Ordner mit eigenem `.git` (z. B. ein Plugin als Git-Checkout) lässt der
   Schnappschuss aus und meldet sie: Ab dem zweiten Pull hätte git darin sonst deren Config und Hooks
   ausgeführt. Ein solches Repo ohne Commit lässt den Schnappschuss auch nicht mehr scheitern
+- Der Header `X-Wpsync-Timestamp` muss aus 1–10 Ziffern bestehen; Werte wie `<ts>abc`,
+  ` <ts>` oder `+<ts>` lehnt der Agent mit 401 ab (SEC-129).
+- Angaben der Site in den Ausgaben von `push`, `pushes` und `rollback` (Pfade, Versionen, Gerät,
+  Push-ID, Health-URLs, Fehler von `rescue.php`) erscheinen wie bei `pull` maskiert in
+  Anführungszeichen; Steuerzeichen erreichen das Terminal nicht.
+- Health-Seiten des Agenten ruft `push` nur auf der gekoppelten Site ab (gleiches Schema, gleicher
+  Host mit Port), `health_urls` der Site-Konfiguration nur über http(s); Weiterleitungen nur auf
+  denselben Host. Andere Seiten werden mit Hinweis verworfen.
+- Ein bestätigter Push lässt sich über `/push/rollback` nur bei offenem Push-Fenster des Geräts
+  zurückrollen (sonst 403 `wpsync_push_window`, kein Umweg über `rescue.php`); ein unbestätigter
+  immer. Im WP-Admin geht der Rollback weiterhin ohne Fenster (U18).
+- `rollback` über `rescue.php` prüft die Rescue-URL aus dem Journal (`.wpsync/pushes/`, von
+  Containern beschreibbar) erneut gegen die gekoppelte Site der Konfiguration; Push-ID und Salt
+  des Journals müssen das Format des Agenten haben. Sonst kein Aufruf, der Schlüssel bleibt lokal.
+- `push` bricht ab, wenn `public`, `wp-content` oder `plugins`/`themes`/`mu-plugins` ein Symlink
+  ist, und liest Dateien ohne Symlinks zu folgen; ändert sich eine Datei nach dem Scan, bricht der
+  Push vor dem Tausch ab. Ist eine Einheit selbst ein Symlink (z. B. `plugins/x`), überspringt
+  `push` sie mit Hinweis und liest sie nie; ausdrücklich genannt bricht der Push ab (U19).
+- Fehlermeldungen des Agenten (Code, Text, Weiterleitungsziel) erreichen das Terminal ohne
+  Steuer- und Bidi-Zeichen; Umlaute bleiben lesbar. Gilt zentral für alle Befehle.
+- Dateinamen mit C1- oder Bidi-Steuerzeichen pusht die CLI nicht und lehnt der Agent ab; die
+  Dateiliste im Push-Plan zeigt Namen nur maskiert, wenn sie nicht sicher darstellbar sind.
+
+### Neu
+- **Code pushen:** `wpsync push <site> code` bringt lokal geänderte Plugins, Themes und
+  mu-plugins als ganze Verzeichnisse auf die Site. Hochgeladen werden nur geänderte Dateien,
+  getauscht wird per `rename`, das alte Verzeichnis bleibt als Snapshot.
+- **Lokal neue Verzeichnisse** (vom letzten Pull nicht geliefert) gehen nur mit, wenn sie
+  ausdrücklich genannt sind (`wpsync push <site> code plugins/<slug>`); ohne Nennung meldet die
+  CLI sie als übersprungen. Liegt ein gleichnamiges Verzeichnis schon auf der Site, ist das ein
+  Konflikt.
+- **Push-Fenster:** Schreiben geht nur, solange ein Administrator im WP-Admin für das Gerät ein
+  Fenster geöffnet hat (15 Minuten, 1 Stunde oder 8 Stunden).
+- **Health-Check und automatischer Rollback:** Die CLI ruft Startseite, Login und bei
+  WooCommerce Shop, Warenkorb und Kasse vor und nach dem Tausch auf und rollt zurück, wenn eine
+  Seite schlechter wird. Weitere Seiten: `health_urls` in der Site-Konfiguration.
+- **`rescue.php`:** Rollback ohne WordPress, falls der gepushte Code die Site lahmlegt – nur für
+  den unbestätigten Push (nach dem Tausch, vor der Bestätigung).
+- **`wpsync rollback <site> [push-id]`** und **`wpsync pushes <site>`**; Snapshots der letzten
+  3 bestätigten Pushes bleiben bis zu 14 Tage.
+- **Konflikterkennung:** Hat sich eine Einheit auf der Site seit dem letzten Pull geändert,
+  bricht der Push ab (`--force` überschreibt bewusst).
+- **Admin-Seite:** Push-Fenster pro Gerät, Protokoll der Pushes, Zurückrollen.
+- `wpsync trust <site>`: Abweichungen in `.ddev` ansehen (Hooks, Host-Kommandos und Mounts
+  hervorgehoben) und freigeben; ohne Terminal nur mit `--fingerprint`, nie über `--yes`
 
 ### Geändert
+- Der Agent ist nicht mehr rein lesend: im Push-Fenster schreibt er Code-Verzeichnisse unter
+  `wp-content/plugins`, `themes` und `mu-plugins`. Datenbank und Uploads schreibt er weiterhin nie.
+- `/ping` und `/delta` liefern `health_urls`.
+- Neue eigene Tabelle `wpsync_pushes`, neue Spalte `push_until` in `wpsync_pairings`, neuer
+  Ordner `wp-content/wpsync-push-<zufall>/`. Alles davon bleibt bei Pull und Scan auf dem Server.
+- Das Plugin-ZIP enthält zusätzlich `rescue.php`.
 - Das bisherige `.git` im Site-Ordner verschiebt der erste Pull nach dem Update unverändert nach
   `~/wpsync-sites/.wpsync-git/<site>.alt-<datum>.git`, ohne darin git auszuführen. Die Historie
   beginnt neu; `git log` im Site-Ordner zeigt nichts mehr (Historie: siehe README › Lokale Ablage)
 
-### Neu
-- `wpsync trust <site>`: Abweichungen in `.ddev` ansehen (Hooks, Host-Kommandos und Mounts
-  hervorgehoben) und freigeben; ohne Terminal nur mit `--fingerprint`, nie über `--yes`
-
-**Zu tun nach dem Update:** CLI aktualisieren. Der erste Pull jeder bestehenden Site stoppt
-deren Container ohne ddev, fragt einmal nach der Übernahme des heutigen `.ddev` (ohne Terminal:
-`wpsync trust <site>`) und startet DDEV neu. Eigene Anpassungen in `.ddev` (Add-ons,
-`config.local.yaml`, eigene Compose-Dateien) später jeweils einmal mit `wpsync trust` freigeben.
-Braucht das `docker`-CLI. Das verschobene alte Git-Repo (`.wpsync-git/<site>.alt-<datum>.git`)
-wird nicht mehr gebraucht und darf gelöscht werden – nicht mit git öffnen, die Site konnte es
-verändern.
+### Zu tun nach dem Update
+- **CLI aktualisieren** (`brew update && brew upgrade wpsync`). Braucht das `docker`-CLI.
+- **Agent 0.4.0 installieren** auf den gekoppelten Sites (Plugin-ZIP im WP-Admin hochladen und
+  ersetzen); `wpsync push` braucht ihn.
+- **Einmal je Site `.ddev` freigeben:** Der erste Pull jeder bestehenden Site stoppt deren
+  Container ohne ddev, fragt einmal nach der Übernahme des heutigen `.ddev` (ohne Terminal:
+  `wpsync trust <site>`) und startet DDEV neu. Eigene Anpassungen in `.ddev` (Add-ons,
+  `config.local.yaml`, eigene Compose-Dateien) später jeweils einmal mit `wpsync trust` freigeben.
+- Das verschobene alte Git-Repo (`.wpsync-git/<site>.alt-<datum>.git`) wird nicht mehr
+  gebraucht und darf gelöscht werden – nicht mit git öffnen, die Site konnte es verändern.
 
 ## [0.1.8] – 2026-10-05 · Agent 0.3.1
 
