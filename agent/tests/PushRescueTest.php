@@ -53,7 +53,7 @@ final class PushRescueTest extends TestCase
     /** @return array{0: int, 1: array<string, mixed>} */
     private function post(string $id, string $key, int $now = 1000): array
     {
-        return PushRescue::handle($this->content, ['action' => 'rollback', 'push_id' => $id, 'key' => $key], $now);
+        return PushRescue::handle([$this->content], ['action' => 'rollback', 'push_id' => $id, 'key' => $key], $now);
     }
 
     public function testIdAndKey(): void
@@ -71,7 +71,7 @@ final class PushRescueTest extends TestCase
 
     public function testPingNeedsNoKey(): void
     {
-        $this->assertSame([200, ['ok' => true]], PushRescue::handle($this->content, ['action' => 'ping'], 1000));
+        $this->assertSame([200, ['ok' => true]], PushRescue::handle([$this->content], ['action' => 'ping'], 1000));
     }
 
     /** AC-64 */
@@ -112,8 +112,8 @@ final class PushRescueTest extends TestCase
     {
         $this->assertSame(404, $this->post(self::OTHER, $this->key)[0]);
         $this->assertSame(400, $this->post('../../etc', $this->key)[0]);
-        $this->assertSame(400, PushRescue::handle($this->content, ['action' => 'delete'], 1000)[0]);
-        $this->assertSame(400, PushRescue::handle($this->content, ['action' => 'rollback', 'push_id' => ['x'], 'key' => ['y']], 1000)[0]);
+        $this->assertSame(400, PushRescue::handle([$this->content], ['action' => 'delete'], 1000)[0]);
+        $this->assertSame(400, PushRescue::handle([$this->content], ['action' => 'rollback', 'push_id' => ['x'], 'key' => ['y']], 1000)[0]);
     }
 
     public function testRollbackOfANewUnitRemovesIt(): void
