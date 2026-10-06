@@ -1,6 +1,7 @@
 package pull
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,53 @@ type Options struct {
 	RowsPerChunk    int
 	FileBundleBytes int64
 	DBBundleBytes   int64
+	// Ctx ends the pull resumably (SIGTERM in the server mode); nil = never.
+	Ctx context.Context
+	// Progress reports phase progress for pull --json; nil = none.
+	Progress func(phase string, done, total int)
+	// Report receives the summary of a successful pull; nil = not needed.
+	Report *Result
+}
+
+// Phases reported through Options.Progress (Spec Server-Modus §4).
+const (
+	PhaseDelta      = "delta"
+	PhaseSetup      = "setup"
+	PhaseFiles      = "files"
+	PhaseDBDownload = "db_download"
+	PhaseDBImport   = "db_import"
+	PhasePostSetup  = "postsetup"
+	PhaseMailguard  = "mailguard"
+)
+
+// Result summarizes a pull for --json.
+type Result struct {
+	FirstPull          bool   `json:"first_pull"`
+	FilesChanged       int    `json:"files_changed"`
+	FilesDeleted       int    `json:"files_deleted"`
+	TablesLoaded       int    `json:"tables_loaded"`
+	TablesTotal        int    `json:"tables_total"`
+	Requests           int    `json:"requests"`
+	BytesIn            int64  `json:"bytes_in"`
+	DurationMS         int64  `json:"duration_ms"`
+	LocalURL           string `json:"local_url"`
+	AgentVersion       string `json:"agent_version"`
+	LocalAdminUser     string `json:"local_admin_user,omitempty"`
+	LocalAdminPassword string `json:"local_admin_password,omitempty"`
+}
+
+func (o *Options) progress(phase string, done, total int) {
+	if o.Progress != nil {
+		o.Progress(phase, done, total)
+	}
+}
+
+// interrupted reports a cancelled Ctx as ErrInterrupted.
+func (o *Options) interrupted() error {
+	if o.Ctx != nil && o.Ctx.Err() != nil {
+		return ErrInterrupted
+	}
+	return nil
 }
 
 // dirs resolves site folder and docroot.
@@ -68,6 +116,19 @@ var ErrNoProfile = errors.New("noch kein Pull-Profil")
 
 // ErrNoInfosheet: the agent has not built an inventory yet.
 var ErrNoInfosheet = errors.New("die Site hat noch kein Infosheet")
+
+// ErrNeedsConfirmation: a question would be needed, but there is no terminal and no --yes.
+var ErrNeedsConfirmation = errors.New("das Profil kennt neue Tabellen/Plugins nicht")
+
+// ErrInterrupted: the pull was cancelled (SIGTERM); downloaded files and tables are kept and the
+// next pull continues (exit code interrupted).
+var ErrInterrupted = errors.New("Pull abgebrochen – der nächste Pull setzt fort")
+
+// PostSetupError: search-replace, local settings or the mailguard check failed (exit code postsetup_failed).
+type PostSetupError struct{ Err error }
+
+func (e *PostSetupError) Error() string { return "Post-Setup fehlgeschlagen: " + e.Err.Error() }
+func (e *PostSetupError) Unwrap() error { return e.Err }
 
 // ErrAborted: the user declined to continue (also the declined .ddev takeover of the DDEV driver).
 var ErrAborted = localenv.ErrAborted
@@ -106,7 +167,7 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 		if ask {
 			if !o.Yes {
 				if o.Confirm == nil {
-					return nil, errors.New("das Profil kennt neue Tabellen/Plugins nicht – mit --yes bestätigen oder wpsync scan ausführen")
+					return nil, fmt.Errorf("%w – mit --yes bestätigen oder wpsync scan ausführen", ErrNeedsConfirmation)
 				}
 				if !o.Confirm("Mit diesem Profil fortfahren?") {
 					return nil, ErrAborted
@@ -133,7 +194,7 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	}
 	if !o.NoAnonymize && delta.Env.Anon == "" {
 		// An agent before 0.3.0 ignores the scope field and would send plain data (AC-36).
-		return nil, ErrAgentCannotAnonymize
+		return nil, &agentapi.OutdatedError{Installed: delta.Env.AgentVersion, Required: agentapi.MinAgentVersion, Err: ErrAgentCannotAnonymize}
 	}
 	class := make(map[string]string, len(sheet.Tables))
 	for _, t := range sheet.Tables {
@@ -171,7 +232,16 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 }
 
 // Run pulls the site into its local environment (Options.Driver) within the profile's scope.
+// A cancelled Ctx ends it with ErrInterrupted; the next pull continues where this one stopped.
 func Run(o Options) error {
+	err := run(o)
+	if err != nil && o.interrupted() != nil && !errors.Is(err, ErrInterrupted) {
+		return fmt.Errorf("%w (%v)", ErrInterrupted, err)
+	}
+	return err
+}
+
+func run(o Options) error {
 	if o.NoAnonymize && !o.Yes {
 		if o.Confirm == nil {
 			return ErrPlainNeedsConfirmation
@@ -185,6 +255,7 @@ func Run(o Options) error {
 		return err
 	}
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
+	client.Ctx = o.Ctx
 	drv, name := o.Driver, o.Site.Name
 	timer := newPhaseTimer(client, o.Out)
 	started := time.Now()
@@ -200,6 +271,7 @@ func Run(o Options) error {
 		fmt.Fprintf(o.Out, "  ! übersprungen (größer als 256 MB): %s (%.0f MB)\n", s.Path, float64(s.Size)/(1<<20))
 	}
 	timer.done("Delta")
+	o.progress(PhaseDelta, 1, 1)
 
 	base, err := baseline.Load(siteDir)
 	if err != nil {
@@ -209,27 +281,31 @@ func Run(o Options) error {
 		base = baseline.New(o.Site.URL)
 	}
 
-	if err := drv.Configure(delta.Env); err != nil {
+	if err := o.interrupted(); err != nil {
 		return err
+	}
+	if err := drv.Configure(delta.Env); err != nil {
+		return localenv.Wrap("configure", err)
 	}
 	runner := drv.Runner(name)
 	exists, err := drv.Exists(name)
 	if err != nil {
-		return err
+		return localenv.Wrap("exists", err)
 	}
 	if !exists {
 		if err := drv.Setup(name); err != nil {
-			return err
+			return localenv.Wrap("setup", err)
 		}
 		timer.done("Setup")
 	} else if err := drv.Start(name); err != nil {
-		return err
+		return localenv.Wrap("start", err)
 	}
 	if up, ok := drv.(localenv.UploadsProxy); ok {
 		if err := up.UploadsProxy(name, o.Site.URL, agentapi.UserAgent(), o.Site.Profile.Uploads.Proxy); err != nil {
-			return err
+			return localenv.Wrap("uploads proxy", err)
 		}
 	}
+	o.progress(PhaseSetup, 1, 1)
 
 	var present func(agentapi.File) bool
 	if !o.Full {
@@ -238,44 +314,56 @@ func Run(o Options) error {
 	changed, deleted := DiffFiles(delta.Files, base, present)
 	deleted = inScope(deleted, p.scope)
 	fmt.Fprintf(o.Out, "Dateien: %d neu/geändert, %d gelöscht\n", len(changed), len(deleted))
-	if err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out); err != nil {
+	o.progress(PhaseFiles, 0, len(changed))
+	fileProgress := func(done, total int) { o.progress(PhaseFiles, done, total) }
+	if err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out, fileProgress); err != nil {
 		return err
 	}
 	RemoveFiles(docroot, deleted)
 	RemoveDropIns(docroot)
 	timer.done("Dateien")
+	if err := o.interrupted(); err != nil {
+		return err
+	}
 
 	tables := ChangedTables(delta.Tables, base)
 	fmt.Fprintf(o.Out, "Tabellen: %d von %d neu zu laden\n", len(tables), len(delta.Tables))
 	if len(tables) > 0 {
 		dir := filepath.Join(siteDir, ".wpsync", "db", "tables")
-		opts := DBOptions{RowsPerChunk: o.RowsPerChunk, BundleBytes: o.DBBundleBytes, Scope: p.scope}
+		opts := DBOptions{RowsPerChunk: o.RowsPerChunk, BundleBytes: o.DBBundleBytes, Scope: p.scope,
+			Progress: func(done, total int) { o.progress(PhaseDBDownload, done, total) }}
 		if err := DownloadTables(client, dir, tables, opts); err != nil {
 			return err
 		}
 		timer.done("DB-Download")
-
-		if err := importTables(runner, dir, tables); err != nil {
+		if err := o.interrupted(); err != nil {
 			return err
 		}
+
+		if err := importTables(runner, dir, tables); err != nil {
+			return localenv.Wrap("db import", err)
+		}
 		timer.done("DB-Import")
+		o.progress(PhaseDBImport, 1, 1)
 
 		localURL, err := drv.LocalURL(name)
 		if err != nil {
-			return err
+			return localenv.Wrap("local url", err)
 		}
 		setup := PostSetupOptions{ExcludedPlugins: p.scope.ExcludePlugins, LocalAdmin: !o.NoAnonymize}
 		if err := PostSetup(runner, delta.Env, localURL, setup, o.Out); err != nil {
-			return err
+			return &PostSetupError{Err: err}
 		}
 		timer.done("Post-Setup")
+		o.progress(PhasePostSetup, 1, 1)
 	}
 
 	if err := MailguardCheck(runner); err != nil {
 		_, _ = drv.Stop(name)
-		return err
+		return &PostSetupError{Err: err}
 	}
 	fmt.Fprintln(o.Out, "  local-mailguard aktiv ✓")
+	o.progress(PhaseMailguard, 1, 1)
 
 	next := baseline.New(o.Site.URL)
 	for _, f := range delta.Files {
@@ -296,7 +384,18 @@ func Run(o Options) error {
 
 	localURL, err := drv.LocalURL(name)
 	if err != nil {
-		return err
+		return localenv.Wrap("local url", err)
+	}
+	if o.Report != nil {
+		*o.Report = Result{
+			FirstPull: !exists, FilesChanged: len(changed), FilesDeleted: len(deleted),
+			TablesLoaded: len(tables), TablesTotal: len(delta.Tables),
+			Requests: client.Stats.Requests, BytesIn: client.Stats.BytesIn,
+			DurationMS: time.Since(started).Milliseconds(), LocalURL: localURL, AgentVersion: delta.Env.AgentVersion,
+		}
+		if !o.NoAnonymize {
+			o.Report.LocalAdminUser, o.Report.LocalAdminPassword = LocalAdminUser, LocalAdminPassword
+		}
 	}
 	fmt.Fprintf(o.Out, "\n✓ Fertig in %s – %d Requests, %.1f MB übertragen\n  %s\n",
 		time.Since(started).Round(time.Millisecond), client.Stats.Requests, float64(client.Stats.BytesIn)/(1<<20), localURL)

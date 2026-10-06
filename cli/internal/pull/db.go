@@ -16,6 +16,8 @@ type DBOptions struct {
 	RowsPerChunk int
 	BundleBytes  int64
 	Scope        agentapi.Scope
+	// Progress (may be nil) gets the number of finished tables, already downloaded ones included.
+	Progress func(done, total int)
 }
 
 const (
@@ -35,11 +37,18 @@ func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o D
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	done := 0
+	tick := func() {
+		done++
+		if o.Progress != nil {
+			o.Progress(done, len(tables))
+		}
+	}
 	var small, large []agentapi.Table
 	for _, t := range tables {
 		switch {
 		case markerMatches(dir, t):
-			continue
+			tick()
 		case t.Mode == profile.ModeStructure || (t.Rows <= int64(o.RowsPerChunk) && t.Bytes <= o.BundleBytes):
 			small = append(small, t)
 		default:
@@ -47,7 +56,7 @@ func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o D
 		}
 	}
 	for _, group := range tableGroups(small, o.BundleBytes) {
-		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope); err != nil {
+		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope, tick); err != nil {
 			return err
 		}
 	}
@@ -55,6 +64,7 @@ func DownloadTables(c *agentapi.Client, dir string, tables []agentapi.Table, o D
 		if err := fetchChunks(c, dir, t, o.RowsPerChunk, o.Scope); err != nil {
 			return err
 		}
+		tick()
 	}
 	return nil
 }
@@ -85,7 +95,7 @@ func transferBytes(t agentapi.Table) int64 {
 	return t.Bytes
 }
 
-func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit int, scope agentapi.Scope) error {
+func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit int, scope agentapi.Scope, tick func()) error {
 	byName := map[string]agentapi.Table{}
 	remaining := make([]string, 0, len(group))
 	for _, t := range group {
@@ -98,7 +108,11 @@ func fetchBundles(c *agentapi.Client, dir string, group []agentapi.Table, limit 
 			if !ok {
 				return fmt.Errorf("unexpected table %s", name)
 			}
-			return storeTable(dir, t, sql)
+			if err := storeTable(dir, t, sql); err != nil {
+				return err
+			}
+			tick()
+			return nil
 		})
 		if err != nil {
 			return err

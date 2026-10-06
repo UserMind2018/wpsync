@@ -12,7 +12,8 @@ import (
 )
 
 // DownloadFiles fetches files in bundles of at most bundleBytes and writes them below docroot.
-func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer) error {
+// progress (may be nil) gets the number of finished files after every bundle.
+func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer, progress func(done, total int)) error {
 	done := 0
 	for _, group := range bundles(files, bundleBytes) {
 		paths := make([]string, len(group))
@@ -29,6 +30,9 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 		}
 		done += len(group)
 		fmt.Fprintf(out, "  Dateien %d/%d\n", done, len(files))
+		if progress != nil {
+			progress(done, len(files))
+		}
 	}
 	return nil
 }
