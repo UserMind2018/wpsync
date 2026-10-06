@@ -28,7 +28,7 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"no_baseline", push.ErrNoBaseline, cliout.ExitUsage, "zuerst wpsync pull kunde"},
 		{"unpaired", &agentapi.APIError{Status: 401, Code: "wpsync_unpaired"}, cliout.ExitAuthFailed, "neu koppeln"},
 		{"unreachable", fmt.Errorf("%w: request /wpsync/v1/push-begin: dial tcp", agentapi.ErrUnreachable), cliout.ExitAgentUnreachable, "nicht erreichbar"},
-		{"window_closed", push.ErrWindowClosed, cliout.ExitUnknown, "Push-Fenster ist geschlossen"},
+		{"window_closed", push.ErrWindowClosed, cliout.ExitPushWindowClosed, "Push-Fenster ist geschlossen"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

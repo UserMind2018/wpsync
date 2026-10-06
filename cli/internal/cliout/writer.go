@@ -54,6 +54,18 @@ func (w *Writer) Result(command string, data any, err error) int {
 	return f.Exit
 }
 
+// Event writes {"event":<name>,"data":{…}}: the steps of push --json (plan, upload, commit,
+// health) and of the staging commands. Without data the object is empty, never null.
+func (w *Writer) Event(name string, data any) {
+	if data == nil {
+		data = struct{}{}
+	}
+	w.write(struct {
+		Event string `json:"event"`
+		Data  any    `json:"data"`
+	}{name, data})
+}
+
 func (w *Writer) write(v any) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
