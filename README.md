@@ -623,6 +623,13 @@ nichts davon im Docroot:
 
 Historie ansehen: `git --git-dir <slug>/.wpsync/history.git log`.
 
+Im Docroot schreibt wpsync nur unter `wp-content/` und – als einzige Datei ausserhalb davon –
+`<docroot>/.htaccess`: Fehlt sie, legt wpsync bei Setup und jedem Folge-Pull den
+WordPress-Standardblock an (`RewriteBase` aus dem Pfad von `--local-url`, sonst `/`). Ohne die
+Regeln antwortet Apache auf `/wp-json/` mit 404, und der Elementor-Editor lädt nicht. Eine
+vorhandene `.htaccess` (auch Ordner oder Symlink) bleibt unberührt; eigene Regeln legt der
+Aufrufer vorab ab.
+
 ```sh
 printf '%s\n%s\n' "$SECRET" "$DB_PASSWORD" | wpsync pull vorlage --json --yes --secret-stdin \
   --driver container --container ws-dev-vorlage --docroot /srv/ws/dev/vorlage/docroot \

@@ -21,6 +21,9 @@ weiterhin Agent 0.3.0 oder neuer, `push` 0.4.0.
 - `--driver container` für `pull`, `status`, `list`, `stop`: Pull in einen vorhandenen
   WordPress-Container statt in ein DDEV-Projekt; der SQL-Import läuft dort mit derselben Härtung
   (`--binary-mode --local-infile=0`) wie unter DDEV
+- Container-Modus: Fehlt `<docroot>/.htaccess`, legt wpsync den WordPress-Standardblock an
+  (sonst 404 auf `/wp-json/`, Elementor-Editor lädt nicht); eine vorhandene bleibt unberührt.
+  Einzige Datei, die wpsync ausserhalb von `wp-content/` in den Docroot schreibt
 - `scan --uploads-since alle` zieht jedes Upload-Jahr
 - Linux-Binary `wpsync_0.3.0_linux_arm64` mit `.sha256` am GitHub-Release
   (`scripts/build-linux.sh`, reproduzierbar)
@@ -29,6 +32,9 @@ weiterhin Agent 0.3.0 oder neuer, `push` 0.4.0.
 - Feste Exit-Codes für alle Befehle (README → Server-Modus); bisher endete jeder Fehler mit 1,
   Aufruffehler mit 2. Skripte, die nur „≠ 0“ prüfen, sind nicht betroffen
 - SIGTERM bricht einen Pull fortsetzbar ab (Exit 30)
+- Das interne Git führt seine automatische Wartung im Vordergrund aus; ein abgekoppeltes
+  `gc --auto` starb sonst mit einem kurzlebigen Container und blockierte mit `HEAD.lock` den
+  nächsten Pull
 - Ist der Mail-Riegel nach einem Pull nicht aktiv und weicht `.ddev` vom geprüften Stand ab,
   hält wpsync die Container jetzt per `docker stop` an, statt die Site laufen zu lassen
 - Intern: DDEV-Verhalten inklusive `.ddev`-Prüfung steckt hinter einem Laufzeittreiber; auf dem
