@@ -7,11 +7,15 @@ defined('ABSPATH') || exit;
  * Welche Tabellen den Server verlassen dürfen: nur echte Tabellen mit dem eigenen Präfix.
  * Views würden beim Import durch die View in die Basistabelle schreiben (CR-02). Eine zweite
  * Installation in derselben Datenbank, deren Präfix mit dem eigenen beginnt (wp_ / wp_stg_),
- * und jede wpsync-Tabelle – dort liegen Secrets – bleiben draussen (SEC-05).
+ * und jede wpsync-Tabelle – dort liegen Secrets – bleiben draussen (SEC-05). Ebenso die Tabellen
+ * einer Staging-Kopie (Spec Stufe 2b 5.10, Leitplanke 3).
  */
 final class TableList
 {
     private const OWN = '/wpsync_(pairings|nonces|state|pushes)\z/';
+
+    /** Tabellen einer Staging-Kopie: stg<6 Hex>_ (StagingGuard::PREFIX_RE). */
+    private const STAGING = '/^stg[0-9a-f]{6}_/';
 
     /**
      * @param list<array{0: string, 1: string}> $rows   Zeilen aus SHOW FULL TABLES: Name, Typ
@@ -36,6 +40,12 @@ final class TableList
         $out     = [];
         foreach ($names as $name) {
             if (preg_match(self::OWN, $name) === 1) {
+                continue;
+            }
+            // Verwaiste Staging-Tabellen ohne Datensatz: das Muster genügt. Bis hierher kommen sie nur
+            // neben einem Live-Präfix, das Anfang von „stg“ ist ('', s, st, stg – dort gibt es kein
+            // Staging, V14). Reicht das Live-Präfix selbst in den zufälligen Teil, sind es Live-Tabellen.
+            if (strlen($prefix) <= 3 && preg_match(self::STAGING, $name) === 1) {
                 continue;
             }
             foreach ($foreign as $nested) {

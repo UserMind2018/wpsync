@@ -35,6 +35,9 @@ final class Store
 
     /**
      * Tabellen, die exportiert werden dürfen (siehe TableList); pro Request einmal ermittelt.
+     * Die Tabellen einer Staging-Kopie gehören nie dazu (AC-83) – weder für den Pull noch als
+     * Quelle der nächsten Kopie. Staging::hiddenPrefixes() liest über getState(): von dort aus
+     * darf diese Methode nie aufgerufen werden.
      *
      * @return list<string>
      */
@@ -43,7 +46,7 @@ final class Store
         global $wpdb;
         if (self::$dataTables === null) {
             $rows             = (array) $wpdb->get_results("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'", ARRAY_N);
-            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix);
+            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix, Staging::hiddenPrefixes());
         }
         return self::$dataTables;
     }

@@ -126,6 +126,8 @@ final class FileWalkerTest extends TestCase
             'wp-content/uploads/dump.sql',
             'wp-content/uploads/sec-debug.LOG',
             'wp-content/plugins/foo/.svn/entries',
+            'wp-content/wpsync-staging-0123456789ab/wp-config.php', // Staging-Kopie, am Namen erkannt (Spec 2b 5.10)
+            'wp-content/uploads/wpsync-staging-0123456789ab/wp-content/uploads/a.jpg',
             'wp-content/plugins/foo/install.sql',
             'wp-content/themes/t/style.css',
         ] as $path) {

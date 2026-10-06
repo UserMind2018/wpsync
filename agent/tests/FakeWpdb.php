@@ -85,6 +85,16 @@ final class FakeWpdb
     }
 
     /**
+     * @param array<string, mixed> $data
+     * @param array<string, mixed> $where
+     * @return int|bool
+     */
+    public function update(string $table, array $data, array $where)
+    {
+        return $this->query('UPDATE `' . $table . '` SET ' . json_encode($data) . ' WHERE ' . json_encode($where));
+    }
+
+    /**
      * @param mixed $output
      * @return list<array<string, string|null>>|null
      */

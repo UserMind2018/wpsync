@@ -33,6 +33,9 @@ final class Rest
 
     public static function routes(): void
     {
+        if (self::inStagingCopy()) {
+            return;
+        }
         register_rest_route(self::NS, '/pair', [
             'methods'             => 'POST',
             'callback'            => [self::class, 'pair'],
@@ -52,6 +55,12 @@ final class Rest
             'push/confirm'      => 'pushConfirm',
             'push/rollback'     => 'pushRollback',
             'push/list'         => 'pushList',
+            // Staging (Spec 2b 5.2): dieselbe Signaturprüfung, kein Push-Fenster (S6). /staging/login macht
+            // den Aufrufer zum Administrator der Kopie – es gibt dafür keinen anderen Weg als diesen.
+            'staging/begin'     => 'stagingBegin',
+            'staging/step'      => 'stagingStep',
+            'staging/status'    => 'stagingStatus',
+            'staging/login'     => 'stagingLogin',
         ];
         foreach ($signed as $route => $method) {
             register_rest_route(self::NS, '/' . $route, [
@@ -70,11 +79,28 @@ final class Rest
      */
     public static function auth(\WP_REST_Request $request)
     {
+        if (self::inStagingCopy()) {
+            return self::stagingCopyError();
+        }
         if (self::$authRequest !== $request) {
             self::$authRequest = $request;
             self::$authResult  = self::authenticate($request);
         }
         return self::$authResult;
+    }
+
+    /**
+     * Ein Agent läuft nie in einer Staging-Kopie (Spec 2b 5.10) – dort gäbe es sonst einen Weg zurück
+     * nach Live. wpsync-agent.php bricht dort schon ab; das hier gilt, falls die Klassen doch geladen werden.
+     */
+    private static function inStagingCopy(): bool
+    {
+        return defined('WPSYNC_STAGING');
+    }
+
+    private static function stagingCopyError(): \WP_Error
+    {
+        return new \WP_Error('wpsync_staging_copy', 'Der wpsync Agent antwortet in einer Staging-Kopie nicht.', ['status' => 403]);
     }
 
     /** Ohne TLS liefen Secret (Pairing) und Dumps im Klartext (SEC-03). */
@@ -134,6 +160,9 @@ final class Rest
     public static function pair(\WP_REST_Request $request)
     {
         global $wpdb;
+        if (self::inStagingCopy()) {
+            return self::stagingCopyError();
+        }
         $tls = self::requireTls();
         if ($tls !== null) {
             return $tls;
@@ -257,6 +286,29 @@ final class Rest
         return Push::index();
     }
 
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function stagingBegin(\WP_REST_Request $request)
+    {
+        return Staging::begin(self::json($request));
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function stagingStep(\WP_REST_Request $request)
+    {
+        return Staging::step(self::json($request));
+    }
+
+    public static function stagingStatus(): \WP_REST_Response
+    {
+        return Staging::status();
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function stagingLogin()
+    {
+        return Staging::login();
+    }
+
     /**
      * Der ganze signierte JSON-Body (SEC-07: nie der Query-String).
      *
@@ -286,6 +338,7 @@ final class Rest
             'agent_version'      => WPSYNC_VERSION,
             'anon'               => Anonymizer::id(Store::anonKey()),
             'health_urls'        => Push::healthUrls(),
+            'staging'            => Staging::summary(),
         ];
     }
 

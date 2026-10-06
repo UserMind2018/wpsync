@@ -121,4 +121,20 @@ final class SizeScanTest extends TestCase
         $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
         $this->assertSame([['path' => 'wp-content/uploads/2025/huge.mp4', 'bytes' => Excludes::MAX_FILE_BYTES + 1]], $page['large']);
     }
+
+    /** Spec 2b 5.10: eine Staging-Kopie (oder ihr Rest) zählt im Infosheet nicht mit und wird nicht genannt. */
+    public function testStagingCopyIsNeitherCountedNorNamed(): void
+    {
+        foreach (['wpsync-staging-0123456789ab/wp-config.php', 'uploads/WPSYNC-staging-0123456789ab/wp-content/big.bin'] as $path) {
+            mkdir(dirname($this->dir . '/' . $path), 0777, true);
+            file_put_contents($this->dir . '/' . $path, 'x');
+        }
+        $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
+        $this->assertNull($page['next']);
+        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+        foreach (array_keys($page['buckets']) as $bucket) {
+            $this->assertStringNotContainsStringIgnoringCase('wpsync-staging', (string) $bucket);
+        }
+        $this->assertSame(['files' => 1, 'bytes' => 4], $page['buckets']['uploads/other']);
+    }
 }
