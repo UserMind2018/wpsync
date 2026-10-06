@@ -18,6 +18,12 @@ final class Admin
         Push::EXPIRED           => 'verfallen',
     ];
 
+    private const SECRET_STATE = [
+        Store::SECRET_SEALED => 'verschlüsselt',
+        Store::SECRET_PLAIN  => 'Klartext',
+        Store::SECRET_BROKEN => 'nicht entschlüsselbar – neu koppeln',
+    ];
+
     public static function register(): void
     {
         add_action('admin_menu', static function (): void {
@@ -65,6 +71,7 @@ final class Admin
         <div class="wrap">
             <h1>wpsync</h1>
             <p>Schnittstelle für <code>wpsync pull</code> (Live → Lokal) und <code>wpsync push</code> (Code, nur im Push-Fenster).</p>
+            <?php self::keyNotices(); ?>
 
             <h2>Neues Gerät koppeln</h2>
             <?php if ($code !== null) : ?>
@@ -82,14 +89,20 @@ final class Admin
 
             <h2>Gekoppelte Geräte</h2>
             <p>Ein Gerät kann Code nur pushen, solange sein Push-Fenster offen ist. Das Fenster schliesst sich von selbst.</p>
+            <p>Die Secrets der Geräte liegen verschlüsselt in der Datenbank. Der Schlüssel stammt aus <code>wp-config.php</code>:
+                aus <code>WPSYNC_KEY</code>, sonst aus <code>AUTH_KEY</code> und <code>SECURE_AUTH_KEY</code>.
+                Werden diese WordPress-Salts erneuert (das tun auch manche Sicherheits-Plugins), müssen alle Geräte neu
+                gekoppelt werden. Empfehlung: in <code>wp-config.php</code> einen eigenen Schlüssel mit mindestens
+                32 zufälligen Zeichen setzen, etwa <code>define('WPSYNC_KEY', '…');</code> – bestehende Kopplungen bleiben dabei gültig.</p>
             <table class="widefat striped">
-                <thead><tr><th>Gerät</th><th>Gekoppelt</th><th>Zuletzt benutzt</th><th>Push-Fenster</th><th></th></tr></thead>
+                <thead><tr><th>Gerät</th><th>Gekoppelt</th><th>Zuletzt benutzt</th><th>Secret</th><th>Push-Fenster</th><th></th></tr></thead>
                 <tbody>
                 <?php foreach (Store::pairings() as $pairing) : ?>
                     <tr>
                         <td><?php echo esc_html($pairing['device']); ?></td>
                         <td><?php echo esc_html(wp_date('d.m.Y H:i', $pairing['created'])); ?></td>
                         <td><?php echo $pairing['last_used'] === null ? '–' : esc_html(wp_date('d.m.Y H:i', $pairing['last_used'])); ?></td>
+                        <td<?php echo $pairing['secret_state'] === Store::SECRET_SEALED ? '' : ' style="color:#b32d2e"'; ?>><?php echo esc_html(self::SECRET_STATE[$pairing['secret_state']] ?? $pairing['secret_state']); ?></td>
                         <td>
                             <?php echo esc_html(PushWindow::label($pairing['push_until'], $now)); ?>
                             <form method="post" style="display:inline-block;margin-left:1em">
@@ -157,6 +170,19 @@ final class Admin
             <?php endif; ?>
         </div>
         <?php
+    }
+
+    /** Warnt, wenn neue Secrets im Klartext landen würden (SEC-006). */
+    private static function keyNotices(): void
+    {
+        if (SecretKey::ownKeyTooShort()) {
+            self::notice('warning', 'WPSYNC_KEY ist kürzer als ' . SecretKey::MIN_LENGTH . ' Zeichen und wird ignoriert.');
+        }
+        if (SecretKey::current() === null) {
+            self::notice('error', 'Pairing-Secrets liegen im Klartext – AUTH_KEY/SECURE_AUTH_KEY fehlen oder sind Standardwerte; WPSYNC_KEY in wp-config.php setzen.');
+        } elseif (!Store::secretColumnFits()) {
+            self::notice('error', 'Pairing-Secrets liegen im Klartext – die Tabelle ' . Store::table('pairings') . ' liess sich nicht erweitern (ALTER TABLE). Datenbankrechte prüfen, dann das Plugin deaktivieren und wieder aktivieren (entfernt alle Kopplungen).');
+        }
     }
 
     /** @param array<string, mixed> $unit */
