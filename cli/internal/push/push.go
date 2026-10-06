@@ -16,7 +16,9 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/localgit"
+	"github.com/usermind/wpsync/internal/sitelock"
 	"github.com/usermind/wpsync/internal/sites"
 )
 
@@ -109,7 +111,11 @@ func (o Options) defaults() Options {
 			out = io.Discard
 		}
 		// The snapshot repo lives next to the site folder (localgit.GitDir), never inside it.
+		// It runs under the site lock (Run, Rollback), so git locks of a killed run are cleared first.
 		o.Commit = func(siteDir, message string) error {
+			if err := localgit.ClearStaleLocks(localgit.GitDir(filepath.Dir(siteDir), filepath.Base(siteDir))); err != nil {
+				return err
+			}
 			return localgit.Commit(filepath.Dir(siteDir), filepath.Base(siteDir), message, out)
 		}
 	}
@@ -117,6 +123,15 @@ func (o Options) defaults() Options {
 		o.ChunkBytes = 3 << 20
 	}
 	return o
+}
+
+// lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site.
+func lock(o Options) (func(), error) {
+	l, err := sitelock.Acquire(sitelock.Path(o.SitesRoot, o.Site.Name, ""))
+	if err != nil {
+		return nil, localenv.Wrap("lock", err)
+	}
+	return func() { l.Close() }, nil
 }
 
 // pause keeps the health check as gentle as the pull: one request per 1/RPS seconds.
@@ -161,6 +176,11 @@ func AtLeast(version, minimum string) bool {
 
 // Run pushes the locally changed units of a site (Spec Stufe 2, 6.3).
 func Run(o Options) error {
+	unlock, err := lock(o)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o = o.defaults()
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
 	docroot := filepath.Join(siteDir, "public")

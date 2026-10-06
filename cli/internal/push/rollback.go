@@ -80,6 +80,11 @@ func ConfirmPending(o Options, pushID string) error {
 // Rollback takes a push back: through the agent, or through rescue.php when WordPress no longer
 // answers. Without pushID it picks the latest push that still has a snapshot.
 func Rollback(o Options, pushID string) error {
+	unlock, err := lock(o)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o = o.defaults()
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
 	if pushID == "" {
