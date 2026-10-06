@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,9 +43,18 @@ const stopGrace = 10 * time.Second
 // removeTimeout bounds the docker rm -f after a cancelled run; the pull's own context is done then.
 const removeTimeout = 30 * time.Second
 
-// LabelRun marks every docker run of wpsync with its site, so a pull finds runs that outlived a
-// killed predecessor (RemoveOrphans).
+// LabelRun marks every docker run of wpsync with RunKey of its site folder, so a pull finds runs
+// that outlived a killed predecessor (RemoveOrphans). The value is the key of the site lock (the
+// site folder <slug>/), not the site name: two slugs with the same site name stay apart.
 const LabelRun = "wpsync.site"
+
+// RunKey is the value of LabelRun: the first 16 hex digits of SHA-256 over the cleaned site folder.
+func RunKey(siteDir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(siteDir)))
+	return hex.EncodeToString(sum[:8])
+}
+
+func (d *Driver) runKey() string { return RunKey(filepath.Dir(filepath.Clean(d.Docroot))) }
 
 // runName names one docker run: wpsync-<site>-<random>. Tests replace it.
 var runName = func(site string) string {
@@ -396,7 +406,7 @@ func (r *runner) translate(args []string) (dockerArgs, env []string, name string
 	}
 	net := "container:" + d.Container
 	name = runName(d.Site)
-	own := []string{"--init", "--name", name, "--label", LabelRun + "=" + d.Site, "--network", net}
+	own := []string{"--init", "--name", name, "--label", LabelRun + "=" + d.runKey(), "--network", net}
 	switch args[0] {
 	case "wp":
 		flags, env := r.wpEnv()
@@ -470,10 +480,10 @@ func (d *Driver) remove(names ...string) error {
 	return nil
 }
 
-// RemoveOrphans removes the docker runs of site that outlived a killed pull (label LabelRun).
-// pull calls it under the site lock, so none of them belongs to a running pull.
-func (d *Driver) RemoveOrphans(site string) error {
-	out, err := d.output("ps", "-aq", "--filter", "label="+LabelRun+"="+site)
+// RemoveOrphans removes the docker runs of this site folder that outlived a killed pull (label
+// LabelRun=RunKey). pull calls it under the site lock, so none of them belongs to a running pull.
+func (d *Driver) RemoveOrphans(string) error {
+	out, err := d.output("ps", "-aq", "--filter", "label="+LabelRun+"="+d.runKey())
 	if err != nil {
 		return err
 	}

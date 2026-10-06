@@ -103,7 +103,7 @@ func TestRunnerRunsWPCLIInTheSiteNetwork(t *testing.T) {
 	if err := d.Runner("vorlage").Run("wp", "option", "get", "siteurl"); err != nil {
 		t.Fatal(err)
 	}
-	want := "run --rm --init --name wpsync-vorlage-test --label wpsync.site=vorlage " +
+	want := "run --rm --init --name wpsync-vorlage-test --label wpsync.site=" + RunKey(filepath.Dir(d.Docroot)) + " " +
 		"--network container:ws-dev-vorlage --volumes-from ws-dev-vorlage --user 33:33 " +
 		"-e WORDPRESS_DB_HOST -e WORDPRESS_DB_NAME -e WORDPRESS_DB_USER -e WORDPRESS_DB_PASSWORD -e WORDPRESS_TABLE_PREFIX " +
 		"wordpress:cli-php8.3 wp option get siteurl"
@@ -126,7 +126,7 @@ func TestRunnerImportsSQLWithMariaDBClient(t *testing.T) {
 	if err := d.Runner("vorlage").RunStdin(strings.NewReader("SELECT 1;"), importArgs...); err != nil {
 		t.Fatal(err)
 	}
-	want := "run --rm -i --init --name wpsync-vorlage-test --label wpsync.site=vorlage --network container:ws-dev-vorlage -e MYSQL_PWD wordpress:cli-php8.2 mariadb --skip-ssl --binary-mode --local-infile=0 -h wp-mariadb -u ws_dev_vorlage ws_dev_vorlage"
+	want := "run --rm -i --init --name wpsync-vorlage-test --label wpsync.site=" + RunKey(filepath.Dir(d.Docroot)) + " --network container:ws-dev-vorlage -e MYSQL_PWD wordpress:cli-php8.2 mariadb --skip-ssl --binary-mode --local-infile=0 -h wp-mariadb -u ws_dev_vorlage ws_dev_vorlage"
 	if got := f.calls(t); !reflect.DeepEqual(got, []string{want}) {
 		t.Fatalf("calls = %v", got)
 	}
@@ -385,7 +385,7 @@ func TestCancelRemovesTheRunContainer(t *testing.T) {
 	}
 	data, _ := os.ReadFile(log)
 	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(calls) != 2 || !strings.HasPrefix(calls[0], "run --rm --init --name wpsync-vorlage-test --label wpsync.site=vorlage ") ||
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "run --rm --init --name wpsync-vorlage-test --label wpsync.site="+RunKey(filepath.Dir(d.Docroot))+" ") ||
 		calls[1] != "rm -f wpsync-vorlage-test" {
 		t.Fatalf("calls = %q", calls)
 	}
@@ -416,7 +416,8 @@ func TestRemoveOrphans(t *testing.T) {
 	if err := d.RemoveOrphans("vorlage"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ps -aq --filter label=wpsync.site=vorlage", "rm -f abc123 def456"}
+	filter := "ps -aq --filter label=wpsync.site=" + RunKey(filepath.Dir(d.Docroot))
+	want := []string{filter, "rm -f abc123 def456"}
 	if got := f.calls(t); !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
@@ -426,7 +427,7 @@ func TestRemoveOrphans(t *testing.T) {
 	if err := d.RemoveOrphans("vorlage"); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.calls(t); !reflect.DeepEqual(got, []string{"ps -aq --filter label=wpsync.site=vorlage"}) {
+	if got := f.calls(t); !reflect.DeepEqual(got, []string{filter}) {
 		t.Fatalf("calls = %q", got)
 	}
 }
@@ -465,6 +466,31 @@ func TestConfigValidateDocroot(t *testing.T) {
 		c.Docroot = good
 		if err := c.Validate(); err != nil {
 			t.Errorf("Validate(%q) = %v", good, err)
+		}
+	}
+}
+
+// Nach-Review N-a: Label und Site-Lock hängen am selben Schlüssel, dem Site-Ordner. Zwei Slugs
+// mit gleichem Site-Namen entfernen sich nicht gegenseitig die Läufe.
+func TestRunLabelIsPerSiteFolder(t *testing.T) {
+	a, b := testDriver(t), testDriver(t)
+	if a.Site != b.Site {
+		t.Fatal("test setup: same site name expected")
+	}
+	ka, kb := RunKey(filepath.Dir(a.Docroot)), RunKey(filepath.Dir(b.Docroot))
+	if ka == kb || len(ka) != 16 || strings.Trim(ka, "0123456789abcdef") != "" {
+		t.Fatalf("keys %q %q", ka, kb)
+	}
+	if RunKey("/srv/kunde/") != RunKey("/srv/kunde") {
+		t.Fatal("key must not depend on a trailing slash")
+	}
+	f := installFakeDocker(t)
+	a.Configure(agentapi.Env{PHPVersion: "8.3"})
+	a.Runner("vorlage").Run("wp", "option", "get", "home")
+	a.RemoveOrphans("vorlage")
+	for _, c := range f.calls(t) {
+		if strings.Contains(c, "wpsync.site=vorlage") || !strings.Contains(c, "wpsync.site="+ka) {
+			t.Errorf("call without the folder key: %q", c)
 		}
 	}
 }
