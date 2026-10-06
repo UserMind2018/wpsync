@@ -3,6 +3,40 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unreleased]
+
+**Nur die CLI ändert sich (CLI 0.3.0).** Agent 0.4.1 bleibt; Pull, Scan und Status brauchen
+weiterhin Agent 0.3.0 oder neuer, `push` 0.4.0.
+
+### Sicherheit
+- Pull schreibt keine VCS-Pfade der Quelle (`.git`, `.svn`, `.hg`, auch `.git`-Dateien) in den
+  Docroot (W11). Sie fallen schon aus der Delta-Liste („n VCS-Pfade der Quelle übersprungen“),
+  ungefragt gelieferte VCS-Pfade brechen den Pull ab, und lokal löscht wpsync keinen. Bisher
+  konnte ein manipulierter Agent etwa `wp-content/plugins/a/.git/config` in den Docroot legen
+
+### Neu
+- **Server-Modus** für den Aufruf als Subprozess (Agentic OS): `--json` für `pair`, `scan`, `pull`,
+  `status`, `unpair`, `doctor`, `version` mit Fortschrittszeilen beim Pull, `--secret-stdin`,
+  `pair --json --secret-out`, `doctor --server`
+- `--driver container` für `pull`, `status`, `list`, `stop`: Pull in einen vorhandenen
+  WordPress-Container statt in ein DDEV-Projekt; der SQL-Import läuft dort mit derselben Härtung
+  (`--binary-mode --local-infile=0`) wie unter DDEV
+- `scan --uploads-since alle` zieht jedes Upload-Jahr
+- Linux-Binary `wpsync_0.3.0_linux_arm64` mit `.sha256` am GitHub-Release
+  (`scripts/build-linux.sh`, reproduzierbar)
+
+### Geändert
+- Feste Exit-Codes für alle Befehle (README → Server-Modus); bisher endete jeder Fehler mit 1,
+  Aufruffehler mit 2. Skripte, die nur „≠ 0“ prüfen, sind nicht betroffen
+- SIGTERM bricht einen Pull fortsetzbar ab (Exit 30)
+- Ist der Mail-Riegel nach einem Pull nicht aktiv und weicht `.ddev` vom geprüften Stand ab,
+  hält wpsync die Container jetzt per `docker stop` an, statt die Site laufen zu lassen
+- Intern: DDEV-Verhalten inklusive `.ddev`-Prüfung steckt hinter einem Laufzeittreiber; auf dem
+  Mac ändern sich Ablage, Meldungen und Rückfragen nicht
+
+### Zu tun nach dem Update
+- Nichts auf dem Mac (`brew upgrade wpsync`). Keine Agent-Aktualisierung nötig.
+
 ## [0.2.1] – 2026-10-06 · Agent 0.4.1
 
 **Nur der Agent ändert sich.** Agent 0.4.1 ist das eigentliche Update. Die CLI 0.2.1 ändert

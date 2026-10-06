@@ -30,6 +30,7 @@ Uploads der Live-Site schreibt wpsync nie.
 - [Serverschonung und IP-Sperren](#serverschonung-und-ip-sperren)
 - [Lokale Ablage und Konfiguration](#lokale-ablage-und-konfiguration)
 - [Fehlerbehebung](#fehlerbehebung)
+- [Server-Modus](#server-modus)
 - [Entwicklung](#entwicklung)
 - [Release](#release)
 
@@ -124,7 +125,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | Befehl | Was er tut |
 |---|---|
 | `wpsync setup` | Einmalig pro Mac: legt `/etc/resolver/ddev.site` an (umgeht den DNS-Rebind-Schutz von Routern wie der FRITZ!Box), führt `mkcert -install` aus, prüft Docker und DDEV. Fragt einmal nach dem Passwort. |
-| `wpsync doctor` | Prüft ohne sudo: Resolver, Docker ≥ 25, DDEV, local-mailguard, freie Ports. Nennt pro Problem die Lösung, Exit-Code ≠ 0 bei Fehlern. |
+| `wpsync doctor [--server]` | Prüft ohne sudo: Resolver, Docker ≥ 25, DDEV, local-mailguard, freie Ports. Nennt pro Problem die Lösung, Exit-Code ≠ 0 bei Fehlern. `--server` prüft nur Version, Mail-Riegel, Docker-CLI und `WPSYNC_CONFIG_DIR` (OS-Container). |
 | `wpsync pair <url> <code> [--name n] [--device d] [--insecure]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). Nur über `https://`; `--insecure` erlaubt `http://` für lokale Testumgebungen. |
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
@@ -551,6 +552,86 @@ Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per
 
 ---
 
+## Server-Modus
+
+Für den Aufruf als Subprozess (Agentic OS, Website Studio), ab CLI 0.3.0. Auf dem Mac ändert
+sich nichts ausser den Exit-Codes (siehe unten). Das Linux-Binary hängt an jedem GitHub-Release
+als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_arm64.sha256`
+(für 0.3.0: `wpsync_0.3.0_linux_arm64`); gebaut wird es reproduzierbar mit
+`scripts/build-linux.sh` (siehe [Release](#release)).
+
+| Schalter | Befehle | Wirkung |
+|---|---|---|
+| `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
+| `--secret-stdin` | `scan`, `pull`, `status` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
+| `--secret-out` | `pair --json` | Secret einmal im Ergebnis-JSON (`data.secret`), nichts in der Keychain |
+| `--driver container` | `pull`, `status`, `list`, `stop` | Vorhandener WordPress-Container statt DDEV, siehe unten |
+| `--server` | `doctor` | Nur Version, Mail-Riegel, Docker-CLI, `WPSYNC_CONFIG_DIR` |
+
+`push`, `pushes`, `rollback` und `trust` bleiben Mac-Befehle: kein `--json`, kein `--driver`.
+
+`pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
+Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
+
+**Exit-Codes** (gelten für alle Befehle, auch ohne `--json`):
+
+| Code | Name | Beispiel |
+|---|---|---|
+| 0 | ok | |
+| 1 | unknown | |
+| 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus |
+| 10 | agent_unreachable | Site oder Plugin nicht erreichbar |
+| 11 | agent_outdated | Agent unter der Mindestversion; `error.installed`, `error.required` |
+| 12 | pair_rejected | Pairing-Code falsch oder abgelaufen |
+| 13 | auth_failed | Kopplung widerrufen |
+| 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
+| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab |
+| 21 | disk_full | |
+| 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
+| 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
+
+**Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
+Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
+und `WORDPRESS_TABLE_PREFIX` (Präfix der Quelle) und den Labels `um.website-studio=1`,
+`um.slug=<site>`. Vor dem Erst-Pull legt der Aufrufer den WordPress-Core in der Version der
+Quelle in den Docroot (`wp core download`; das Netz der Site hat kein Internet, wpsync lädt
+nichts – fehlt der Core, Exit 20) und mountet den Mail-Riegel read-only nach
+`wp-content/mu-plugins/00-local-mailguard.php` (Quelle: `wpsync doctor --server`). wpsync führt
+WP-CLI und den SQL-Import (`mariadb --binary-mode --local-infile=0`) in
+`wordpress:cli-php<x.y>`-Containern im Netz dieses Containers aus und prüft nach jedem Pull, dass
+der Riegel aktiv ist (sonst Exit 22). Einen Uploads-Proxy gibt es nicht; das Profil muss alle
+Upload-Jahre ziehen (`scan … --uploads-since alle`).
+
+Pflichten des Aufrufers:
+
+- **Nur `--docroot` in den WordPress-Container mounten** (nach `/var/www/html`), nie den Ordner
+  `<slug>/` darüber. Dort liegen Baseline, Dump und Historie, die PHP der Site nicht sehen darf.
+- **Datenbank-Benutzer ohne `FILE`-Recht**, nur mit Rechten auf die eigene Datenbank.
+- **Im Image des Aufrufers** `docker`-CLI und `git` ≥ 2.28.
+
+Ablage: Der Docroot ist `<slug>/<docroot>`, alles von wpsync liegt daneben unter `<slug>/.wpsync/`,
+nichts davon im Docroot:
+
+```
+<slug>/
+├── <docroot>/              WordPress (einziger Mount in den WP-Container)
+└── .wpsync/
+    ├── baseline.json       Stand des letzten Pulls
+    ├── db/                 DB-Zwischenablage (Tabellen-Dumps des Pulls)
+    └── history.git/        internes Git, Auto-Commit nach jedem Pull
+```
+
+Historie ansehen: `git --git-dir <slug>/.wpsync/history.git log`.
+
+```sh
+printf '%s\n%s\n' "$SECRET" "$DB_PASSWORD" | wpsync pull vorlage --json --yes --secret-stdin \
+  --driver container --container ws-dev-vorlage --docroot /srv/ws/dev/vorlage/docroot \
+  --db-host wp-mariadb --db-name ws_dev_vorlage --db-user ws_dev_vorlage \
+  --local-url https://vorlage.dev.example
+```
+
+---
+
 ## Entwicklung
 
 ```sh
@@ -578,15 +659,20 @@ Struktur:
 cli/
 ├── cmd/wpsync/            Einstiegspunkt, Befehle
 └── internal/
-    ├── agentapi/          signierter HTTP-Client, Frame-Parser, Backoff
+    ├── agentapi/          signierter HTTP-Client, Frame-Parser, Backoff, Mindestversion
     ├── baseline/          Stand des letzten Pulls
-    ├── ddev/              DDEV-Projekt, Uploads-Proxy
+    ├── cliout/            Exit-Codes und JSON-Zeilen (Server-Modus)
+    ├── container/         Laufzeittreiber Container-Modus (docker-CLI)
+    ├── ddev/              Laufzeittreiber DDEV mit .ddev-Prüfung, Uploads-Proxy
     ├── keychain/          macOS-Keychain
+    ├── localenv/          Treiber-Interface, list und stop
     ├── localgit/          internes Site-Git (ausserhalb des Site-Ordners)
     ├── mailguard/         mitgelieferter Mail-Riegel (mu-plugin) und Auswahl
     ├── profile/           Presets, Profil-Auflösung, Scope
     ├── pull/              Delta, Dateien, DB, Post-Setup, Status
+    ├── push/              Push, Health-Check, Rollback, Journal
     ├── scan/              Infosheet-Darstellung, Checkliste
+    ├── secretstore/       Secret aus Keychain oder stdin
     ├── setup/             setup und doctor
     └── sites/             Site-Konfiguration
 agent/
