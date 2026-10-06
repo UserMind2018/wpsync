@@ -179,11 +179,58 @@ func (d *Driver) Setup(string) error {
 	if found := coreVersion(version); d.wpVersion != "" && found != d.wpVersion {
 		fmt.Fprintf(d.Out, "  ! WordPress-Core im Docroot ist %s, die Quelle hat %s\n", found, d.wpVersion)
 	}
+	if err := d.ensureHtaccess(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(d.stateDir(), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(d.marker(), []byte(d.wpVersion+"\n"), 0o644)
 }
+
+// ensureHtaccess writes WordPress' default rewrite rules if the docroot has no .htaccess. The pull
+// only brings wp-content/, the caller only the core; without the rules apache answers /wp-json/
+// with 404 and the Elementor editor does not load. Whatever is there – file, directory or
+// symlink – stays untouched, and O_EXCL never follows a symlink out of the docroot.
+func (d *Driver) ensureHtaccess() error {
+	path := filepath.Join(d.Docroot, ".htaccess")
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	base := "/"
+	if u, err := url.Parse(d.Config.LocalURL); err == nil && u.Path != "" {
+		base = "/" + strings.Trim(u.Path, "/") + "/"
+		base = strings.ReplaceAll(base, "//", "/")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, htaccess, base, base)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		fmt.Fprintln(d.Out, "  .htaccess mit den WordPress-Standardregeln angelegt")
+	}
+	return err
+}
+
+const htaccess = `# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%%{HTTP:Authorization}]
+RewriteBase %s
+RewriteRule ^index\.php$ - [L]
+RewriteCond %%{REQUEST_FILENAME} !-f
+RewriteCond %%{REQUEST_FILENAME} !-d
+RewriteRule . %sindex.php [L]
+</IfModule>
+# END WordPress
+`
 
 var coreVersionRe = regexp.MustCompile(`\$wp_version\s*=\s*'([^']+)'`)
 
@@ -195,8 +242,8 @@ func coreVersion(versionPHP []byte) string {
 	return ""
 }
 
-// Start has nothing to do: Exists already required the running container.
-func (d *Driver) Start(string) error { return nil }
+// Start only restores a missing .htaccess: Exists already required the running container.
+func (d *Driver) Start(string) error { return d.ensureHtaccess() }
 
 // Runner runs wp-cli and the SQL import in the site's network.
 func (d *Driver) Runner(string) localenv.Runner { return &runner{d: d} }

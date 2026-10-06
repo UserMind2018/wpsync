@@ -193,7 +193,7 @@ func TestSetupUsesTheCallersCoreAndDownloadsNothing(t *testing.T) {
 	if data, _ := os.ReadFile(f.log); len(data) != 0 {
 		t.Fatalf("setup must not call docker, calls = %s", data)
 	}
-	if out.Len() != 0 {
+	if strings.Contains(out.String(), "!") {
 		t.Errorf("same version must not warn: %s", out.String())
 	}
 	if ok, err := d.Exists("vorlage"); err != nil || !ok {
@@ -279,5 +279,71 @@ func TestCancelStopsDocker(t *testing.T) {
 	err := d.Runner("vorlage").Run("wp", "option", "get", "home")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Ohne .htaccess antwortet Apache auf /wp-json/ mit 404 und der Elementor-Editor lädt nicht
+// (Abnahme Server-Modus). Setup und Start legen den WordPress-Standardblock an, wenn nichts da ist.
+func TestSetupAndStartWriteDefaultHtaccess(t *testing.T) {
+	installFakeDocker(t)
+	d := testDriver(t)
+	d.Configure(agentapi.Env{PHPVersion: "8.3", WPVersion: "6.8.1"})
+	os.MkdirAll(filepath.Join(d.Docroot, "wp-includes"), 0o755)
+	os.WriteFile(filepath.Join(d.Docroot, "wp-includes", "version.php"), []byte("<?php $wp_version = '6.8.1';"), 0o644)
+	os.WriteFile(filepath.Join(d.Docroot, "wp-config.php"), []byte("<?php"), 0o644)
+	htaccess := filepath.Join(d.Docroot, ".htaccess")
+
+	if err := d.Setup("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(htaccess)
+	if err != nil || !strings.Contains(string(data), "# BEGIN WordPress") || !strings.Contains(string(data), "RewriteBase /\n") {
+		t.Fatalf(".htaccess after setup = %q, %v", data, err)
+	}
+
+	os.Remove(htaccess)
+	if err := d.Start("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(htaccess); err != nil {
+		t.Fatalf("start must restore a missing .htaccess: %v", err)
+	}
+
+	os.WriteFile(htaccess, []byte("# eigene Regeln\n"), 0o644)
+	if err := d.Start("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(htaccess); string(data) != "# eigene Regeln\n" {
+		t.Fatalf("an existing .htaccess must stay untouched: %q", data)
+	}
+}
+
+// Ein Symlink an der Stelle der .htaccess (der Docroot ist für die Site beschreibbar) wird nie
+// verfolgt: wpsync schreibt nicht ausserhalb des Docroot.
+func TestHtaccessNeverFollowsSymlink(t *testing.T) {
+	installFakeDocker(t)
+	d := testDriver(t)
+	outside := filepath.Join(t.TempDir(), "ziel")
+	if err := os.Symlink(outside, filepath.Join(d.Docroot, ".htaccess")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wpsync wrote through the symlink: %v", err)
+	}
+}
+
+func TestHtaccessUsesLocalURLPath(t *testing.T) {
+	installFakeDocker(t)
+	d := testDriver(t)
+	d.Config.LocalURL = "http://localhost:18082/sub/"
+	if err := d.Start("vorlage"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(d.Docroot, ".htaccess"))
+	if !strings.Contains(string(data), "RewriteBase /sub/\n") || !strings.Contains(string(data), "RewriteRule . /sub/index.php [L]") {
+		t.Fatalf(".htaccess = %q", data)
 	}
 }
