@@ -35,7 +35,7 @@ func TestSaveLoadListDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := Load("kunde")
-	if err != nil || *got != *s {
+	if err != nil || !reflect.DeepEqual(got, s) {
 		t.Fatalf("Load = %+v, %v", got, err)
 	}
 	info, _ := os.Stat(mustPath(t, "kunde"))
@@ -88,4 +88,17 @@ func mustPath(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// P15: zusätzliche Seiten für den Health-Check eines Pushs.
+func TestHealthURLsRoundTrip(t *testing.T) {
+	t.Setenv("WPSYNC_CONFIG_DIR", t.TempDir())
+	in := &Site{Name: "kunde", URL: "https://kunde.de", KeyID: "0123456789abcdef", RPS: 1, HealthURLs: []string{"https://kunde.de/kasse/"}}
+	if err := Save(in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load("kunde")
+	if err != nil || len(got.HealthURLs) != 1 || got.HealthURLs[0] != "https://kunde.de/kasse/" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
 }

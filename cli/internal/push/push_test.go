@@ -1,0 +1,772 @@
+package push
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/localgit"
+	"github.com/usermind/wpsync/internal/sites"
+)
+
+const (
+	testID   = "p_20261005_0123456789ab"
+	testSalt = "00112233445566778899aabbccddeeff"
+)
+
+// fakeSite plays agent, frontend and rescue.php of one site.
+type fakeSite struct {
+	t        *testing.T
+	srv      *httptest.Server
+	routes   []string
+	begins   []agentapi.PushBeginRequest
+	uploaded map[string]string // rel → content, pieces joined
+
+	version   string
+	versions  map[string]string // unit → version the server reports
+	unpulled  map[string]bool   // units the server has although the client never pulled them
+	window    bool
+	pending   bool
+	conflicts []string
+	list      string // answer of /push/list; empty: one confirmed push
+	readonly  bool
+	broken    bool     // the frontend fails after the swap
+	confirm   int      // HTTP status of /push/confirm
+	rollback  int      // HTTP status of /push/rollback
+	rescue    int      // HTTP status of rescue.php for a rollback
+	rescueErr string   // error of rescue.php when rescue != 200; empty: "restore failed"
+	rbCode    string   // error code of /push/rollback when rollback != 200; empty: wpsync_push_state
+	health    []string // extra pages the agent names for the health check
+
+	committed  bool
+	rolledBack bool
+	rescueKey  string
+	chunks     int
+	maxRaw     int // upper bound for the raw bytes of one upload request; 0: unchecked
+}
+
+func newFakeSite(t *testing.T) *fakeSite {
+	f := &fakeSite{t: t, uploaded: map[string]string{}, version: "0.4.0", window: true, confirm: 200, rollback: 200, rescue: 200}
+	f.versions = map[string]string{"plugins/x": "1.0"}
+	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/rescue.php" {
+		r.ParseForm()
+		if r.PostForm.Get("action") == "ping" {
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		f.routes = append(f.routes, "rescue")
+		f.rescueKey = r.PostForm.Get("key")
+		if f.rescue != 200 {
+			w.WriteHeader(f.rescue)
+			why := f.rescueErr
+			if why == "" {
+				why = "restore failed"
+			}
+			w.Write([]byte(`{"ok":false,"error":"` + why + `"}`))
+			return
+		}
+		f.rolledBack = true
+		w.Write([]byte(`{"ok":true,"status":"rolled_back"}`))
+		return
+	}
+	route := r.URL.Query().Get("rest_route")
+	if route == "" { // frontend page for the health check
+		if f.broken && f.committed && !f.rolledBack {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("Fatal error"))
+			return
+		}
+		w.Write([]byte("<html>ok</html>"))
+		return
+	}
+	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
+	switch route {
+	case "/wpsync/v1/push/begin":
+		var req agentapi.PushBeginRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		f.begins = append(f.begins, req)
+		res := agentapi.PushBegin{
+			AgentVersion: f.version, WindowOpen: f.window,
+			HealthURLs: append([]string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"}, f.health...),
+			Rescue:     agentapi.PushRescue{URL: f.srv.URL + "/rescue.php"},
+		}
+		if f.pending {
+			res.Pending = &agentapi.PushPending{PushID: "p_20261004_ba9876543210", Device: "anderer-mac"}
+		}
+		for _, u := range req.Units {
+			plan := agentapi.PushUnitPlan{Path: u.Path, Exists: len(u.Base) > 0 || f.unpulled[u.Path], Version: f.versions[u.Path], Conflicts: []string{}, Writable: !f.readonly}
+			if u.Path == "plugins/x" {
+				plan.Conflicts = append(plan.Conflicts, f.conflicts...)
+			}
+			if f.unpulled[u.Path] {
+				for rel := range u.Files {
+					plan.Conflicts = append(plan.Conflicts, rel) // unknown to the client's baseline
+				}
+			}
+			for rel := range u.Files {
+				if b, ok := u.Base[rel]; !ok || b.MTime != u.Files[rel].MTime {
+					plan.Need = append(plan.Need, rel)
+				}
+			}
+			res.Units = append(res.Units, plan)
+		}
+		if !req.Dry {
+			res.PushID, res.Rescue.Salt = testID, testSalt
+			f.uploaded, f.committed, f.rolledBack = map[string]string{}, false, false
+		}
+		json.NewEncoder(w).Encode(res)
+	case "/wpsync/v1/push/upload":
+		var req struct {
+			PushID string               `json:"push_id"`
+			Unit   int                  `json:"unit"`
+			Files  []agentapi.PushChunk `json:"files"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		raw := 0
+		for _, c := range req.Files {
+			raw += len(c.Data)
+		}
+		if f.maxRaw > 0 && raw > f.maxRaw {
+			f.t.Errorf("one upload request carries %d raw bytes, limit %d", raw, f.maxRaw)
+		}
+		for _, c := range req.Files {
+			if int64(len(f.uploaded[c.Path])) != c.Offset {
+				f.t.Errorf("chunk of %s at offset %d, have %d bytes", c.Path, c.Offset, len(f.uploaded[c.Path]))
+			}
+			f.uploaded[c.Path] += string(c.Data)
+			f.chunks++
+		}
+		w.Write([]byte(`{"received":1}`))
+	case "/wpsync/v1/push/commit":
+		f.committed = true
+		stamps := map[string]map[string]agentapi.PushStamp{}
+		for _, u := range f.begins[len(f.begins)-1].Units {
+			stamps[u.Path] = map[string]agentapi.PushStamp{}
+			for rel, file := range u.Files {
+				stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"next": nil, "stamps": stamps})
+	case "/wpsync/v1/push/confirm":
+		f.status(w, f.confirm)
+	case "/wpsync/v1/push/rollback":
+		if f.rollback == 200 {
+			f.rolledBack = true
+		}
+		if f.rbCode != "" {
+			w.WriteHeader(f.rollback)
+			w.Write([]byte(`{"code":"` + f.rbCode + `","message":"Fenster zu"}`))
+			return
+		}
+		f.status(w, f.rollback)
+	case "/wpsync/v1/push/list":
+		if f.list != "" {
+			w.Write([]byte(f.list))
+			return
+		}
+		w.Write([]byte(`{"pushes":[{"push_id":"` + testID + `","device":"mac","target":"live","status":"confirmed","units":[{"path":"plugins/x","files":2,"uploaded":1}],"created":1791158400}]}`))
+	default:
+		f.t.Errorf("unexpected route %s", route)
+	}
+}
+
+func (f *fakeSite) status(w http.ResponseWriter, status int) {
+	if status != 200 {
+		w.WriteHeader(status)
+		if status >= 500 {
+			w.Write([]byte("<html>Fatal error</html>"))
+			return
+		}
+		w.Write([]byte(`{"code":"wpsync_push_state","message":"abgelehnt"}`))
+		return
+	}
+	w.Write([]byte(`{"ok":true}`))
+}
+
+// localSite prepares a pulled site with one edited plugin and returns options for it.
+func localSite(t *testing.T, f *fakeSite) (Options, string, *bytes.Buffer) {
+	t.Helper()
+	root := t.TempDir()
+	siteDir := filepath.Join(root, "kunde")
+	docroot := filepath.Join(siteDir, "public")
+	base := baseline.New(f.srv.URL)
+	pulled(t, docroot, base, "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.0 */")
+	pulled(t, docroot, base, "plugins/x/inc/same.php", "<?php // same")
+	pulled(t, docroot, base, "themes/t/style.css", "/* Theme Name: T */")
+	base.PulledAt = time.Now()
+	if err := baseline.Save(siteDir, base); err != nil {
+		t.Fatal(err)
+	}
+	write(t, docroot, "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.0 */\n// edited", 1800000000)
+
+	client := agentapi.New(f.srv.URL, "0123456789abcdef", "secret", 1000)
+	client.Sleep = func(time.Duration) {}
+	out := &bytes.Buffer{}
+	return Options{
+		Site:      sites.Site{Name: "kunde", URL: f.srv.URL},
+		Secret:    "secret",
+		SitesRoot: root,
+		Yes:       true,
+		Out:       out,
+		HTTP:      f.srv.Client(),
+		Client:    client,
+		Sleep:     func(time.Duration) {},
+		Commit:    func(string, string) error { return nil },
+	}, siteDir, out
+}
+
+// AC-54, AC-56
+func TestRunPushesChangedUnitAndUpdatesTheBaseline(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	var commits []string
+	o.Commit = func(_, msg string) error { commits = append(commits, msg); return nil }
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin upload commit confirm" {
+		t.Errorf("routes = %s", got)
+	}
+	if !f.begins[0].Dry || f.begins[1].Dry || len(f.begins[1].Units) != 1 || f.begins[1].Units[0].Path != "plugins/x" {
+		t.Errorf("begins = %+v", f.begins)
+	}
+	if len(f.uploaded) != 1 || !strings.HasSuffix(f.uploaded["main.php"], "// edited") {
+		t.Errorf("uploaded = %v", f.uploaded)
+	}
+	base, _ := baseline.Load(siteDir)
+	if base.Files["wp-content/plugins/x/main.php"].MTime != 1800000000 || base.Files["wp-content/themes/t/style.css"].MTime != 1700000000 {
+		t.Errorf("baseline = %v", base.Files)
+	}
+	if units, _, _ := Scan(filepath.Join(siteDir, "public"), base); len(units) != 0 {
+		t.Errorf("still changed after the push: %v", units)
+	}
+	j, err := LoadJournal(siteDir, testID)
+	if err != nil || !j.Applied || j.Salt != testSalt || j.Units["plugins/x"]["wp-content/plugins/x/main.php"].MTime != 1700000000 {
+		t.Errorf("journal = %+v, %v", j, err)
+	}
+	if len(commits) != 1 || !strings.Contains(commits[0], testID) {
+		t.Errorf("commits = %v", commits)
+	}
+	if !strings.Contains(out.String(), "plugins/x") || !strings.Contains(out.String(), testID) {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+func TestRunWithNothingChanged(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, _ := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.0 */", 1700000000)
+
+	if err := Run(o); !errors.Is(err, ErrNothing) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("nothing to push must not cost a request: %v", f.routes)
+	}
+}
+
+func TestRunWithoutPullFails(t *testing.T) {
+	f := newFakeSite(t)
+	o, _, _ := localSite(t, f)
+	o.SitesRoot = t.TempDir()
+	if err := Run(o); !errors.Is(err, ErrNoBaseline) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRunPushesOnlyNamedUnits(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, _ := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "themes/t/style.css", "/* Theme Name: T */ body{}", 1800000000)
+	o.Units = []string{"wp-content/themes/t/"}
+
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.begins[1].Units) != 1 || f.begins[1].Units[0].Path != "themes/t" {
+		t.Errorf("units = %+v", f.begins[1].Units)
+	}
+	o.Units = []string{"plugins/wpsync-agent"}
+	if err := Run(o); err == nil || !strings.Contains(err.Error(), "plugins/wpsync-agent") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// U14: eine lokale Kopie ausserhalb des Pull-Profils ist kein Push-Kandidat.
+func TestRunSkipsUnitsThatWereNeverPulled(t *testing.T) {
+	f := newFakeSite(t)
+	f.unpulled = map[string]bool{"plugins/stale": true}
+	o, siteDir, out := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/stale/stale.php", "<?php // old copy", 1600000000)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "übersprungen: plugins/stale") {
+		t.Errorf("no hint about the skipped unit:\n%s", out)
+	}
+	if got := f.begins[1].Units; len(got) != 1 || got[0].Path != "plugins/x" {
+		t.Errorf("pushed units = %+v", got)
+	}
+
+	o.Units = []string{"plugins/stale"}
+	if err := Run(o); !errors.Is(err, ErrConflict) {
+		t.Fatalf("naming the unit must surface the conflict: %v", err)
+	}
+}
+
+// U14: eine lokal neue Einheit geht nur mit ausdrücklicher Nennung auf die Site,
+// auch wenn es sie dort noch nicht gibt.
+func TestRunPushesNewUnitsOnlyWhenNamed(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/neu/neu.php", "<?php // new", 1800000000)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "übersprungen: plugins/neu") {
+		t.Errorf("no hint about the skipped new unit:\n%s", out)
+	}
+	for i, b := range f.begins {
+		if len(b.Units) != 1 || b.Units[0].Path != "plugins/x" {
+			t.Errorf("begin %d sent units %+v – a new unit must not even reach the dry run", i, b.Units)
+		}
+	}
+
+	f.begins, f.routes = nil, nil
+	o.Units = []string{"plugins/neu"}
+	out.Reset()
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := f.begins[1].Units; len(got) != 1 || got[0].Path != "plugins/neu" {
+		t.Errorf("pushed units = %+v", got)
+	}
+	if !strings.Contains(f.uploaded["neu.php"], "// new") {
+		t.Errorf("uploaded = %v", f.uploaded)
+	}
+}
+
+func TestRunWithOnlyNewUnitsSaysToNameThem(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	docroot := filepath.Join(siteDir, "public")
+	write(t, docroot, "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.0 */", 1700000000)
+	write(t, docroot, "plugins/neu/neu.php", "<?php // new", 1800000000)
+	write(t, docroot, "themes/neu/style.css", "/* Theme Name: Neu */", 1800000000)
+
+	err := Run(o)
+	if !errors.Is(err, ErrNothing) {
+		t.Fatalf("err = %v", err)
+	}
+	var skipped *SkippedNewError
+	if !errors.As(err, &skipped) || strings.Join(skipped.Units, " ") != "plugins/neu themes/neu" {
+		t.Fatalf("err = %#v – it must name the skipped new units", err)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("skipped new units must not cost a request: %v", f.routes)
+	}
+	if !strings.Contains(out.String(), "übersprungen: themes/neu") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+func TestRunDryRunStopsAfterThePlan(t *testing.T) {
+	f := newFakeSite(t)
+	f.window = false
+	o, _, out := localSite(t, f)
+	o.DryRun = true
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin" {
+		t.Errorf("routes = %s", got)
+	}
+	if !strings.Contains(out.String(), "main.php") || !strings.Contains(out.String(), "geschlossen") {
+		t.Errorf("plan should list changed files and the closed window:\n%s", out)
+	}
+}
+
+// AC-50
+func TestRunNeedsAnOpenWindow(t *testing.T) {
+	f := newFakeSite(t)
+	f.window = false
+	o, _, _ := localSite(t, f)
+	if err := Run(o); !errors.Is(err, ErrWindowClosed) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin" {
+		t.Errorf("routes = %s", got)
+	}
+}
+
+// AC-57
+func TestRunStopsOnConflictUnlessForced(t *testing.T) {
+	f := newFakeSite(t)
+	f.conflicts = []string{"inc/same.php"}
+	o, _, out := localSite(t, f)
+	if err := Run(o); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(out.String(), "inc/same.php") || strings.Join(f.routes, " ") != "begin" {
+		t.Errorf("routes = %v\n%s", f.routes, out)
+	}
+
+	o.Force = true
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if !f.begins[len(f.begins)-1].Force {
+		t.Error("force not sent")
+	}
+}
+
+// AC-73
+func TestRunStopsWhenTheServerCannotReplaceTheDirectory(t *testing.T) {
+	f := newFakeSite(t)
+	f.readonly = true
+	o, _, _ := localSite(t, f)
+	if err := Run(o); !errors.Is(err, ErrNotWritable) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// AC-68
+func TestRunReportsAnUnconfirmedPush(t *testing.T) {
+	f := newFakeSite(t)
+	f.pending = true
+	o, _, _ := localSite(t, f)
+	err := Run(o)
+	var pending *PendingError
+	if !errors.As(err, &pending) || pending.PushID != "p_20261004_ba9876543210" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRunRefusesOldAgents(t *testing.T) {
+	f := newFakeSite(t)
+	f.version = "0.3.1"
+	o, _, _ := localSite(t, f)
+	if err := Run(o); !errors.Is(err, ErrAgentTooOld) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// AC-62
+func TestRunAsksSeparatelyForAVersionChange(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.1 */", 1800000000)
+
+	if err := Run(o); !errors.Is(err, ErrVersionChange) {
+		t.Fatalf("--yes alone must not be enough: %v", err)
+	}
+	if !strings.Contains(out.String(), `"1.0" → "1.1"`) {
+		t.Errorf("version change not shown:\n%s", out)
+	}
+
+	o.Yes = false
+	var asked []string
+	o.Confirm = func(q string) bool { asked = append(asked, q); return true }
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 2 || !strings.Contains(asked[0], "Datenbank") {
+		t.Errorf("asked = %v", asked)
+	}
+
+	o.Yes, o.AllowVersionChange, o.Confirm = true, true, nil
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/main.php", "<?php\n/* Plugin Name: X\n * Version: 1.2 */", 1800000001)
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunAbortsWhenTheUserDeclines(t *testing.T) {
+	f := newFakeSite(t)
+	o, _, _ := localSite(t, f)
+	o.Yes = false
+	o.Confirm = func(string) bool { return false }
+	if err := Run(o); !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v", err)
+	}
+	o.Confirm = nil
+	if err := Run(o); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("without a terminal the error must name --yes: %v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin" {
+		t.Errorf("routes = %s", got)
+	}
+}
+
+// AC-63, AC-64
+func TestRunRollsBackWhenTheSiteGetsWorse(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken = true
+	o, siteDir, _ := localSite(t, f)
+
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) || rolled.PushID != testID || len(rolled.Reasons) == 0 || len(rolled.StillWorse) != 0 {
+		t.Fatalf("err = %#v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin upload commit rescue" {
+		t.Errorf("routes = %s", got)
+	}
+	if f.rescueKey != RescueKey("secret", testID, testSalt) {
+		t.Errorf("rescue key = %q", f.rescueKey)
+	}
+	base, _ := baseline.Load(siteDir)
+	if base.Files["wp-content/plugins/x/main.php"].MTime != 1700000000 {
+		t.Error("baseline must stay at the pulled state after a rollback")
+	}
+}
+
+func TestRunRollsBackWhenTheAgentNoLongerAnswers(t *testing.T) {
+	f := newFakeSite(t)
+	f.confirm = 500
+	o, _, _ := localSite(t, f)
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin upload commit confirm rescue" {
+		t.Errorf("routes = %s", got)
+	}
+}
+
+// confirm went through on the server, only its answer was lost: rescue.php then refuses with
+// "confirmed", and the push counts as live – no "ROLLBACK FEHLGESCHLAGEN" on a healthy site.
+func TestRunTreatsALostConfirmAnswerAsConfirmed(t *testing.T) {
+	f := newFakeSite(t)
+	f.confirm = 500
+	f.rescue = 409
+	f.rescueErr = "confirmed"
+	o, siteDir, out := localSite(t, f)
+	if err := Run(o); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(out.String(), "ist live") || !strings.Contains(out.String(), "bereits bestätigt") {
+		t.Errorf("out = %s", out.String())
+	}
+	base, _ := baseline.Load(siteDir)
+	if base.Files["wp-content/plugins/x/main.php"].MTime == 1700000000 {
+		t.Error("baseline must move on: the push is live")
+	}
+}
+
+func TestRunReportsAFailedRollbackLoudly(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken = true
+	f.rescue = 500
+	o, _, _ := localSite(t, f)
+	err := Run(o)
+	if err == nil || !strings.Contains(err.Error(), "ROLLBACK FEHLGESCHLAGEN") || !strings.Contains(err.Error(), testID) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// U13
+func TestRunUploadsLargeFilesInPieces(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, _ := localSite(t, f)
+	big := strings.Repeat("0123456789", 250) // 2500 Bytes
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/big.js", big, 1800000000)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/empty.php", "", 1800000000)
+	o.ChunkBytes = 1000
+	f.maxRaw = 1000
+
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if f.uploaded["big.js"] != big {
+		t.Errorf("big.js arrived with %d bytes", len(f.uploaded["big.js"]))
+	}
+	if _, ok := f.uploaded["empty.php"]; !ok {
+		t.Error("empty file not uploaded")
+	}
+	uploads := 0
+	for _, r := range f.routes {
+		if r == "upload" {
+			uploads++
+		}
+	}
+	if uploads < 3 {
+		t.Errorf("uploads = %d, want at least 3 requests of at most 1000 bytes", uploads)
+	}
+}
+
+func TestAtLeast(t *testing.T) {
+	for _, v := range []string{"0.4.0", "0.4.1", "0.10.0", "1.0", "0.4.0-beta"} {
+		if !AtLeast(v, "0.4.0") {
+			t.Errorf("%s should satisfy 0.4.0", v)
+		}
+	}
+	for _, v := range []string{"0.3.1", "0.3.99", "", "abc"} {
+		if AtLeast(v, "0.4.0") {
+			t.Errorf("%s should not satisfy 0.4.0", v)
+		}
+	}
+}
+
+func TestErrorsAreDistinct(t *testing.T) {
+	all := []error{ErrNoBaseline, ErrNothing, ErrAborted, ErrConflict, ErrWindowClosed, ErrNotWritable, ErrAgentTooOld, ErrVersionChange}
+	for i, a := range all {
+		for j, b := range all {
+			if i != j && errors.Is(a, b) {
+				t.Errorf("%v is %v", a, b)
+			}
+		}
+	}
+}
+
+// Health-Check und rescue.php brauchen kurze Antworten; der Agent-Client wartet bis zu 10 Minuten.
+func TestDefaultsUseAShortClientForHealthAndRescue(t *testing.T) {
+	o := Options{Site: sites.Site{Name: "kunde", URL: "https://kunde.de", KeyID: "0123456789abcdef", RPS: 1}}.defaults()
+	if o.HTTP == nil || o.HTTP.Timeout <= 0 || o.HTTP.Timeout > time.Minute {
+		t.Errorf("health client timeout = %v", o.HTTP.Timeout)
+	}
+	if o.HTTP == o.Client.HTTP {
+		t.Error("health check must not share the agent client")
+	}
+	if o.ChunkBytes != 3<<20 {
+		t.Errorf("ChunkBytes = %d, want 3 MiB (U13)", o.ChunkBytes)
+	}
+}
+
+// The default commit uses the snapshot repo next to the site folder and never a .git inside it (SEC-131).
+func TestDefaultCommitUsesSnapshotRepoOutsideTheSite(t *testing.T) {
+	root := t.TempDir()
+	siteDir := filepath.Join(root, "kunde")
+	if err := os.MkdirAll(filepath.Join(siteDir, "public", "wp-content", "plugins", "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(siteDir, "public", "wp-content", "plugins", "a", "a.php"), []byte("<?php\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{SitesRoot: root, Site: sites.Site{Name: "kunde", URL: "https://kunde.example"}, Out: &bytes.Buffer{}}.defaults()
+	if err := o.Commit(siteDir, "push "+testID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(siteDir, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("site folder got a .git: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localgit.GitDir(root, "kunde"), "HEAD")); err != nil {
+		t.Fatalf("snapshot repo missing: %v", err)
+	}
+}
+
+// Strings the site chooses reach the terminal only through agentapi.Printable (as on main for
+// table names and paths): no escape sequence from a conflict path or version gets through.
+func TestPlanQuotesServerStrings(t *testing.T) {
+	f := newFakeSite(t)
+	f.conflicts = []string{"inc/\x1b[2Jevil.php"}
+	f.versions = map[string]string{"plugins/x": "1.0\x1b]0;title\x07"}
+	o, _, out := localSite(t, f)
+	o.DryRun = true
+	if err := Run(o); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\x07") {
+		t.Errorf("raw control characters in the plan:\n%q", out)
+	}
+	for _, want := range []string{`"inc/\x1b[2Jevil.php"`, `"1.0\x1b]0;title\a"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan misses %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestPendingErrorQuotesServerStrings(t *testing.T) {
+	msg := (&PendingError{PushID: "p_\x1b[2J", Device: "mac\x1b[31m"}).Error()
+	if strings.Contains(msg, "\x1b") {
+		t.Errorf("raw escape in %q", msg)
+	}
+	if ok := (&PendingError{PushID: testID, Device: "mac"}).Error(); !strings.Contains(ok, testID) {
+		t.Errorf("valid push id not shown as is: %q", ok)
+	}
+}
+
+func TestShowID(t *testing.T) {
+	if got := ShowID(testID); got != testID {
+		t.Errorf("ShowID(valid) = %q", got)
+	}
+	if got := ShowID("p_1\nx"); got != `"p_1\nx"` {
+		t.Errorf("ShowID(invalid) = %q", got)
+	}
+}
+
+// Die Site ist nicht vertrauenswürdig: eine Seite auf einem fremden Host ruft der Push nie ab.
+func TestRunSkipsHealthURLsOutsideTheSite(t *testing.T) {
+	hits := 0
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("<html>fremd</html>"))
+	}))
+	defer elsewhere.Close()
+	f := newFakeSite(t)
+	f.health = []string{elsewhere.URL + "/intern"}
+	o, _, out := localSite(t, f)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if hits != 0 {
+		t.Errorf("the push requested a page on another host %d times", hits)
+	}
+	if !strings.Contains(out.String(), elsewhere.URL+"/intern") || !strings.Contains(out.String(), "verworfen") {
+		t.Errorf("no hint about the dropped page:\n%s", out)
+	}
+}
+
+// N2: file names in the plan reach the terminal only when they are safe to show.
+func TestRunKeepsFileNamesWithControlsOutOfThePlan(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := localSite(t, f)
+	o.DryRun = true
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/inc/\u202egnp.php", "<?php", 1800000000)
+	write(t, filepath.Join(siteDir, "public"), "plugins/x/inc/größe.php", "<?php", 1800000000)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "\u202e") {
+		t.Errorf("Bidi control in the plan:\n%q", out)
+	}
+	if !strings.Contains(out.String(), "    inc/größe.php\n") {
+		t.Errorf("umlauts must stay readable:\n%s", out)
+	}
+	if _, ok := f.begins[0].Units[0].Files["inc/\u202egnp.php"]; ok {
+		t.Error("an ignored file was sent to the agent")
+	}
+}
+
+func TestShowPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"inc/größe.php":    "inc/größe.php",
+		"wp_\u202egnp.php": `"wp_\u202egnp.php"`,
+		"a\u009bb.php":     `"a\u009bb.php"`,
+	} {
+		if got := showPath(in); got != want {
+			t.Errorf("showPath(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

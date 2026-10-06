@@ -21,6 +21,15 @@ final class SignatureTest extends TestCase
         );
     }
 
+    public function testTimestampHeaderMustBePlainDigits(): void
+    {
+        $this->assertSame(1790000000, Signature::timestamp('1790000000'));
+        $this->assertSame(0, Signature::timestamp('0'));
+        foreach (['1790000000abc', ' 1790000000', '1790000000 ', '+1790000000', '-1', '1.5', '0x1F', '', '17900000000', "1790000000\n"] as $bad) {
+            $this->assertNull(Signature::timestamp($bad), var_export($bad, true));
+        }
+    }
+
     public function testValidSignaturePasses(): void
     {
         $sig = $this->sign(1000, '{}');

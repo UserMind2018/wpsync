@@ -48,6 +48,9 @@ cleanup() {
        DELETE FROM e2e_wpsync_pairings WHERE device LIKE 'sec-%' OR device LIKE 'aaaa%';
        DELETE FROM e2e_wpsync_state WHERE name IN ('pairing_code', 'pair_last');
        DELETE FROM e2e_options WHERE option_name = 'e2e_sec102_bytes';" >/dev/null 2>&1
+  rm -rf "$WPC/plugins/sec-push" "$WPC/plugins/sec-other"
+  SQL "DELETE FROM e2e_wpsync_pushes WHERE device LIKE 'sec-%';
+       DELETE FROM e2e_wpsync_state WHERE name = 'push_lock';" >/dev/null 2>&1
 }
 
 [ -f "$E2E/source/.ddev/config.yaml" ] || { echo "Quelle fehlt – zuerst scripts/e2e-local.sh ausführen"; exit 1; }
@@ -138,6 +141,119 @@ for _ in 1 2 3 4 5; do
   code -X POST "$URL/?rest_route=/wpsync/v1/pair" -H 'Content-Type: application/json' --data-binary '{"code":"XXXXXXXX"}' >/dev/null
 done
 check SEC-09 "10 anonyme Requests, 0 CREATE TABLE" "$(($(ddl) - before))" 0
+
+echo "== 2a: Push"
+OTHER=00000000000000e3
+CONTENT='<?php // sec-push'
+SHA="$(printf %s "$CONTENT" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+B64="$(printf %s "$CONTENT" | base64 | tr -d '\n')"
+EVIL="$(printf %s '<?php // sec-evil' | base64 | tr -d '\n')" # gleiche Länge, anderer Inhalt
+unit() { printf '{"path":"%s","base":{},"files":{"%s":{"size":%d,"sha256":"%s","mtime":1700000000}}}' "$1" "$2" "${#CONTENT}" "$SHA"; }
+begin() { printf '{"target":"live","dry":%s,"force":true,"units":[%s]}' "$1" "$2"; }
+# JSON immer über printf-Helfer bauen: bash 3.2 (macOS) wendet auf "{…,…}" in einer
+# Kommandosubstitution innerhalb doppelter Anführungszeichen Klammer-Expansion an.
+upload() { printf '{"push_id":"%s","unit":0,"files":[{"path":"%s","offset":0,"data":"%s"}]}' "$PUSH" "$1" "$2"; }
+byid() { printf '{"push_id":"%s"}' "$PUSH"; }
+pcode() { signed "$1" "$2" '' -o /dev/null -w '%{http_code}'; }
+field() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(d'"$1"')'; }
+window() { ddev wp eval "WpSync\\Store::setPushUntil('$1', $2);" >/dev/null; }
+pushes() { SQL "SELECT COUNT(*) FROM e2e_wpsync_pushes WHERE device = 'sec-curl' AND $1"; }
+ddev wp eval "WpSync\\Store::addPairing('$OTHER', '$SECRET', 'sec-other');" || exit 1
+window "$KEY" 0
+window "$OTHER" "time() + 900"
+
+check AC-50 "Probelauf braucht kein Fenster" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push main.php)")")" 200
+check AC-51 "das Fenster eines anderen Pairings gilt nicht" "$(pcode /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-push main.php)")")" 403
+check AC-50 "ohne Fenster entsteht kein Push" "$(pushes "1=1")" 0
+
+check AC-59 "der Agent selbst ist keine Einheit" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/wpsync-agent main.php)")")" 400
+check AC-59 "Einheit mit .. abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/../x main.php)")")" 400
+check AC-59 "uploads ist keine Einheit" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit uploads/2026 main.php)")")" 400
+check AC-59 "Datei mit .. abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push ../x.php)")")" 400
+check AC-59 "Mail-Riegel in mu-plugins abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit mu-plugins 00-local-mailguard.php)")")" 400
+check AC-59 "wpsync-Datei in mu-plugins abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit mu-plugins wpsync-loader.php)")")" 400
+
+window "$KEY" "time() + 900"
+res="$(signed /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-push main.php)")")"
+PUSH="$(printf %s "$res" | field '["push_id"]')"
+RESCUE="$(printf %s "$res" | field '["rescue"]["url"]')"
+check AC-54 "Push angelegt" "$(pushes "status = 'uploading'")" 1
+check AC-61 "zweiter Push während eines laufenden" "$(pcode /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-other main.php)")")" 423
+check AC-60 "falscher Inhalt abgelehnt" "$(pcode /wpsync/v1/push/upload "$(upload main.php "$EVIL")")" 400
+check AC-59 "nicht angeforderte Datei abgelehnt" "$(pcode /wpsync/v1/push/upload "$(upload other.php "$B64")")" 400
+
+window "$KEY" 0
+check AC-52 "Fenster läuft im Upload ab" "$(pcode /wpsync/v1/push/upload "$(upload main.php "$B64")")" 403
+check AC-52 "Push ist verfallen" "$(pushes "status = 'expired' AND pruned = 1")" 1
+check AC-52 "nichts im Zielverzeichnis" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" weg
+check AC-52 "Arbeitsordner des Pushs entfernt" "$(find "$WPC" -maxdepth 2 -path '*wpsync-push-*' -name "$PUSH" | wc -l | tr -d ' ')" 0
+
+# push <force>: begin, upload falls nötig, commit – legt $PUSH und $SALT ab
+push() {
+  res="$(signed /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-push main.php)")")"
+  PUSH="$(printf %s "$res" | field '["push_id"]')"
+  SALT="$(printf %s "$res" | field '["rescue"]["salt"]')"
+  if [ "$(printf %s "$res" | field '["units"][0]["need"].__len__()')" != "0" ]; then
+    signed /wpsync/v1/push/upload "$(upload main.php "$B64")" >/dev/null
+  fi
+  signed /wpsync/v1/push/commit "$(byid)" >/dev/null
+}
+rcode() { code -X POST "$RESCUE" --data-urlencode action=rollback --data-urlencode "push_id=$PUSH" --data-urlencode "key=$1"; }
+rkey() { printf 'rescue:%s:%s' "$PUSH" "$SALT" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1; }
+
+window "$KEY" "time() + 900"
+push
+check AC-54 "Einheit liegt auf der Site" "$(cat "$WPC/plugins/sec-push/main.php" 2>/dev/null)" "$CONTENT"
+check U7 "unbestätigter Push blockiert den nächsten" "$(pcode /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-other main.php)")")" 409
+check AC-66 "rescue.php antwortet ohne WordPress" "$(curl -s -X POST "$RESCUE" --data action=ping)" '{"ok":true}'
+check AC-65 "rescue.php nur per POST" "$(code "$RESCUE")" 405
+for _ in 1 2 3 4; do rcode "$FAKE_SIG" >/dev/null; done
+check AC-65 "falscher Schlüssel abgelehnt" "$(rcode "$FAKE_SIG")" 403
+check AC-65 "nach 5 Fehlversuchen gesperrt, auch für den richtigen Schlüssel" "$(rcode "$(rkey)")" 429
+check AC-65 "Einheit steht noch" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" da
+check AC-55 "Rollback über den Agent" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
+check AC-55 "neue Einheit ist wieder weg" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" weg
+
+push
+check AC-64 "Rollback über rescue.php mit richtigem Schlüssel" "$(rcode "$(rkey)")" 200
+check AC-64 "Einheit ist weg" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" weg
+signed /wpsync/v1/push/list '{}' >/dev/null # übernimmt den Rollback ins Protokoll
+check AC-64 "Protokoll kennt den Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1
+
+for _ in 1 2 3 4; do
+  push
+  signed /wpsync/v1/push/confirm "$(byid)" >/dev/null
+done
+check AC-69 "nur die letzten 3 bestätigten Pushes behalten ihren Snapshot" "$(pushes "status = 'confirmed' AND pruned = 0")" 3
+check AC-69 "der älteste ist aufgeräumt" "$(pushes "status = 'confirmed' AND pruned = 1")" 1
+
+delta="$(signed /wpsync/v1/delta '{"cursor":"","scope":null}')"
+check AC-71 "Arbeitsordner steht nicht in /delta" "$(printf %s "$delta" | grep -c 'wpsync-push-')" 0
+check AC-71 "Protokoll-Tabelle steht nicht in /delta" "$(printf %s "$delta" | grep -c 'wpsync_pushes')" 0
+check AC-71 "gepushte Einheit steht in /delta" "$(printf %s "$delta" | grep -c 'sec-push')" 1
+WORK="$(find "$WPC" -maxdepth 1 -name 'wpsync-push-*' | head -1)"
+# Die DDEV-Quelle läuft mit nginx und wertet keine .htaccess aus – geprüft wird, dass die Sperre liegt.
+check AC-71 "Arbeitsordner hat eine .htaccess-Sperre" "$(grep -c 'Require all denied' "$WORK/.htaccess")" 1
+
+echo "== U18: Rollback eines bestätigten Pushs nur bei offenem Fenster"
+window "$KEY" 0
+check U18 "bestätigter Push ohne Fenster: /push/rollback abgelehnt" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 403
+check U18 "Fehlercode für das geschlossene Fenster" "$(signed /wpsync/v1/push/rollback "$(byid)" | field '["code"]')" wpsync_push_window
+check U18 "rescue.php rollt einen bestätigten Push nicht zurück" "$(rcode "$(rkey)")" 409
+check U18 "bestätigter Push bleibt bestätigt" "$(pushes "push_id = '$PUSH' AND status = 'confirmed' AND pruned = 0")" 1
+window "$KEY" "time() + 900"
+check U18 "bestätigter Push mit Fenster: Rollback ok" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
+check U18 "Protokoll kennt den Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1
+push
+window "$KEY" 0
+check U18 "unbestätigter Push ohne Fenster: Rollback ok" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
+check U18 "Protokoll kennt den Notfall-Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1
+window "$KEY" "time() + 900"
+
+ddev wp eval "WpSync\\Store::deletePairing('$KEY');" >/dev/null
+check AC-53 "widerrufenes Pairing kann nicht zurückrollen" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 401
+check AC-53 "widerrufenes Pairing kann nicht pushen" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push main.php)")")" 401
+ddev wp eval "WpSync\\Store::addPairing('$KEY', '$SECRET', 'sec-curl');" >/dev/null
 
 echo "== SEC-13: Direktaufruf"
 check SEC-13 "src/WpProbe.php gibt nichts aus" "$(curl -s "$URL/wp-content/plugins/wpsync-agent/src/WpProbe.php" | grep -c 'wpsync-agent')" 0

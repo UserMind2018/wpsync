@@ -43,7 +43,8 @@ final class Excludes
         if (in_array($name, self::ANY_DIRS, true)) {
             return true;
         }
-        return $isTop && (in_array($name, self::TOP_DIRS, true) || strpos($name, 'backup-') === 0);
+        // wpsync-push-<zufall>: Arbeitsordner mit Snapshots und Rollback-Datensätzen (Spec Stufe 2, AC-71)
+        return $isTop && (in_array($name, self::TOP_DIRS, true) || strpos($name, 'backup-') === 0 || strpos($name, 'wpsync-push-') === 0);
     }
 
     /**

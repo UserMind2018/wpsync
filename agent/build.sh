@@ -3,12 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-for f in wpsync-agent.php src/*.php; do
+for f in wpsync-agent.php rescue.php src/*.php; do
   php -l "$f" >/dev/null
 done
 
 # Jede Quelldatei bricht ohne WordPress sofort ab – ein Direktaufruf verrät sonst Serverpfade (SEC-13).
-missing="$(grep -L "defined('ABSPATH') || exit;" src/*.php || true)"
+# Ausnahme: was rescue.php lädt, läuft auch mit WPSYNC_RESCUE; ein Direktaufruf bricht trotzdem ab.
+missing="$(grep -LE "^defined\('ABSPATH'\) \|\| (defined\('WPSYNC_RESCUE'\) \|\| )?exit;" src/*.php || true)"
 if [ -n "$missing" ]; then
   echo "ABSPATH-Guard fehlt in:"
   echo "$missing"
@@ -17,7 +18,7 @@ fi
 
 rm -rf dist
 mkdir -p dist/wpsync-agent/src
-cp wpsync-agent.php dist/wpsync-agent/
+cp wpsync-agent.php rescue.php dist/wpsync-agent/
 cp src/*.php dist/wpsync-agent/src/
 cp ../LICENSE dist/wpsync-agent/LICENSE # MIT verlangt den Lizenztext in jeder Kopie (CR-14)
 (cd dist && zip -qr wpsync-agent.zip wpsync-agent && rm -rf wpsync-agent)

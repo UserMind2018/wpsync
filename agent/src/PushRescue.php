@@ -1,0 +1,225 @@
+<?php
+namespace WpSync;
+
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
+
+/**
+ * Rollback eines Pushs ohne WordPress und ohne Datenbank (Spec Stufe 2, 5.5). Pro Push liegt im
+ * Arbeitsordner eine rescue.json mit den Tausch-Paaren und dem Hash eines Schlüssels, den nur
+ * die CLI aus dem Pairing-Secret ableiten kann. Die Datei ist die Wahrheit über den Tausch;
+ * die Tabelle wpsync_pushes übernimmt ihren Status.
+ */
+final class PushRescue
+{
+    public const COMMITTED   = 'committed';
+    public const CONFIRMED   = 'confirmed';
+    public const ROLLED_BACK = 'rolled_back';
+
+    public const MAX_ATTEMPTS = 5;
+    public const LOCK_SECONDS = 600;
+    public const ID           = '/^p_[0-9]{8}_[a-f0-9]{12}\z/';
+
+    public static function newId(int $now): string
+    {
+        return 'p_' . gmdate('Ymd', $now) . '_' . bin2hex(random_bytes(6));
+    }
+
+    /** Der Server speichert nur sha256() davon – rescue.php braucht kein Secret. */
+    public static function key(string $secret, string $pushId, string $salt): string
+    {
+        return hash_hmac('sha256', 'rescue:' . $pushId . ':' . $salt, $secret);
+    }
+
+    public static function file(string $workDir, string $pushId): string
+    {
+        return $workDir . '/' . $pushId . '/rescue.json';
+    }
+
+    /**
+     * @param list<array{unit: string, target: string, snapshot: string|null, discard: string}> $pairs
+     */
+    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status): void
+    {
+        self::save($workDir, [
+            'push_id'       => $pushId,
+            'key_hash'      => $keyHash,
+            'pairs'         => $pairs,
+            'status'        => $status,
+            'superseded_by' => null,
+            'attempts'      => 0,
+            'locked_until'  => 0,
+        ]);
+    }
+
+    /** @return array<string, mixed>|null */
+    public static function read(string $workDir, string $pushId): ?array
+    {
+        if (preg_match(self::ID, $pushId) !== 1) {
+            return null;
+        }
+        $raw    = @file_get_contents(self::file($workDir, $pushId));
+        $record = $raw === false ? null : json_decode($raw, true);
+        return is_array($record) && ($record['push_id'] ?? null) === $pushId && is_array($record['pairs'] ?? null) ? $record : null;
+    }
+
+    public static function setStatus(string $workDir, string $pushId, string $status): bool
+    {
+        $record = self::read($workDir, $pushId);
+        if ($record === null) {
+            return false;
+        }
+        $record['status'] = $status;
+        self::save($workDir, $record);
+        return true;
+    }
+
+    /**
+     * Ältere, noch aktive Pushes derselben Einheiten lassen sich erst wieder zurückrollen, wenn
+     * dieser hier zurückgerollt ist (U6).
+     *
+     * @param list<string> $units
+     */
+    public static function supersede(string $workDir, string $pushId, array $units): void
+    {
+        foreach (self::others($workDir, $pushId) as $record) {
+            $active = in_array($record['status'], [self::COMMITTED, self::CONFIRMED], true) && $record['superseded_by'] === null;
+            $shared = array_intersect($units, array_column($record['pairs'], 'unit')) !== [];
+            if ($active && $shared) {
+                $record['superseded_by'] = $pushId;
+                self::save($workDir, $record);
+            }
+        }
+    }
+
+    /**
+     * Einstieg für rescue.php.
+     *
+     * @param array<string, mixed> $post
+     * @return array{0: int, 1: array<string, mixed>} HTTP-Status und JSON-Antwort
+     */
+    public static function handle(string $contentDir, array $post, int $now): array
+    {
+        $action = $post['action'] ?? '';
+        if ($action === 'ping') {
+            return [200, ['ok' => true]];
+        }
+        $pushId = $post['push_id'] ?? '';
+        $key    = $post['key'] ?? '';
+        if ($action !== 'rollback' || !is_string($pushId) || !is_string($key) || preg_match(self::ID, $pushId) !== 1) {
+            return [400, ['ok' => false, 'error' => 'bad request']];
+        }
+        // glob() liefert bei einem Fehler false – (array) false wäre [false] und damit der Pfad ''.
+        foreach (glob($contentDir . '/wpsync-push-*', GLOB_ONLYDIR) ?: [] as $workDir) {
+            $record = self::read((string) $workDir, $pushId);
+            if ($record === null) {
+                continue;
+            }
+            if ((int) $record['locked_until'] > $now) {
+                return [429, ['ok' => false, 'error' => 'locked']];
+            }
+            if (!hash_equals((string) $record['key_hash'], hash('sha256', $key))) {
+                $record['attempts'] = (int) $record['attempts'] + 1;
+                if ($record['attempts'] >= self::MAX_ATTEMPTS) {
+                    $record['attempts']     = 0;
+                    $record['locked_until'] = $now + self::LOCK_SECONDS;
+                }
+                self::save((string) $workDir, $record);
+                return [403, ['ok' => false, 'error' => 'wrong key']];
+            }
+            // Notfallweg nur für den unbestätigten Push (U18): einen bestätigten rollt nur der Agent
+            // zurück – per CLI bei offenem Push-Fenster oder im WP-Admin. rescue.php kennt kein Fenster.
+            if ($record['status'] === self::CONFIRMED) {
+                return [409, ['ok' => false, 'error' => 'confirmed']];
+            }
+            return self::rollback($contentDir, (string) $workDir, $pushId);
+        }
+        return [404, ['ok' => false, 'error' => 'unknown push']];
+    }
+
+    /**
+     * Tauscht alle Paare eines Pushs zurück. Ohne Schlüsselprüfung – die leistet handle() bzw.
+     * die signierte REST-Route.
+     *
+     * @return array{0: int, 1: array<string, mixed>}
+     */
+    public static function rollback(string $contentDir, string $workDir, string $pushId): array
+    {
+        $record = self::read($workDir, $pushId);
+        if ($record === null) {
+            return [404, ['ok' => false, 'error' => 'unknown push']];
+        }
+        if ($record['status'] === self::ROLLED_BACK) {
+            return [200, ['ok' => true, 'status' => self::ROLLED_BACK]];
+        }
+        if ($record['superseded_by'] !== null) {
+            return [409, ['ok' => false, 'error' => 'superseded', 'by' => $record['superseded_by']]];
+        }
+        $root = rtrim(str_replace('\\', '/', (string) realpath($contentDir)), '/');
+        foreach ($record['pairs'] as $pair) {
+            foreach ([$pair['target'], $pair['snapshot'], $pair['discard']] as $path) {
+                if ($path !== null && !self::inside($root, (string) $path)) {
+                    return [409, ['ok' => false, 'error' => 'path outside wp-content']];
+                }
+            }
+        }
+        $failed = [];
+        foreach (array_reverse($record['pairs']) as $pair) {
+            if ($pair['snapshot'] !== null && !is_dir((string) $pair['snapshot']) && is_dir((string) $pair['target'])) {
+                continue; // der Tausch brach vor diesem Paar ab – das Ziel ist noch der alte Stand
+            }
+            if (!is_dir(dirname((string) $pair['discard']))) {
+                @mkdir(dirname((string) $pair['discard']), 0755, true);
+            }
+            if (!PushSwap::restore((string) $pair['target'], $pair['snapshot'], (string) $pair['discard'])) {
+                $failed[] = (string) $pair['unit'];
+            }
+        }
+        PushSwap::resetCaches();
+        if ($failed !== []) {
+            return [500, ['ok' => false, 'error' => 'restore failed', 'units' => $failed]];
+        }
+        $record['status'] = self::ROLLED_BACK;
+        self::save($workDir, $record);
+        foreach (self::others($workDir, $pushId) as $other) {
+            if ($other['superseded_by'] === $pushId) {
+                $other['superseded_by'] = null;
+                self::save($workDir, $other);
+            }
+        }
+        return [200, ['ok' => true, 'status' => self::ROLLED_BACK]];
+    }
+
+    private static function inside(string $root, string $path): bool
+    {
+        $path = str_replace('\\', '/', $path);
+        return $root !== '' && strpos($path, $root . '/') === 0 && !in_array('..', explode('/', $path), true);
+    }
+
+    /** @return list<array<string, mixed>> alle lesbaren Datensätze ausser $pushId */
+    private static function others(string $workDir, string $pushId): array
+    {
+        $out = [];
+        foreach ((array) @scandir($workDir) as $name) {
+            if (is_string($name) && $name !== $pushId) {
+                $record = self::read($workDir, $name);
+                if ($record !== null) {
+                    $out[] = $record;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** @param array<string, mixed> $record */
+    private static function save(string $workDir, array $record): void
+    {
+        $file = self::file($workDir, (string) $record['push_id']);
+        if (!is_dir(dirname($file))) {
+            @mkdir(dirname($file), 0755, true);
+        }
+        $tmp = $file . '.tmp';
+        if (@file_put_contents($tmp, (string) json_encode($record)) === false || !@rename($tmp, $file)) {
+            throw new \RuntimeException('cannot write the rescue record');
+        }
+    }
+}

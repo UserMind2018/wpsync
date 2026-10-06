@@ -4,11 +4,20 @@ namespace WpSync;
 defined('ABSPATH') || exit;
 
 /**
- * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen und widerrufen.
- * Das Secret wird nie angezeigt (Spike B19, AC-5).
+ * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen und widerrufen, Push-Fenster
+ * öffnen, Pushes ansehen und zurückrollen. Das Secret wird nie angezeigt (Spike B19, AC-5).
  */
 final class Admin
 {
+    private const STATUS = [
+        Push::UPLOADING         => 'Upload läuft',
+        PushRescue::COMMITTED   => 'getauscht, nicht bestätigt',
+        PushRescue::CONFIRMED   => 'bestätigt',
+        PushRescue::ROLLED_BACK => 'zurückgerollt',
+        Push::FAILED            => 'fehlgeschlagen',
+        Push::EXPIRED           => 'verfallen',
+    ];
+
     public static function register(): void
     {
         add_action('admin_menu', static function (): void {
@@ -26,17 +35,36 @@ final class Admin
         $code = null;
         if (isset($_POST['wpsync_action']) && check_admin_referer('wpsync_admin')) {
             $action = sanitize_key((string) wp_unslash($_POST['wpsync_action']));
+            $keyId  = isset($_POST['key_id']) ? sanitize_key((string) wp_unslash($_POST['key_id'])) : '';
             if ($action === 'new_code') {
                 $code = Store::issuePairingCode();
-            } elseif ($action === 'revoke' && isset($_POST['key_id'])) {
-                Store::deletePairing(sanitize_key((string) wp_unslash($_POST['key_id'])));
-                echo '<div class="notice notice-success"><p>Pairing widerrufen.</p></div>';
+            } elseif ($action === 'revoke' && $keyId !== '') {
+                Store::deletePairing($keyId);
+                self::notice('success', 'Pairing widerrufen.');
+            } elseif ($action === 'open_window' && $keyId !== '') {
+                $seconds = isset($_POST['seconds']) ? (int) wp_unslash($_POST['seconds']) : 0;
+                if (isset(PushWindow::DURATIONS[$seconds])) {
+                    Store::setPushUntil($keyId, PushWindow::until($seconds, time()));
+                    self::notice('success', 'Push-Fenster geöffnet für ' . PushWindow::DURATIONS[$seconds] . '.');
+                }
+            } elseif ($action === 'close_window' && $keyId !== '') {
+                Store::setPushUntil($keyId, 0);
+                self::notice('success', 'Push-Fenster geschlossen.');
+            } elseif ($action === 'rollback' && isset($_POST['push_id'])) {
+                $result = Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST['push_id'])));
+                if ($result instanceof \WP_Error) {
+                    self::notice('error', $result->get_error_message());
+                } else {
+                    self::notice('success', 'Push zurückgerollt.');
+                }
             }
         }
+        Push::sync();
+        $now = time();
         ?>
         <div class="wrap">
             <h1>wpsync</h1>
-            <p>Lesende Schnittstelle für <code>wpsync pull</code> (Live → Lokal).</p>
+            <p>Schnittstelle für <code>wpsync pull</code> (Live → Lokal) und <code>wpsync push</code> (Code, nur im Push-Fenster).</p>
 
             <h2>Neues Gerät koppeln</h2>
             <?php if ($code !== null) : ?>
@@ -53,14 +81,34 @@ final class Admin
             <?php endif; ?>
 
             <h2>Gekoppelte Geräte</h2>
+            <p>Ein Gerät kann Code nur pushen, solange sein Push-Fenster offen ist. Das Fenster schliesst sich von selbst.</p>
             <table class="widefat striped">
-                <thead><tr><th>Gerät</th><th>Gekoppelt</th><th>Zuletzt benutzt</th><th></th></tr></thead>
+                <thead><tr><th>Gerät</th><th>Gekoppelt</th><th>Zuletzt benutzt</th><th>Push-Fenster</th><th></th></tr></thead>
                 <tbody>
                 <?php foreach (Store::pairings() as $pairing) : ?>
                     <tr>
                         <td><?php echo esc_html($pairing['device']); ?></td>
                         <td><?php echo esc_html(wp_date('d.m.Y H:i', $pairing['created'])); ?></td>
                         <td><?php echo $pairing['last_used'] === null ? '–' : esc_html(wp_date('d.m.Y H:i', $pairing['last_used'])); ?></td>
+                        <td>
+                            <?php echo esc_html(PushWindow::label($pairing['push_until'], $now)); ?>
+                            <form method="post" style="display:inline-block;margin-left:1em">
+                                <?php wp_nonce_field('wpsync_admin'); ?>
+                                <input type="hidden" name="key_id" value="<?php echo esc_attr($pairing['key_id']); ?>">
+                                <?php if (PushWindow::open($pairing['push_until'], $now)) : ?>
+                                    <input type="hidden" name="wpsync_action" value="close_window">
+                                    <button type="submit" class="button">Schliessen</button>
+                                <?php else : ?>
+                                    <input type="hidden" name="wpsync_action" value="open_window">
+                                    <select name="seconds">
+                                        <?php foreach (PushWindow::DURATIONS as $seconds => $label) : ?>
+                                            <option value="<?php echo esc_attr((string) $seconds); ?>"><?php echo esc_html($label); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <button type="submit" class="button">Öffnen</button>
+                                <?php endif; ?>
+                            </form>
+                        </td>
                         <td>
                             <form method="post">
                                 <?php wp_nonce_field('wpsync_admin'); ?>
@@ -73,7 +121,63 @@ final class Admin
                 <?php endforeach; ?>
                 </tbody>
             </table>
+
+            <h2>Pushes</h2>
+            <?php $pushes = Store::pushes(20); ?>
+            <?php if ($pushes === []) : ?>
+                <p>Noch kein Push.</p>
+            <?php else : ?>
+                <table class="widefat striped">
+                    <thead><tr><th>Zeit</th><th>Gerät</th><th>Einheiten</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                    <?php foreach ($pushes as $push) : ?>
+                        <tr>
+                            <td><?php echo esc_html(wp_date('d.m.Y H:i', $push['created'])); ?><br><code><?php echo esc_html($push['push_id']); ?></code></td>
+                            <td><?php echo esc_html($push['device']); ?></td>
+                            <td>
+                                <?php foreach ($push['units'] as $unit) : ?>
+                                    <?php echo esc_html(self::unitLine($unit)); ?><br>
+                                <?php endforeach; ?>
+                            </td>
+                            <td><?php echo esc_html((self::STATUS[$push['status']] ?? $push['status']) . ($push['forced'] ? ' (--force)' : '')); ?></td>
+                            <td>
+                                <?php if (!$push['pruned'] && in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) : ?>
+                                    <form method="post">
+                                        <?php wp_nonce_field('wpsync_admin'); ?>
+                                        <input type="hidden" name="wpsync_action" value="rollback">
+                                        <input type="hidden" name="push_id" value="<?php echo esc_attr($push['push_id']); ?>">
+                                        <button type="submit" class="button">Zurückrollen</button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
         </div>
         <?php
+    }
+
+    /** @param array<string, mixed> $unit */
+    private static function unitLine(array $unit): string
+    {
+        $line = (string) ($unit['path'] ?? '');
+        $old  = (string) ($unit['old_version'] ?? '');
+        $new  = (string) ($unit['new_version'] ?? '');
+        if (empty($unit['exists'])) {
+            $line .= ' (neu)';
+        }
+        if ($new !== '' && $old !== $new) {
+            $line .= ' ' . ($old !== '' ? $old . ' → ' : '') . $new;
+        } elseif ($new !== '') {
+            $line .= ' ' . $new;
+        }
+        return $line . ' – ' . (int) ($unit['uploaded'] ?? 0) . ' von ' . (int) ($unit['files'] ?? 0) . ' Dateien übertragen';
+    }
+
+    private static function notice(string $type, string $message): void
+    {
+        echo '<div class="notice notice-' . esc_attr($type) . '"><p>' . esc_html($message) . '</p></div>';
     }
 }

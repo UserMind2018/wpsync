@@ -30,3 +30,24 @@ func TestPrintable(t *testing.T) {
 		t.Errorf("exactly 80 bytes must not be cut: %s", got)
 	}
 }
+
+// M3: messages of the agent stay readable, but cannot steer the terminal.
+func TestCleanText(t *testing.T) {
+	cases := map[string]string{
+		"Zurückrollen": "Zurückrollen",
+		"Push-Fenster geschlossen – öffnen ß": "Push-Fenster geschlossen – öffnen ß",
+		"日本語 € 😀":                             "日本語 € 😀",
+		"\x1b]52;c;ZWNobyBoaQ==\x07":          "�]52;c;ZWNobyBoaQ==�",
+		"a\x1b[2Jb\x7f":                       "a�[2Jb�",
+		"a\nb\tc\rd\x00":                      "a�b�c�d�",
+		"a\u009b31mb\u0085":                   "a�31mb�",
+		"wp_‮gnp.sql":                         "wp_�gnp.sql",
+		"‪‫‬‭⁦⁧⁨⁩":                            strings.Repeat("�", 8),
+		"a\x9bb":                              "a�b", // invalid UTF-8: an 8-bit CSI
+	}
+	for in, want := range cases {
+		if got := CleanText(in); got != want {
+			t.Errorf("CleanText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
