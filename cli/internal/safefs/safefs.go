@@ -20,6 +20,17 @@ import (
 // ErrSymlink: a folder on the way is a symlink (or no folder); wpsync neither writes nor deletes there.
 var ErrSymlink = errors.New("symbolischer Link (oder Datei statt Ordner) im Pfad – wpsync schreibt, liest und löscht dort nicht")
 
+// TestHookBeforeFinal runs, if set, right before the final Rename of WriteFile and the Remove of
+// Remove – after the last Lstat check. Only tests set it, to swap a folder for a symlink at the
+// worst moment deterministically (Nach-Review K-1).
+var TestHookBeforeFinal func()
+
+func hook() {
+	if TestHookBeforeFinal != nil {
+		TestHookBeforeFinal()
+	}
+}
+
 // TmpSuffix marks the temporary file of WriteFile; the snapshot ignores it.
 const TmpSuffix = ".wpsync-tmp"
 
@@ -74,15 +85,45 @@ func MkdirAll(r *os.Root, rel string, perm fs.FileMode) error {
 
 // OpenTree opens base/rel as a root, creating it first; no folder below base may be a symlink.
 func OpenTree(base, rel string) (*os.Root, error) {
+	return openSub(base, rel, true)
+}
+
+// OpenDir opens the existing folder base/rel as a root; no folder below base may be a symlink.
+func OpenDir(base, rel string) (*os.Root, error) {
+	return openSub(base, rel, false)
+}
+
+// openSub opens base/rel as its own root, so later operations cannot reach anything in base
+// outside rel. The folder is checked with Lstat and, after opening, compared with what was opened:
+// a folder swapped for a symlink in between is refused (Nach-Review K-1).
+func openSub(base, rel string, create bool) (*os.Root, error) {
 	r, err := os.OpenRoot(base)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	if err := MkdirAll(r, rel, 0o755); err != nil {
+	if create {
+		err = MkdirAll(r, rel, 0o755)
+	} else {
+		err = CheckParents(r, filepath.Join(rel, "x"))
+	}
+	if err != nil {
 		return nil, err
 	}
-	return r.OpenRoot(rel)
+	want, err := r.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	sub, err := r.OpenRoot(rel)
+	if err != nil {
+		return nil, err
+	}
+	got, err := sub.Stat(".")
+	if err != nil || !want.IsDir() || !os.SameFile(want, got) {
+		sub.Close()
+		return nil, fmt.Errorf("%s changed while opening: %w", rel, ErrSymlink)
+	}
+	return sub, nil
 }
 
 // Lstat describes rel without following it; a symlinked folder on the way is ErrSymlink.
@@ -98,6 +139,7 @@ func Remove(r *os.Root, rel string) error {
 	if err := CheckParents(r, rel); err != nil {
 		return err
 	}
+	hook()
 	return r.Remove(rel)
 }
 
@@ -138,6 +180,7 @@ func WriteFile(r *os.Root, rel string, src io.Reader, size int64, mtime time.Tim
 		r.Remove(tmp)
 		return err
 	}
+	hook()
 	return r.Rename(tmp, rel)
 }
 

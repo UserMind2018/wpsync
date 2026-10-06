@@ -10,6 +10,7 @@ import (
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
 	"github.com/usermind/wpsync/internal/localgit"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // SEC-113 (Review K1): Site-Code legt im Docroot einen Symlink auf <slug>/.wpsync/history.git und
@@ -165,5 +166,65 @@ func TestBaselineSaveRefusesSymlinks(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "keep" {
 		t.Fatalf("baseline.Save wrote through a symlink: %q", b)
+	}
+}
+
+// swapIntoHistory sets the safefs hook so that, after the last Lstat check, the site swaps
+// <docroot>/wp-content/a for a symlink into <siteDir>/.wpsync/history.git (Nach-Review K-1).
+func swapIntoHistory(t *testing.T, docroot string) {
+	t.Helper()
+	a := filepath.Join(docroot, "wp-content", "a")
+	safefs.TestHookBeforeFinal = func() {
+		os.Rename(a, a+".real")
+		os.Symlink("../../.wpsync/history.git", a)
+	}
+	t.Cleanup(func() { safefs.TestHookBeforeFinal = nil })
+}
+
+func historyFixture(t *testing.T) (docroot, gitDir string) {
+	t.Helper()
+	siteDir := t.TempDir()
+	docroot = filepath.Join(siteDir, "html")
+	os.MkdirAll(filepath.Join(docroot, "wp-content", "a"), 0o755)
+	gitDir = filepath.Join(siteDir, ".wpsync", "history.git")
+	os.MkdirAll(gitDir, 0o700)
+	os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+	return docroot, gitDir
+}
+
+// Die Grenze jeder Docroot-Operation ist der Docroot selbst: ein im letzten Moment getauschter
+// Ordner führt nicht nach <slug>/.wpsync.
+func TestSwappedFolderCannotWriteIntoHistory(t *testing.T) {
+	docroot, gitDir := historyFixture(t)
+	// precondition of the review: a stale temp file with the attacker's content in history.git
+	os.WriteFile(filepath.Join(gitDir, "commondir.wpsync-tmp"), []byte("../../html/evil\n"), 0o644)
+	swapIntoHistory(t, docroot)
+	writeFile(docroot, "wp-content/a/commondir", strings.NewReader("x"), 1, 1)
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		t.Fatal("history.git/commondir written")
+	}
+}
+
+func TestSwappedFolderCannotRemoveFromHistory(t *testing.T) {
+	docroot, gitDir := historyFixture(t)
+	swapIntoHistory(t, docroot)
+	RemoveFiles(docroot, []string{"wp-content/a/HEAD"})
+	if _, err := os.Lstat(filepath.Join(gitDir, "HEAD")); err != nil {
+		t.Fatal("history.git/HEAD removed")
+	}
+}
+
+func TestSwappedFolderCannotRemoveDropInsFromHistory(t *testing.T) {
+	docroot, gitDir := historyFixture(t)
+	os.WriteFile(filepath.Join(gitDir, "advanced-cache.php"), nil, 0o644)
+	wp := filepath.Join(docroot, "wp-content")
+	safefs.TestHookBeforeFinal = func() {
+		os.Rename(wp, wp+".real")
+		os.Symlink("../.wpsync/history.git", wp)
+	}
+	t.Cleanup(func() { safefs.TestHookBeforeFinal = nil })
+	RemoveDropIns(docroot)
+	if _, err := os.Lstat(filepath.Join(gitDir, "advanced-cache.php")); err != nil {
+		t.Fatal("RemoveDropIns removed from history.git")
 	}
 }

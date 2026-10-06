@@ -157,13 +157,13 @@ func pluginSlug(file string) string {
 // RemoveDropIns deletes caching drop-ins below docroot/wp-content without following a symlinked
 // docroot or wp-content (SEC-113).
 func RemoveDropIns(docroot string) {
-	root, base, err := openDocroot(docroot)
+	root, err := openDocroot(docroot, false)
 	if err != nil {
 		return
 	}
 	defer root.Close()
 	for _, name := range DropIns {
-		safefs.Remove(root, filepath.Join(base, "wp-content", name))
+		safefs.Remove(root, filepath.Join("wp-content", name))
 	}
 }
 

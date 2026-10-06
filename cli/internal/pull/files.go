@@ -22,7 +22,7 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 	if err := os.MkdirAll(filepath.Dir(filepath.Clean(docroot)), 0o755); err != nil {
 		return err
 	}
-	root, base, err := openDocroot(docroot)
+	root, err := openDocroot(docroot, true)
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 			paths[i] = f.Path
 		}
 		err := c.Files(paths, func(path string, size, mtime int64, body io.Reader) error {
-			return writeFileIn(root, base, path, body, size, mtime)
+			return writeFileIn(root, path, body, size, mtime)
 		}, func(path string) {
 			fmt.Fprintf(out, "  ! übersprungen (fehlt oder ungültig): %s\n", path)
 		})
@@ -69,35 +69,36 @@ func bundles(files []agentapi.File, limit int64) [][]agentapi.File {
 	return out
 }
 
-// openDocroot opens the folder that holds docroot as the root of every file operation of a pull,
-// so the docroot itself is checked like every folder below it (Mac: public/ lies in the DDEV
-// mount, the site could swap it for a symlink). base is the docroot's name in that root.
-func openDocroot(docroot string) (*os.Root, string, error) {
-	root, err := os.OpenRoot(filepath.Dir(filepath.Clean(docroot)))
-	if err != nil {
-		return nil, "", err
+// openDocroot opens the docroot itself as the root of every file operation of a pull: nothing
+// outside it – in the server mode <slug>/.wpsync next door – is reachable, whatever the site
+// swaps for a symlink while wpsync works (Nach-Review K-1). The docroot must not be a symlink
+// (Mac: public/ lies in the DDEV mount). create makes it on the first pull.
+func openDocroot(docroot string, create bool) (*os.Root, error) {
+	clean := filepath.Clean(docroot)
+	if create {
+		return safefs.OpenTree(filepath.Dir(clean), filepath.Base(clean))
 	}
-	return root, filepath.Base(filepath.Clean(docroot)), nil
+	return safefs.OpenDir(filepath.Dir(clean), filepath.Base(clean))
 }
 
-// docrootRel checks rel like SafeJoin and returns it relative to the root of openDocroot.
-func docrootRel(base, rel string) (string, error) {
+// docrootRel checks rel like SafeJoin and returns it cleaned, relative to the docroot.
+func docrootRel(rel string) (string, error) {
 	if _, err := SafeJoin("/", rel); err != nil {
 		return "", err
 	}
-	return filepath.Join(base, filepath.Clean(rel)), nil
+	return filepath.Clean(rel), nil
 }
 
 // RemoveFiles deletes files that disappeared on the source. A symlink is removed itself; a path
 // through a symlinked folder is skipped (SEC-113).
 func RemoveFiles(docroot string, paths []string) {
-	root, base, err := openDocroot(docroot)
+	root, err := openDocroot(docroot, false)
 	if err != nil {
 		return
 	}
 	defer root.Close()
 	for _, rel := range paths {
-		if target, err := docrootRel(base, rel); err == nil {
+		if target, err := docrootRel(rel); err == nil {
 			safefs.Remove(root, target)
 		}
 	}
@@ -107,12 +108,12 @@ func RemoveFiles(docroot string, paths []string) {
 // Symlinks never count: neither the file nor a folder on the way is followed.
 func PresentLocally(docroot string) func(agentapi.File) bool {
 	return func(f agentapi.File) bool {
-		root, base, err := openDocroot(docroot)
+		root, err := openDocroot(docroot, false)
 		if err != nil {
 			return false
 		}
 		defer root.Close()
-		target, err := docrootRel(base, f.Path)
+		target, err := docrootRel(f.Path)
 		if err != nil {
 			return false
 		}
@@ -159,19 +160,19 @@ func dropVCSPaths(files []agentapi.File) ([]agentapi.File, int) {
 
 // writeFile writes atomically and sets the source mtime (needed for resume).
 func writeFile(docroot, rel string, src io.Reader, size, mtime int64) error {
-	root, base, err := openDocroot(docroot)
+	root, err := openDocroot(docroot, true)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	return writeFileIn(root, base, rel, src, size, mtime)
+	return writeFileIn(root, rel, src, size, mtime)
 }
 
-// writeFileIn writes below the docroot base of root. A symlink on the way – the docroot, a folder
+// writeFileIn writes below the docroot root. A symlink on the way – the docroot, a folder
 // below it – fails the write instead of following it (SEC-113: a link to .wpsync/history.git would
 // let the source replace its config); a file that is a symlink is replaced, not its target.
-func writeFileIn(root *os.Root, base, rel string, src io.Reader, size, mtime int64) error {
-	target, err := docrootRel(base, rel)
+func writeFileIn(root *os.Root, rel string, src io.Reader, size, mtime int64) error {
+	target, err := docrootRel(rel)
 	if err != nil {
 		return err
 	}

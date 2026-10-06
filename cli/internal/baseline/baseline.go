@@ -78,14 +78,11 @@ func Save(siteDir string, b *Baseline) error {
 	if err := os.MkdirAll(siteDir, 0o755); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(siteDir)
+	// The root is <siteDir>/.wpsync, not the site folder: it never spans the docroot (Nach-Review K-1).
+	root, err := safefs.OpenTree(siteDir, ".wpsync")
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	rel, err := filepath.Rel(siteDir, file(siteDir))
-	if err != nil {
-		return err
-	}
-	return safefs.WriteFile(root, rel, bytes.NewReader(data), int64(len(data)), time.Time{}, 0o644)
+	return safefs.WriteFile(root, filepath.Base(file(siteDir)), bytes.NewReader(data), int64(len(data)), time.Time{}, 0o644)
 }

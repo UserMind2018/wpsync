@@ -149,7 +149,9 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 }
 
 // writeGitignore replaces <siteDir>/.gitignore. On the Mac the site folder lies in the DDEV mount:
-// a symlink there is replaced, never followed (SEC-113).
+// a symlink there is replaced, never followed (SEC-113). The root spans the site folder, but the
+// name has no folder part: O_EXCL and rename never resolve a symlink of the site. In the server
+// mode the site cannot write <slug>/ at all, only the mounted docroot.
 func writeGitignore(siteDir, content string) error {
 	root, err := os.OpenRoot(siteDir)
 	if err != nil {

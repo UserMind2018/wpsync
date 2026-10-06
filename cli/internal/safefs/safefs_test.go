@@ -124,3 +124,47 @@ func TestOpenTreeRefusesSymlink(t *testing.T) {
 		t.Fatalf("tables = %v, %v", info, err)
 	}
 }
+
+// Nach-Review K-1 (Belegtests sinngemäß): ist die Root der Docroot, führt ein nach der letzten
+// Prüfung getauschter Ordner nicht in den Nachbarordner .wpsync – weder beim Rename noch beim Remove.
+func TestHookSwapCannotLeaveDocroot(t *testing.T) {
+	site := t.TempDir()
+	a := filepath.Join(site, "public", "a")
+	os.MkdirAll(a, 0o755)
+	git := filepath.Join(site, ".wpsync", "history.git")
+	os.MkdirAll(git, 0o700)
+	os.WriteFile(filepath.Join(git, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+	os.WriteFile(filepath.Join(git, "commondir.wpsync-tmp"), []byte("../../public/evil\n"), 0o644)
+	TestHookBeforeFinal = func() {
+		os.Rename(a, a+".real")
+		os.Symlink("../.wpsync/history.git", a)
+	}
+	t.Cleanup(func() { TestHookBeforeFinal = nil })
+	r, err := OpenDir(site, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	WriteFile(r, "a/commondir", strings.NewReader("x"), -1, time.Time{}, 0o644)
+	if _, err := os.Lstat(filepath.Join(git, "commondir")); err == nil {
+		t.Error("history.git/commondir written")
+	}
+	os.Remove(a)
+	os.Rename(a+".real", a)
+	Remove(r, "a/HEAD")
+	if _, err := os.Lstat(filepath.Join(git, "HEAD")); err != nil {
+		t.Error("history.git/HEAD removed")
+	}
+}
+
+// Ein zwischen Lstat und Öffnen getauschter Ordner wird nicht als Root geöffnet.
+func TestOpenDirRefusesSymlink(t *testing.T) {
+	base, outside := t.TempDir(), t.TempDir()
+	os.Symlink(outside, filepath.Join(base, "public"))
+	if _, err := OpenDir(base, "public"); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("OpenDir = %v, want ErrSymlink", err)
+	}
+	if _, err := OpenDir(base, "missing"); err == nil {
+		t.Fatal("OpenDir must not create")
+	}
+}
