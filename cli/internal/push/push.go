@@ -313,7 +313,12 @@ func Run(o Options) error {
 		return rollbackNow(o, journal, urls, before, worse)
 	}
 	if err := o.Client.PushConfirm(begin.PushID); err != nil {
-		return rollbackNow(o, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
+		rbErr := rollbackNow(o, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
+		if !errors.Is(rbErr, ErrRescueConfirmed) {
+			return rbErr
+		}
+		// confirm went through, only its answer was lost; the health check had passed.
+		fmt.Fprintln(o.Out, "  rescue.php meldet den Push als bereits bestätigt – nur die Antwort ging verloren, er bleibt live")
 	}
 
 	Apply(base, stamps)

@@ -553,6 +553,26 @@ func TestRunRollsBackWhenTheAgentNoLongerAnswers(t *testing.T) {
 	}
 }
 
+// confirm went through on the server, only its answer was lost: rescue.php then refuses with
+// "confirmed", and the push counts as live – no "ROLLBACK FEHLGESCHLAGEN" on a healthy site.
+func TestRunTreatsALostConfirmAnswerAsConfirmed(t *testing.T) {
+	f := newFakeSite(t)
+	f.confirm = 500
+	f.rescue = 409
+	f.rescueErr = "confirmed"
+	o, siteDir, out := localSite(t, f)
+	if err := Run(o); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(out.String(), "ist live") || !strings.Contains(out.String(), "bereits bestätigt") {
+		t.Errorf("out = %s", out.String())
+	}
+	base, _ := baseline.Load(siteDir)
+	if base.Files["wp-content/plugins/x/main.php"].MTime == 1700000000 {
+		t.Error("baseline must move on: the push is live")
+	}
+}
+
 func TestRunReportsAFailedRollbackLoudly(t *testing.T) {
 	f := newFakeSite(t)
 	f.broken = true
