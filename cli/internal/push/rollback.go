@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -37,7 +38,7 @@ func Pushes(o Options) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(o.Out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "PUSH\tZEIT\tGERÄT\tSTATUS\tEINHEITEN")
+	fmt.Fprintln(w, "PUSH\tZEIT\tZIEL\tGERÄT\tSTATUS\tEINHEITEN")
 	for _, r := range records {
 		status := statusLabel[r.Status]
 		if status == "" {
@@ -57,10 +58,17 @@ func Pushes(o Options) error {
 				units = append(units, agentapi.Printable(u.Path))
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
-			agentapi.Printable(r.Device), status, strings.Join(units, ", "))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
+			targetLabel(r.Target), agentapi.Printable(r.Device), status, strings.Join(units, ", "))
 	}
 	return w.Flush()
+}
+
+// List returns the push log of the site, newest first (pushes --json). Device, status, target
+// and unit paths are the agent's words, unescaped.
+func List(o Options) ([]agentapi.PushRecord, error) {
+	o = o.defaults()
+	return o.Client.PushList()
 }
 
 // ConfirmPending marks a push as healthy that was swapped in but never confirmed, e.g. because
@@ -78,8 +86,13 @@ func ConfirmPending(o Options, pushID string) error {
 }
 
 // Rollback takes a push back: through the agent, or through rescue.php when WordPress no longer
-// answers. Without pushID it picks the latest push that still has a snapshot.
+// answers. Without pushID it picks the latest push of the target that still has a snapshot – of
+// live unless Target names staging (V10). With pushID the push itself decides where the rollback
+// happens; a Target that names the other side stops it before any request.
 func Rollback(o Options, pushID string) error {
+	if err := o.checkTarget(); err != nil {
+		return err
+	}
 	unlock, err := lock(o)
 	if err != nil {
 		return err
@@ -87,14 +100,37 @@ func Rollback(o Options, pushID string) error {
 	defer unlock()
 	o = o.defaults()
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
+	target := "" // where the push went, as far as anyone can tell
+	var units []string
 	if pushID == "" {
-		pushID = latest(o, siteDir)
+		pushID, target = latest(o, siteDir)
 		if pushID == "" {
-			return errors.New("kein Push gefunden, der sich zurückrollen lässt – wpsync pushes zeigt das Protokoll")
+			return fmt.Errorf("kein Push nach %s gefunden, der sich zurückrollen lässt – wpsync pushes zeigt das Protokoll", targetLabel(o.target()))
 		}
 	}
 	if !pushIDRe.MatchString(pushID) {
 		return fmt.Errorf("ungültige Push-ID %q", pushID)
+	}
+	j, jerr := LoadJournal(siteDir, pushID)
+	switch {
+	case jerr == nil && target != "" && target != j.target():
+		return fmt.Errorf("%w: der Agent führt Push %s als %s, das Journal dieses Rechners als %s – nichts zurückgerollt",
+			ErrTargetMismatch, pushID, targetLabel(target), targetLabel(j.target()))
+	case jerr == nil:
+		target = j.target()
+		for unit := range j.Units {
+			units = append(units, unit)
+		}
+		sort.Strings(units)
+	case target == "" && (o.Target != "" || o.Report != nil):
+		// A push from another machine: only the agent knows where it went.
+		target, units = recorded(o, pushID)
+	}
+	if o.Target != "" && target != o.Target {
+		if target == "" {
+			return fmt.Errorf("%w: wohin Push %s ging, lässt sich nicht prüfen – ohne --to wiederholen", ErrTargetMismatch, pushID)
+		}
+		return &TargetError{PushID: pushID, Is: target, Want: o.Target}
 	}
 
 	if err := o.Client.PushRollback(pushID); err != nil {
@@ -103,15 +139,14 @@ func Rollback(o Options, pushID string) error {
 			return fmt.Errorf("Push %s: %w", pushID, ErrRollbackWindow) // never around the window through rescue.php
 		}
 		if errors.As(err, &apiErr) && apiErr.Code != "" && apiErr.Status < 500 {
-			return err // the agent answered and refused: superseded, pruned or not ours
+			return agentError(target, err) // the agent answered and refused: superseded, pruned or not ours
 		}
 		// WordPress does not answer – the reason this script exists.
-		j, jerr := LoadJournal(siteDir, pushID)
 		if jerr != nil {
 			return fmt.Errorf("der Agent antwortet nicht (%v) und %w – im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, jerr)
 		}
 		// The journal is writable from the containers; the key goes only to the site paired in the
-		// configuration.
+		// configuration. rescue.php finds the push by its ID in the wp-content it was swapped in.
 		if !onSite(o.Site.URL, j.RescueURL) {
 			return fmt.Errorf("der Agent antwortet nicht (%v) und das Journal zu Push %s nennt eine Rescue-URL ausserhalb von %s (%s) – "+
 				"rescue.php wird nicht aufgerufen; im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, pushID, o.Site.URL, agentapi.Printable(j.RescueURL))
@@ -122,9 +157,18 @@ func Rollback(o Options, pushID string) error {
 		}
 	}
 	fmt.Fprintf(o.Out, "✓ Push %s ist zurückgerollt.\n", pushID)
+	if o.Report != nil {
+		if units == nil {
+			units = []string{}
+		}
+		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units}
+	}
 
-	j, err := LoadJournal(siteDir, pushID)
-	if err != nil || !j.Applied {
+	if target == TargetStaging {
+		fmt.Fprintln(o.Out, "  Push nach Staging – die Baseline bildet Live ab und bleibt unverändert.")
+		return nil
+	}
+	if jerr != nil || !j.Applied {
 		fmt.Fprintf(o.Out, "  Die Baseline dieses Rechners kennt den Push nicht – auffrischen mit: wpsync pull %s\n", o.Site.Name)
 		return nil
 	}
@@ -143,17 +187,50 @@ func Rollback(o Options, pushID string) error {
 	return o.Commit(siteDir, fmt.Sprintf("rollback %s on %s", pushID, o.Site.URL))
 }
 
-// latest asks the agent for the newest push with a snapshot; if it does not answer, the newest
-// journal of this machine decides.
-func latest(o Options, siteDir string) string {
-	records, err := o.Client.PushList()
-	if err != nil {
-		return LatestJournal(siteDir)
-	}
-	for _, r := range records {
-		if !r.Pruned && (r.Status == "committed" || r.Status == "confirmed") {
-			return r.PushID
-		}
+// recordTarget is the target of a line of the push log: live for an agent that names none, ""
+// for a word this CLI does not know.
+func recordTarget(r agentapi.PushRecord) string {
+	switch r.Target {
+	case "", TargetLive:
+		return TargetLive
+	case TargetStaging:
+		return TargetStaging
 	}
 	return ""
+}
+
+// latest asks the agent for the newest push of the target with a snapshot; if it does not
+// answer, the newest journal of this machine for that target decides.
+func latest(o Options, siteDir string) (pushID, target string) {
+	records, err := o.Client.PushList()
+	if err != nil {
+		return LatestJournal(siteDir, o.target()), ""
+	}
+	for _, r := range records {
+		if !r.Pruned && (r.Status == "committed" || r.Status == "confirmed") && recordTarget(r) == o.target() {
+			return r.PushID, o.target()
+		}
+	}
+	return "", ""
+}
+
+// recorded looks a push up in the agent's log: its target and units, "" if the agent does not
+// answer or no longer lists it.
+func recorded(o Options, pushID string) (target string, units []string) {
+	records, err := o.Client.PushList()
+	if err != nil {
+		return "", nil
+	}
+	for _, r := range records {
+		if r.PushID != pushID {
+			continue
+		}
+		for _, u := range r.Units {
+			if ValidUnit(u.Path) {
+				units = append(units, u.Path)
+			}
+		}
+		return recordTarget(r), units
+	}
+	return "", nil
 }

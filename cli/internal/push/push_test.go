@@ -21,6 +21,8 @@ import (
 const (
 	testID   = "p_20261005_0123456789ab"
 	testSalt = "00112233445566778899aabbccddeeff"
+	// testStaging is the folder of the staging copy on the fake site.
+	testStaging = "/wpsync-staging-0123456789ab"
 )
 
 // fakeSite plays agent, frontend and rescue.php of one site.
@@ -52,6 +54,16 @@ type fakeSite struct {
 	rescueKey  string
 	chunks     int
 	maxRaw     int // upper bound for the raw bytes of one upload request; 0: unchecked
+
+	stagingHits int      // pages of the staging copy answered with the access cookie
+	logins      int      // login links handed out
+	rbID        string   // push_id of the last /push/rollback
+	answerFor   string   // target /push/begin answers for; empty: the one asked for (agent 0.5.0)
+	realFor     string   // like answerFor, but only for the real begin
+	beginCode   string   // error code of /push/begin; empty: it answers
+	redirect    string   // where the front page of the copy redirects to; empty: it answers
+	cookies     []string // "path cookie-header" of every frontend request
+	stgHealth   []string // extra pages the agent names for a push to staging
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -63,6 +75,34 @@ func newFakeSite(t *testing.T) *fakeSite {
 }
 
 func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("rest_route") == "" && r.URL.Path != "/rescue.php" {
+		f.cookies = append(f.cookies, r.URL.Path+" "+r.Header.Get("Cookie"))
+	}
+	if strings.HasPrefix(r.URL.Path, testStaging) { // the staging copy: access cookie or 403
+		if r.URL.Query().Get("wpsync_login") == "tok" {
+			http.SetCookie(w, &http.Cookie{Name: "wpsync_stg", Value: strings.Repeat("c", 64), Path: testStaging + "/"})
+			http.SetCookie(w, &http.Cookie{Name: "wordpress_logged_in_x", Value: "admin", Path: testStaging + "/"})
+			http.Redirect(w, r, testStaging+"/wp-admin/", http.StatusFound)
+			return
+		}
+		if c, err := r.Cookie("wpsync_stg"); err != nil || c.Value != strings.Repeat("c", 64) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		f.stagingHits++
+		if f.redirect != "" && r.URL.Path == testStaging+"/" {
+			http.SetCookie(w, &http.Cookie{Name: "wordpress_logged_in_x", Value: "admin", Path: "/"})
+			http.Redirect(w, r, f.redirect, http.StatusFound)
+			return
+		}
+		if f.broken && f.committed && !f.rolledBack {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("Fatal error"))
+			return
+		}
+		w.Write([]byte("<html>staging</html>"))
+		return
+	}
 	if r.URL.Path == "/rescue.php" {
 		r.ParseForm()
 		if r.PostForm.Get("action") == "ping" {
@@ -96,14 +136,34 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
 	switch route {
+	case "/wpsync/v1/staging/login":
+		f.logins++
+		w.Write([]byte(`{"url":"` + f.srv.URL + testStaging + `/?wpsync_login=tok","expires":1}`))
 	case "/wpsync/v1/push/begin":
 		var req agentapi.PushBeginRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		f.begins = append(f.begins, req)
+		if f.beginCode != "" {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"code":"` + f.beginCode + `","message":"abgelehnt"}`))
+			return
+		}
 		res := agentapi.PushBegin{
 			AgentVersion: f.version, WindowOpen: f.window,
 			HealthURLs: append([]string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"}, f.health...),
 			Rescue:     agentapi.PushRescue{URL: f.srv.URL + "/rescue.php"},
+		}
+		if AtLeast(f.version, "0.5.0") {
+			res.Target = req.Target
+		}
+		if f.answerFor != "" {
+			res.Target = f.answerFor
+		}
+		if f.realFor != "" && !req.Dry {
+			res.Target = f.realFor
+		}
+		if req.Target == "staging" {
+			res.HealthURLs = append([]string{f.srv.URL + testStaging + "/", f.srv.URL + testStaging + "/wp-login.php"}, f.stgHealth...)
 		}
 		if f.pending {
 			res.Pending = &agentapi.PushPending{PushID: "p_20261004_ba9876543210", Device: "anderer-mac"}
@@ -165,6 +225,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	case "/wpsync/v1/push/confirm":
 		f.status(w, f.confirm)
 	case "/wpsync/v1/push/rollback":
+		var rb struct {
+			PushID string `json:"push_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&rb)
+		f.rbID = rb.PushID
 		if f.rollback == 200 {
 			f.rolledBack = true
 		}

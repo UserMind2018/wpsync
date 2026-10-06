@@ -20,10 +20,17 @@ import (
 	"github.com/usermind/wpsync/internal/localgit"
 	"github.com/usermind/wpsync/internal/sitelock"
 	"github.com/usermind/wpsync/internal/sites"
+	"github.com/usermind/wpsync/internal/staging"
 )
 
 // MinAgent is the first agent version with the push endpoints.
 const MinAgent = "0.4.0"
+
+// Targets of a push (Spec 2b 5.8). The agent takes only the word; the directory is its own.
+const (
+	TargetLive    = "live"
+	TargetStaging = "staging"
+)
 
 // Options for push, rollback and the push log.
 type Options struct {
@@ -37,7 +44,13 @@ type Options struct {
 	AllowVersionChange bool     // with Yes: accept a changed plugin or theme version
 	DryRun             bool     // only show the plan
 
-	Confirm func(string) bool // asks the user; nil without a terminal
+	// Target: live or staging. Empty means live for a push; for a rollback it means "not named":
+	// without a push ID the newest live push, with one the target of that push (V10).
+	Target string
+	Event  func(name string, data any) // --json: plan, upload, commit, health – in this order
+	Report *Result                     // filled when Run or Rollback returns, also with an error
+
+	Confirm func(string) bool // asks the user; nil without a terminal and with --json
 	Out     io.Writer
 
 	// For tests; zero values are replaced in defaults().
@@ -46,6 +59,18 @@ type Options struct {
 	Sleep      func(time.Duration)                 // pauses of the health check
 	Commit     func(siteDir, message string) error // internal git
 	ChunkBytes int                                 // raw bytes per upload request
+	// Access redeems a login link of the staging copy; nil: staging.Access.
+	Access func(c *agentapi.Client, hc *http.Client, siteURL string) (base string, cookie *http.Cookie, err error)
+}
+
+// Result is the data of push --json and rollback --json.
+type Result struct {
+	PushID string `json:"push_id"` // empty until the agent has created the push
+	Target string `json:"target"`  // live or staging; empty only for a rollback whose target nobody could name
+	// Status: dry_run, confirmed, rolled_back, committed (swapped, neither confirmed nor rolled
+	// back – the site needs attention) or empty (nothing on the site changed).
+	Status string   `json:"status"`
+	Units  []string `json:"units"`
 }
 
 var (
@@ -65,7 +90,26 @@ var (
 	ErrAgentTooOld = errors.New("der Agent auf der Site kann noch nicht pushen")
 	// ErrVersionChange: a changed version needs its own confirmation (P9).
 	ErrVersionChange = errors.New("Versionswechsel braucht eine eigene Bestätigung")
+	// ErrNeedsYes: a question without a terminal or with --json (exit code usage).
+	ErrNeedsYes = errors.New("ohne Terminal mit --yes bestätigen")
+	// ErrAgentNoStaging: the agent cannot push to staging (agent < 0.5.0).
+	ErrAgentNoStaging = errors.New("der Agent auf der Site kennt noch kein Staging")
+	// ErrTarget: --to names something else than live or staging. Nothing falls back to live.
+	ErrTarget = errors.New("unbekanntes Ziel – erlaubt sind live und staging")
+	// ErrTargetMismatch: the agent answers for another target than the one asked for, or a push
+	// belongs to another target than the one named.
+	ErrTargetMismatch = errors.New("das Ziel stimmt nicht")
 )
+
+// TargetError: the push belongs to another target than --to names. A rollback never crosses
+// from staging to live or back.
+type TargetError struct{ PushID, Is, Want string }
+
+func (e *TargetError) Error() string {
+	return fmt.Sprintf("Push %s ging nach %s, nicht nach %s", ShowID(e.PushID), targetLabel(e.Is), targetLabel(e.Want))
+}
+
+func (e *TargetError) Unwrap() error { return ErrTargetMismatch }
 
 // PendingError: an earlier push was swapped in but never confirmed (U7).
 type PendingError struct{ PushID, Device string }
@@ -122,7 +166,123 @@ func (o Options) defaults() Options {
 	if o.ChunkBytes <= 0 {
 		o.ChunkBytes = 3 << 20
 	}
+	if o.Access == nil {
+		o.Access = staging.Access
+	}
 	return o
+}
+
+// checkTarget refuses a target that is neither named nor known; a typo must never mean live.
+func (o Options) checkTarget() error {
+	switch o.Target {
+	case "", TargetLive, TargetStaging:
+		return nil
+	}
+	return fmt.Errorf("%w (%s)", ErrTarget, agentapi.Printable(o.Target))
+}
+
+func (o Options) target() string {
+	if o.Target == TargetStaging {
+		return TargetStaging
+	}
+	return TargetLive
+}
+
+func (o Options) event(name string, data any) {
+	if o.Event != nil {
+		o.Event(name, data)
+	}
+}
+
+func targetLabel(target string) string {
+	switch target {
+	case "", TargetLive:
+		return "Live"
+	case TargetStaging:
+		return "Staging"
+	}
+	return agentapi.Printable(target)
+}
+
+// answeredFor checks the target in the agent's answer against the one asked for. An agent
+// before 0.5.0 names none and knows only live.
+func answeredFor(want, got string) error {
+	if got == want || (got == "" && want == TargetLive) {
+		return nil
+	}
+	return fmt.Errorf("%w: angefordert %s, der Agent antwortet für %s – nichts übertragen", ErrTargetMismatch, targetLabel(want), targetLabel(got))
+}
+
+// agentError ties refusals of a push to staging to the staging errors; the agent's message stays.
+func agentError(target string, err error) error {
+	var apiErr *agentapi.APIError
+	if target != TargetStaging || !errors.As(err, &apiErr) {
+		return err
+	}
+	switch apiErr.Code {
+	case "wpsync_push_target": // agent 0.4.0 knows only live
+		return fmt.Errorf("%w: %w", ErrAgentNoStaging, err)
+	case "wpsync_staging_missing":
+		return fmt.Errorf("%w: %w", staging.ErrMissing, err)
+	case "wpsync_staging_locked":
+		return fmt.Errorf("%w: %w", staging.ErrLocked, err)
+	case "wpsync_staging_busy":
+		return fmt.Errorf("%w: %w", staging.ErrBusy, err)
+	}
+	return err
+}
+
+// healthPages returns the pages of the health check. For staging it redeems a login link first –
+// once per push, it is a one-time link – and keeps only pages inside the copy: the check sees
+// the copy like a visitor with access and uses nothing but the access cookie (Spec 2b 6.2, V20).
+func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) {
+	if o.target() != TargetStaging {
+		urls, dropped := HealthURLs(o.Site.URL, agentURLs, o.Site.HealthURLs)
+		for _, u := range dropped {
+			fmt.Fprintf(o.Out, "  ! Health-Seite %s verworfen – nur http(s) und beim Agenten nur Seiten der gekoppelten Site\n", agentapi.Printable(u))
+		}
+		return nil, urls, nil
+	}
+	base, cookie, err := o.Access(o.Client, o.HTTP, o.Site.URL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Zugang zur Staging-Kopie für den Health-Check: %w", err)
+	}
+	acc, err := newCopyAccess(o.Site.URL, base, cookie)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Front page and login of the copy are checked whatever the agent names.
+	own := append([]string{acc.base + "/", acc.base + "/wp-login.php"}, stagingPages(o.Site.URL, acc.base, o.Site.HealthURLs)...)
+	all, dropped := HealthURLs(o.Site.URL, agentURLs, own)
+	var urls []string
+	for _, u := range all {
+		if acc.inside(u) {
+			urls = append(urls, u)
+		} else {
+			dropped = append(dropped, u)
+		}
+	}
+	for _, u := range dropped {
+		fmt.Fprintf(o.Out, "  ! Health-Seite %s verworfen – bei einem Push nach Staging nur Seiten der Kopie\n", agentapi.Printable(u))
+	}
+	return acc, urls, nil
+}
+
+// planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
+func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string]any {
+	list := make([]map[string]any, len(units))
+	for i, u := range units {
+		p := plan.Units[i]
+		conflicts := p.Conflicts
+		if conflicts == nil {
+			conflicts = []string{}
+		}
+		list[i] = map[string]any{
+			"path": u.Path, "exists": p.Exists, "files": len(u.Files), "upload": len(p.Need),
+			"old_version": p.Version, "new_version": u.Version, "conflicts": conflicts, "writable": p.Writable,
+		}
+	}
+	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list}
 }
 
 // lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site.
@@ -174,14 +334,23 @@ func AtLeast(version, minimum string) bool {
 	return true
 }
 
-// Run pushes the locally changed units of a site (Spec Stufe 2, 6.3).
+// Run pushes the locally changed units of a site (Spec Stufe 2, 6.3) – to live or, with Target
+// staging, into the staging copy (Spec 2b 5.8, 6.2).
 func Run(o Options) error {
+	if err := o.checkTarget(); err != nil {
+		return err
+	}
 	unlock, err := lock(o)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 	o = o.defaults()
+	target := o.target()
+	report := &Result{Target: target, Units: []string{}}
+	if o.Report != nil {
+		defer func() { *o.Report = *report }()
+	}
 	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
 	docroot := filepath.Join(siteDir, "public")
 
@@ -228,20 +397,29 @@ func Run(o Options) error {
 		}
 		return ErrNothing
 	}
-	req := agentapi.PushBeginRequest{Target: "live", Force: o.Force, Dry: true}
+	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true}
+	names := make([]string, len(units))
 	for i := range units {
 		if err := units[i].Hash(docroot); err != nil {
 			return err
 		}
 		req.Units = append(req.Units, units[i].Request())
+		names[i] = units[i].Path
 	}
+	report.Units = names
 
 	plan, err := o.Client.PushBegin(req)
 	if err != nil {
-		return err
+		return agentError(target, err)
 	}
 	if !AtLeast(plan.AgentVersion, MinAgent) {
 		return ErrAgentTooOld
+	}
+	if target == TargetStaging && !AtLeast(plan.AgentVersion, staging.MinAgent) {
+		return ErrAgentNoStaging
+	}
+	if err := answeredFor(target, plan.Target); err != nil {
+		return err
 	}
 	if plan.Pending != nil {
 		return &PendingError{PushID: plan.Pending.PushID, Device: plan.Pending.Device}
@@ -249,7 +427,11 @@ func Run(o Options) error {
 	if len(plan.Units) != len(units) {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
 	}
+	if target == TargetStaging {
+		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
+	}
 	conflict, readonly, versionChange := printPlan(o.Out, units, plan)
+	o.event("plan", planEvent(units, plan, target))
 	if readonly {
 		return ErrNotWritable
 	}
@@ -257,6 +439,7 @@ func Run(o Options) error {
 		return ErrConflict
 	}
 	if o.DryRun {
+		report.Status = "dry_run"
 		return nil
 	}
 	if !plan.WindowOpen {
@@ -274,9 +457,15 @@ func Run(o Options) error {
 	}
 	if !o.Yes {
 		if o.Confirm == nil {
-			return errors.New("ohne Terminal mit --yes bestätigen")
+			return ErrNeedsYes
 		}
-		if !o.Confirm(fmt.Sprintf("%d Einheit(en) nach %s pushen?", len(units), o.Site.URL)) {
+		where := o.Site.URL
+		if target == TargetStaging {
+			where = "in die Staging-Kopie von " + o.Site.URL
+		} else {
+			where = "nach " + where
+		}
+		if !o.Confirm(fmt.Sprintf("%d Einheit(en) %s pushen?", len(units), where)) {
 			return ErrAborted
 		}
 	}
@@ -287,60 +476,76 @@ func Run(o Options) error {
 	if err := RescuePing(o.HTTP, plan.Rescue.URL); err != nil {
 		return err
 	}
-	urls, dropped := HealthURLs(o.Site.URL, plan.HealthURLs, o.Site.HealthURLs)
-	for _, u := range dropped {
-		fmt.Fprintf(o.Out, "  ! Health-Seite %s verworfen – nur http(s) und beim Agenten nur Seiten der gekoppelten Site\n", agentapi.Printable(u))
+	acc, urls, err := o.healthPages(plan.HealthURLs)
+	if err != nil {
+		return err
 	}
-	before := Check(o.HTTP, urls, o.pause)
+	before := check(o.HTTP, urls, o.pause, acc)
 
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
 	if err != nil {
+		return agentError(target, err)
+	}
+	// Before the first byte travels: the push the agent created must be the one asked for.
+	if err := answeredFor(target, begin.Target); err != nil {
 		return err
 	}
 	if len(begin.Units) != len(units) {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
 	}
-	names := make([]string, len(units))
-	for i, u := range units {
-		names[i] = u.Path
-	}
 	journal := NewJournal(begin.PushID, plan.Rescue.URL, begin.Rescue.Salt, base, names)
+	journal.Target = target
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
+	report.PushID = begin.PushID
 	for i := range units {
 		if err := upload(o, begin.PushID, i, docroot, &units[i], begin.Units[i].Need); err != nil {
 			return fmt.Errorf("Upload abgebrochen, auf der Site wurde nichts geändert: %w", err)
 		}
+		o.event("upload", map[string]any{"unit": units[i].Path, "files": len(begin.Units[i].Need)})
 	}
 	stamps, err := o.Client.PushCommit(begin.PushID)
 	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code != "" {
-			return err // the agent refused and left the site as it was
+			return agentError(target, err) // the agent refused and left the site as it was
 		}
+		report.Status = "committed" // unknown; the worse case
 		return fmt.Errorf("der Tausch wurde nicht bestätigt, der Stand ist unklar – prüfen mit: wpsync pushes %s (%w)", o.Site.Name, err)
 	}
+	report.Status = "committed"
+	o.event("commit", map[string]any{"push_id": begin.PushID})
 	fmt.Fprintln(o.Out, "  getauscht – prüfe die Site …")
 
-	after := Check(o.HTTP, urls, o.pause)
+	after := check(o.HTTP, urls, o.pause, acc)
 	for attempt := 0; attempt < 2 && len(Worse(before, after)) > 0; attempt++ {
 		o.Sleep(2 * time.Second) // caches and opcache may need a moment
-		after = Check(o.HTTP, urls, o.pause)
+		after = check(o.HTTP, urls, o.pause, acc)
 	}
-	if worse := Worse(before, after); len(worse) > 0 {
-		return rollbackNow(o, journal, urls, before, worse)
+	worse := Worse(before, after)
+	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
+	if len(worse) > 0 {
+		return rolledBack(report, rollbackNow(o, acc, journal, urls, before, worse))
 	}
 	if err := o.Client.PushConfirm(begin.PushID); err != nil {
-		rbErr := rollbackNow(o, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
+		rbErr := rollbackNow(o, acc, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
 		if !errors.Is(rbErr, ErrRescueConfirmed) {
-			return rbErr
+			return rolledBack(report, rbErr)
 		}
 		// confirm went through, only its answer was lost; the health check had passed.
-		fmt.Fprintln(o.Out, "  rescue.php meldet den Push als bereits bestätigt – nur die Antwort ging verloren, er bleibt live")
+		fmt.Fprintln(o.Out, "  rescue.php meldet den Push als bereits bestätigt – nur die Antwort ging verloren, er bleibt bestehen")
 	}
+	report.Status = "confirmed"
 
+	if target == TargetStaging {
+		// The baseline describes live: a push to staging changes neither it nor the internal git
+		// (Spec 2b 6.2). The next push to live uploads the same state and checks it against live.
+		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
+			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, strings.Join(names, " "))
+		return nil
+	}
 	Apply(base, stamps)
 	if err := baseline.Save(siteDir, base); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
@@ -515,18 +720,44 @@ func readExactly(root *os.Root, unit, rel string, want LocalFile) ([]byte, error
 	return data, nil
 }
 
+// rolledBack notes in the result whether the way back worked.
+func rolledBack(report *Result, err error) error {
+	var rolled *RolledBackError
+	if errors.As(err, &rolled) {
+		report.Status = "rolled_back"
+	}
+	return err
+}
+
+// stagingPages maps the health pages of the site configuration into the staging copy; pages of
+// other hosts have no counterpart there.
+func stagingPages(siteURL, base string, pages []string) []string {
+	prefix := strings.TrimRight(siteURL, "/") + "/"
+	var out []string
+	for _, p := range pages {
+		if rest, ok := strings.CutPrefix(p, prefix); ok {
+			out = append(out, base+"/"+rest)
+		}
+	}
+	return out
+}
+
 // rollbackNow takes a swapped push back through rescue.php and checks the site again.
-func rollbackNow(o Options, j *Journal, urls []string, before []Probe, reasons []string) error {
+func rollbackNow(o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
 		fmt.Fprintf(o.Out, "  ! %s\n", r)
 	}
 	fmt.Fprintln(o.Out, "  rolle zurück …")
 	if err := RescueRollback(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt)); err != nil {
-		return fmt.Errorf("ROLLBACK FEHLGESCHLAGEN – Push %s ist noch live und die Site beschädigt (%s). "+
+		where := "live und die Site"
+		if j.target() == TargetStaging {
+			where = "auf Staging und die Kopie"
+		}
+		return fmt.Errorf("ROLLBACK FEHLGESCHLAGEN – Push %s ist noch %s beschädigt (%s). "+
 			"Sofort: wpsync rollback %s %s, sonst im WP-Admin unter Werkzeuge → wpsync „Zurückrollen“ (%w)",
-			j.PushID, strings.Join(reasons, "; "), o.Site.Name, j.PushID, err)
+			j.PushID, where, strings.Join(reasons, "; "), o.Site.Name, j.PushID, err)
 	}
-	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: Worse(before, Check(o.HTTP, urls, o.pause))}
+	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: Worse(before, check(o.HTTP, urls, o.pause, acc))}
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay
