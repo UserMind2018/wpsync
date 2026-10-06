@@ -573,6 +573,18 @@ als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
 
+Das Ergebnis von `pull --json` (`data`) enthält `warnings`, sobald etwas ohne Abbruch scheiterte;
+fehlt das Feld, gab es keine. Bisher einziger Wert: `snapshot_failed` – Site, Datenbank und
+Baseline sind gezogen, nur der Schnappschuss im internen Git fehlt (Meldung auf stderr). Der
+nächste Pull committet wieder.
+
+**Site-Lock.** Pro Site läuft nur ein `pull` gleichzeitig (`flock` auf `<slug>/.wpsync/lock`,
+auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet sofort mit Exit 20
+(`local_env`, „läuft bereits“), ohne die Quelle zu fragen. Der Lock gilt bis zum Prozessende,
+auch nach SIGKILL. Unter dem Lock räumt der Pull Reste eines gekillten Vorgängers weg:
+liegengebliebene git-Locks im internen Repo und – im Container-Modus – Hilfscontainer mit dem
+Label `wpsync.site=<site>`.
+
 **Exit-Codes** (gelten für alle Befehle, auch ohne `--json`):
 
 | Code | Name | Beispiel |
@@ -585,7 +597,7 @@ Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mai
 | 12 | pair_rejected | Pairing-Code falsch oder abgelaufen |
 | 13 | auth_failed | Kopplung widerrufen |
 | 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
-| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab |
+| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, Pull der Site läuft bereits, PHP-Version der Quelle unbrauchbar |
 | 21 | disk_full | |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
@@ -607,7 +619,19 @@ Pflichten des Aufrufers:
 - **Nur `--docroot` in den WordPress-Container mounten** (nach `/var/www/html`), nie den Ordner
   `<slug>/` darüber. Dort liegen Baseline, Dump und Historie, die PHP der Site nicht sehen darf.
 - **Datenbank-Benutzer ohne `FILE`-Recht**, nur mit Rechten auf die eigene Datenbank.
-- **Im Image des Aufrufers** `docker`-CLI und `git` ≥ 2.28.
+- **Im Image des Aufrufers** `docker`-CLI und `git` ≥ 2.28, besser ≥ 2.40 (`GIT_ATTR_SOURCE`:
+  dann wertet das interne Git keine `.gitattributes` der Site aus).
+- **`--docroot`** ist ein absoluter Pfad `<slug>/<docroot>` in einem eigenen Site-Ordner: nicht
+  `/`, nicht direkt unter `/`, nicht `.wpsync` oder `.git`, Ordnername nur aus `A–Z a–z 0–9 . _ -`.
+  Sonst Exit 2.
+
+wpsync startet WP-CLI und Import als `docker run --rm --init --name wpsync-<site>-<zufall>
+--label wpsync.site=<site> …`. Nach SIGTERM entfernt es den laufenden Hilfscontainer mit
+`docker rm -f`; überlebt einer (SIGKILL), räumt ihn der nächste Pull der Site weg.
+
+Der Docroot ist für die Site beschreibbar. wpsync folgt dort keinem Symlink: Liegt einer auf dem
+Weg zu einer Datei der Quelle, scheitert der Pull mit einer Meldung, statt ausserhalb zu
+schreiben; Löschen überspringt solche Pfade.
 
 Ablage: Der Docroot ist `<slug>/<docroot>`, alles von wpsync liegt daneben unter `<slug>/.wpsync/`,
 nichts davon im Docroot:
