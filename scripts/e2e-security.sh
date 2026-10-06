@@ -48,6 +48,7 @@ cleanup() {
        DELETE FROM e2e_wpsync_pairings WHERE device LIKE 'sec-%' OR device LIKE 'aaaa%';
        DELETE FROM e2e_wpsync_state WHERE name IN ('pairing_code', 'pair_last');
        DELETE FROM e2e_options WHERE option_name = 'e2e_sec102_bytes';" >/dev/null 2>&1
+  ddev wp config delete WPSYNC_KEY --type=constant >/dev/null 2>&1
   rm -rf "$WPC/plugins/sec-push" "$WPC/plugins/sec-other"
   SQL "DELETE FROM e2e_wpsync_pushes WHERE device LIKE 'sec-%';
        DELETE FROM e2e_wpsync_state WHERE name = 'push_lock';" >/dev/null 2>&1
@@ -254,6 +255,55 @@ ddev wp eval "WpSync\\Store::deletePairing('$KEY');" >/dev/null
 check AC-53 "widerrufenes Pairing kann nicht zurückrollen" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 401
 check AC-53 "widerrufenes Pairing kann nicht pushen" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push main.php)")")" 401
 ddev wp eval "WpSync\\Store::addPairing('$KEY', '$SECRET', 'sec-curl');" >/dev/null
+
+echo "== SEC-006: Pairing-Secrets verschlüsselt in der Datenbank"
+stored() { SQL "SELECT secret FROM e2e_wpsync_pairings WHERE key_id = '$1'"; }
+as_key() { # as_key <key-id> <route> → HTTP-Status mit fremder Key-ID, gleiches Secret
+  local saved="$KEY" out
+  KEY="$1"
+  out="$(pcode "$2" '{}')"
+  KEY="$saved"
+  printf %s "$out"
+}
+check SEC-006 "Spalte secret ist VARCHAR(255)" \
+  "$(SQL "SHOW COLUMNS FROM e2e_wpsync_pairings LIKE 'secret'" | awk '{ print $2 }')" 'varchar(255)'
+check SEC-006 "per /pair gekoppelt: Secret steht als v1:-Wert" "$(SQL "SELECT LEFT(secret, 3) FROM e2e_wpsync_pairings WHERE device LIKE 'aaaa%'")" v1:
+check SEC-006 "addPairing: Secret steht als v1:-Wert" "$(stored "$KEY" | cut -c1-3)" v1:
+check SEC-006 "kein 64-Hex-Klartext in der Tabelle" \
+  "$(SQL "SELECT COUNT(*) FROM e2e_wpsync_pairings WHERE secret REGEXP '^[a-f0-9]{64}\$'")" 0
+check SEC-006 "das Secret steht nirgends in der Tabelle" "$(SQL "SELECT COUNT(*) FROM e2e_wpsync_pairings WHERE secret LIKE '%$SECRET%'")" 0
+check SEC-006 "signierter Request mit versiegeltem Secret" "$(pcode /wpsync/v1/ping '{}')" 200
+
+MIG=00000000000000e4
+SQL "INSERT INTO e2e_wpsync_pairings (key_id, secret, device, created) VALUES ('$MIG', '$SECRET', 'sec-mig', UNIX_TIMESTAMP())"
+check SEC-006 "Altbestand: Klartext-Zeile eingesetzt" "$(stored "$MIG")" "$SECRET"
+ddev wp eval "delete_option('wpsync_schema'); WpSync\\Store::install();" >/dev/null
+check SEC-006 "Upgrade versiegelt den Klartext" "$(stored "$MIG" | cut -c1-3)" v1:
+check SEC-006 "nach dem Upgrade: Auth funktioniert" "$(as_key "$MIG" /wpsync/v1/ping)" 200
+
+SQL "UPDATE e2e_wpsync_pairings SET secret = '$SECRET' WHERE key_id = '$MIG'"
+check SEC-006 "Klartext ohne Upgrade wird weiter akzeptiert" "$(as_key "$MIG" /wpsync/v1/ping)" 200
+check SEC-006 "… und beim Lesen versiegelt" "$(stored "$MIG" | cut -c1-3)" v1:
+
+SQL "UPDATE e2e_wpsync_pairings SET secret = CONCAT('v1:', TO_BASE64(REPEAT('x', 120))) WHERE key_id = '$MIG'"
+check SEC-006 "nicht entschlüsselbar: 401" "$(as_key "$MIG" /wpsync/v1/ping)" 401
+saved="$KEY"; KEY="$MIG"
+check SEC-006 "nicht entschlüsselbar: wpsync_unpaired" "$(signed /wpsync/v1/ping '{}' | field '["code"]')" wpsync_unpaired
+KEY="$saved"
+admin="$(ddev wp eval 'wp_set_current_user(1); WpSync\Admin::render();' 2>/dev/null)"
+check SEC-006 "Admin markiert das Pairing" "$(printf %s "$admin" | grep -c '>nicht entschlüsselbar – neu koppeln</td>')" 1
+check SEC-006 "Admin zeigt verschlüsselte Pairings" "$([ "$(printf %s "$admin" | grep -c '>verschlüsselt</td>')" -ge 1 ] && echo ja || echo nein)" ja
+check SEC-006 "Admin warnt nicht vor Klartext" "$(printf %s "$admin" | grep -c 'liegen im Klartext')" 0
+
+before="$(stored "$KEY")"
+ddev wp config set WPSYNC_KEY "$(openssl rand -hex 24)" --type=constant >/dev/null || exit 1
+check SEC-006 "WPSYNC_KEY gesetzt: Salt-versiegeltes Secret gilt weiter" "$(pcode /wpsync/v1/ping '{}')" 200
+check SEC-006 "… und wird mit WPSYNC_KEY neu versiegelt" "$([ "$(stored "$KEY")" != "$before" ] && echo ja || echo nein)" ja
+ddev wp config delete WPSYNC_KEY --type=constant >/dev/null || exit 1
+check SEC-006 "Schlüssel weg (wie Salt-Rotation): Pairing ist ungültig" "$(pcode /wpsync/v1/ping '{}')" 401
+ddev wp eval "WpSync\\Store::deletePairing('$KEY'); WpSync\\Store::deletePairing('$MIG');" >/dev/null
+ddev wp eval "WpSync\\Store::addPairing('$KEY', '$SECRET', 'sec-curl');" >/dev/null
+check SEC-006 "neu gekoppelt: Auth funktioniert" "$(pcode /wpsync/v1/ping '{}')" 200
 
 echo "== SEC-13: Direktaufruf"
 check SEC-13 "src/WpProbe.php gibt nichts aus" "$(curl -s "$URL/wp-content/plugins/wpsync-agent/src/WpProbe.php" | grep -c 'wpsync-agent')" 0
