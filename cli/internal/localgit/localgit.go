@@ -270,6 +270,9 @@ func git(gitDir, workTree string, args ...string) error {
 // run runs git on an explicit git dir and work tree, without repo discovery, inherited GIT_* variables,
 // user/system config or the user's global ignore and attributes files, and returns its stdout.
 func run(gitDir, workTree string, args ...string) ([]byte, error) {
+	if err := sanitizeRepo(gitDir); err != nil {
+		return nil, err
+	}
 	base := []string{"--git-dir=" + gitDir}
 	if workTree != "" {
 		base = append(base, "--work-tree="+workTree)
@@ -293,6 +296,9 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// emptyTree is git's well-known empty tree; it exists in every SHA-1 repo without being stored.
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 func gitEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -300,7 +306,87 @@ func gitEnv() []string {
 			env = append(env, kv)
 		}
 	}
-	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+		// git ≥ 2.40 reads attributes from this tree instead of the work tree and index: a
+		// .gitattributes of the site never names a filter, diff driver or merge driver (SEC-113).
+		// Older git ignores it; sanitizeRepo then still keeps every driver definition out of the config.
+		"GIT_ATTR_SOURCE="+emptyTree)
+}
+
+// allowedCore are the config entries git init writes; wpsync sets nothing else in the repo.
+var allowedCore = map[string]bool{
+	"repositoryformatversion": true, "filemode": true, "bare": true, "logallrefupdates": true,
+	"ignorecase": true, "precomposeunicode": true, "symlinks": true,
+}
+
+var (
+	configSectionRe = regexp.MustCompile(`^\[([A-Za-z]+)\]$`)
+	configEntryRe   = regexp.MustCompile(`^([A-Za-z]+) = ([A-Za-z0-9]+)$`)
+)
+
+// sanitizeRepo runs before every git call: <G>/config may hold only the [core] entries of git init
+// with plain values, and <G>/info/attributes must not exist. Anything else – a filter, diff or merge
+// driver, include, core.fsmonitor, core.sshCommand … – would run commands in the wpsync process
+// (on the server: the OS container with the docker socket). Such a config is rewritten with the
+// allowed entries only (SEC-113, defence in depth behind the symlink checks of package safefs).
+func sanitizeRepo(gitDir string) error {
+	root, err := os.OpenRoot(gitDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.Remove(filepath.Join("info", "attributes")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s/info/attributes: %w", printable(gitDir), err)
+	}
+	info, err := root.Lstat("config")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var data []byte
+	if info.Mode().IsRegular() {
+		if data, err = root.ReadFile("config"); err != nil {
+			return err
+		}
+	}
+	clean, ok := cleanConfig(string(data))
+	if ok && info.Mode().IsRegular() {
+		return nil
+	}
+	return safefs.WriteFile(root, "config", strings.NewReader(clean), int64(len(clean)), time.Time{}, 0o600)
+}
+
+// cleanConfig returns the allowed core entries as a fresh config and whether data had nothing else.
+func cleanConfig(data string) (string, bool) {
+	ok := true
+	section := ""
+	var b strings.Builder
+	b.WriteString("[core]\n")
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if m := configSectionRe.FindStringSubmatch(line); m != nil {
+			section = strings.ToLower(m[1])
+			if section != "core" {
+				ok = false
+			}
+			continue
+		}
+		m := configEntryRe.FindStringSubmatch(line)
+		if section != "core" || m == nil || !allowedCore[strings.ToLower(m[1])] {
+			ok = false
+			continue
+		}
+		fmt.Fprintf(&b, "\t%s = %s\n", strings.ToLower(m[1]), m[2])
+	}
+	return b.String(), ok
 }
 
 // printable escapes control characters (except newline and tab) so git output and paths cannot drive the terminal.

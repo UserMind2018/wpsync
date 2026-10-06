@@ -1057,3 +1057,66 @@ func TestCommitTreeReplacesGitignoreSymlink(t *testing.T) {
 		t.Fatalf(".gitignore = %v, %v", info, err)
 	}
 }
+
+// SEC-113, Tiefenverteidigung: auch ohne Symlink-Weg führt ein manipuliertes history.git/config
+// (Filter, include, core.*) zusammen mit einer .gitattributes im Baum nichts aus.
+func TestManipulatedConfigAndAttributesRunNothing(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	markers := t.TempDir()
+	inc := filepath.Join(t.TempDir(), "inc")
+	os.WriteFile(inc, []byte("[filter \"inc\"]\n\tclean = touch "+filepath.Join(markers, "include")+" && cat\n"), 0o644)
+	cfgPath := filepath.Join(gitDir, "config")
+	cfg, _ := os.ReadFile(cfgPath)
+	evil := string(cfg) +
+		"[filter \"pwn\"]\n\tclean = touch " + filepath.Join(markers, "filter") + " && cat\n" +
+		"[include]\n\tpath = " + inc + "\n" +
+		"[core]\n\tfsmonitor = touch " + filepath.Join(markers, "fsmonitor") + "\n" +
+		"[diff \"x\"]\n\ttextconv = touch " + filepath.Join(markers, "textconv") + "\n"
+	if err := os.WriteFile(cfgPath, []byte(evil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(gitDir, "info"), 0o755)
+	os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte("* filter=pwn\n"), 0o644)
+	os.WriteFile(filepath.Join(siteDir, "html", "wp-content", ".gitattributes"), []byte("* filter=pwn\n*.php filter=inc diff=x\n"), 0o644)
+	write(t, siteDir, "html/wp-content/b.php")
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if entries, _ := os.ReadDir(markers); len(entries) != 0 {
+		t.Fatalf("git ran commands from a manipulated repo: %v", entries)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	for _, bad := range []string{"filter", "include", "fsmonitor", "textconv"} {
+		if strings.Contains(string(after), bad) {
+			t.Errorf("config still contains %s:\n%s", bad, after)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "info", "attributes")); !os.IsNotExist(err) {
+		t.Error("info/attributes must be removed")
+	}
+	if got := hostGit(t, "--git-dir="+gitDir, "show", "--name-only", "--format=", "HEAD"); !strings.Contains(got, "html/wp-content/b.php") {
+		t.Fatalf("second commit misses b.php: %q", got)
+	}
+}
+
+// Die eigenen Einträge von git init bleiben erhalten; eine saubere config wird nicht angefasst.
+func TestCleanConfigStaysUntouched(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(gitDir, "config")); string(after) != string(before) {
+		t.Fatalf("config changed:\n%s\n->\n%s", before, after)
+	}
+}
