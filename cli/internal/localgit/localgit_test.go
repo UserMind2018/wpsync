@@ -1036,3 +1036,24 @@ func TestAutoMaintenanceRunsInForeground(t *testing.T) {
 		}
 	}
 }
+
+// Mac: der Site-Ordner liegt im DDEV-Mount. Ein .gitignore-Symlink der Site lenkt das Schreiben
+// der wpsync-.gitignore nicht auf eine Datei außerhalb.
+func TestCommitTreeReplacesGitignoreSymlink(t *testing.T) {
+	siteDir, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep"), 0o644)
+	write(t, siteDir, "html/wp-content/a.php")
+	if err := os.Symlink(victim, filepath.Join(siteDir, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitTree(TreeGitDir(siteDir), siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("CommitTree wrote through the .gitignore symlink: %q", b)
+	}
+	if info, err := os.Lstat(filepath.Join(siteDir, ".gitignore")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf(".gitignore = %v, %v", info, err)
+	}
+}

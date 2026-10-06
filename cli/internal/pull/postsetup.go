@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/localenv"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // ErrMailguardMissing stops a pull: a local site must never send real mail (AC-22).
@@ -154,10 +154,16 @@ func pluginSlug(file string) string {
 	return strings.TrimSuffix(file, ".php")
 }
 
-// RemoveDropIns deletes caching drop-ins below docroot/wp-content.
+// RemoveDropIns deletes caching drop-ins below docroot/wp-content without following a symlinked
+// docroot or wp-content (SEC-113).
 func RemoveDropIns(docroot string) {
+	root, base, err := openDocroot(docroot)
+	if err != nil {
+		return
+	}
+	defer root.Close()
 	for _, name := range DropIns {
-		os.Remove(filepath.Join(docroot, "wp-content", name))
+		safefs.Remove(root, filepath.Join(base, "wp-content", name))
 	}
 }
 

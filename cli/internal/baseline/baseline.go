@@ -2,11 +2,14 @@
 package baseline
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // FileStamp identifies a file version.
@@ -64,10 +67,6 @@ func Load(siteDir string) (*Baseline, error) {
 
 // Save writes the baseline atomically.
 func Save(siteDir string, b *Baseline) error {
-	p := file(siteDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
 	if b.PulledAt.IsZero() {
 		b.PulledAt = time.Now()
 	}
@@ -75,8 +74,18 @@ func Save(siteDir string, b *Baseline) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(p+".tmp", data, 0o644); err != nil {
+	// On the Mac .wpsync/ lies in the DDEV mount: never write through a symlink there (SEC-113).
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
 		return err
 	}
-	return os.Rename(p+".tmp", p)
+	root, err := os.OpenRoot(siteDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(siteDir, file(siteDir))
+	if err != nil {
+		return err
+	}
+	return safefs.WriteFile(root, rel, bytes.NewReader(data), int64(len(data)), time.Time{}, 0o644)
 }

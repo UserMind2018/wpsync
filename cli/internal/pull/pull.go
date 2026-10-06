@@ -343,10 +343,14 @@ func run(o Options) error {
 	tables := ChangedTables(delta.Tables, base)
 	fmt.Fprintf(o.Out, "Tabellen: %d von %d neu zu laden\n", len(tables), len(delta.Tables))
 	if len(tables) > 0 {
-		dir := filepath.Join(siteDir, ".wpsync", "db", "tables")
+		dir, err := openTables(siteDir)
+		if err != nil {
+			return err
+		}
+		defer dir.Close()
 		opts := DBOptions{RowsPerChunk: o.RowsPerChunk, BundleBytes: o.DBBundleBytes, Scope: p.scope,
 			Progress: func(done, total int) { o.progress(PhaseDBDownload, done, total) }}
-		if err := DownloadTables(client, dir, tables, opts); err != nil {
+		if err := downloadTables(client, dir, tables, opts); err != nil {
 			return err
 		}
 		timer.done("DB-Download")
@@ -354,7 +358,7 @@ func run(o Options) error {
 			return err
 		}
 
-		if err := importTables(runner, dir, tables); err != nil {
+		if err := importTablesIn(runner, dir, tables); err != nil {
 			return localenv.Wrap("db import", err)
 		}
 		timer.done("DB-Import")

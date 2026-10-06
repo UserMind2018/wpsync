@@ -3,6 +3,8 @@ package pull
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/localenv"
@@ -48,6 +50,19 @@ func importTables(r localenv.Runner, dir string, tables []agentapi.Table) error 
 	if err != nil {
 		return err
 	}
+	return runImport(r, reader, closeAll)
+}
+
+// importTablesIn is importTables on the opened cache folder (pull: openTables).
+func importTablesIn(r localenv.Runner, dir *os.Root, tables []agentapi.Table) error {
+	reader, closeAll, err := importReader(dir, tables)
+	if err != nil {
+		return err
+	}
+	return runImport(r, reader, closeAll)
+}
+
+func runImport(r localenv.Runner, reader io.Reader, closeAll func() error) error {
 	importErr := r.RunStdin(reader, importArgs()...)
 	closeAll()
 	if importErr != nil {

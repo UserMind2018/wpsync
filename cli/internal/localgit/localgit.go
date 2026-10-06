@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usermind/wpsync/internal/safefs"
 	"github.com/usermind/wpsync/internal/sites"
 )
 
@@ -124,8 +125,7 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 	if err := dropGitlinks(gitDir, siteDir); err != nil {
 		return err
 	}
-	ignore := strings.ReplaceAll(gitignore, "/public/", "/"+docroot+"/")
-	if err := os.WriteFile(filepath.Join(siteDir, ".gitignore"), []byte(ignore), 0o644); err != nil {
+	if err := writeGitignore(siteDir, strings.ReplaceAll(gitignore, "/public/", "/"+docroot+"/")); err != nil {
 		return err
 	}
 	if err := git(gitDir, siteDir, "add", "-A"); err != nil {
@@ -136,6 +136,17 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 	}
 	return git(gitDir, siteDir, "-c", "user.name=wpsync", "-c", "user.email=wpsync@localhost",
 		"commit", "-q", "--allow-empty", "-m", message)
+}
+
+// writeGitignore replaces <siteDir>/.gitignore. On the Mac the site folder lies in the DDEV mount:
+// a symlink there is replaced, never followed (SEC-113).
+func writeGitignore(siteDir, content string) error {
+	root, err := os.OpenRoot(siteDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return safefs.WriteFile(root, ".gitignore", strings.NewReader(content), int64(len(content)), time.Time{}, 0o644)
 }
 
 // moveAside moves a pre-existing <site>/.git next to the snapshot repo without running git in it

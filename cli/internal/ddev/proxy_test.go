@@ -72,3 +72,15 @@ func TestWriteUploadsProxy(t *testing.T) {
 		t.Error("nothing to remove, but reported a change")
 	}
 }
+
+// SEC-113: .wpsync/ liegt im DDEV-Mount; ein Symlink dort lenkt proxy-tmp nicht nach außen.
+func TestWriteUploadsProxyRefusesSymlinkedStateDir(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	os.Symlink(outside, filepath.Join(dir, ".wpsync"))
+	if _, err := WriteUploadsProxy(dir, "https://kunde.de", "wpsync/0.2.0", true); err == nil {
+		t.Fatal("symlinked .wpsync must be refused")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("created outside: %v", entries)
+	}
+}

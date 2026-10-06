@@ -32,17 +32,26 @@ var ErrInvalidTableName = errors.New("invalid table name")
 
 func validTableName(name string) bool { return tableNameRe.MatchString(name) }
 
-// tablePath is the only way a table name becomes a path. It checks the name itself, so
-// DownloadTables and ImportReader stay contained even when called without the /delta check.
-func tablePath(dir, name, suffix string) (string, error) {
+// tableFile is the only way a table name becomes a file name in the tables directory. It checks
+// the name itself, so DownloadTables and ImportReader stay contained even without the /delta check.
+func tableFile(name, suffix string) (string, error) {
 	if !validTableName(name) {
 		return "", fmt.Errorf("%w: refusing %s", ErrInvalidTableName, agentapi.Printable(name))
 	}
-	path := filepath.Join(dir, name+suffix)
-	if filepath.Dir(path) != filepath.Clean(dir) {
+	file := name + suffix
+	if filepath.Base(file) != file {
 		return "", fmt.Errorf("%w: %s would leave the tables directory", ErrInvalidTableName, agentapi.Printable(name))
 	}
-	return path, nil
+	return file, nil
+}
+
+// tablePath is tableFile below dir.
+func tablePath(dir, name, suffix string) (string, error) {
+	file, err := tableFile(name, suffix)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, file), nil
 }
 
 // checkDelta is the gate for everything from /delta that later reaches a path or a command line.

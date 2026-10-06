@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 const (
@@ -65,9 +67,12 @@ func WriteUploadsProxy(siteDir, sourceURL, userAgent string, enabled bool) (bool
 			return false, err
 		}
 		files[zonePath], files[serverPath] = zone, server
-		if err := os.MkdirAll(filepath.Join(siteDir, ".wpsync", "proxy-tmp"), 0o755); err != nil {
+		// .wpsync/ lies in the DDEV mount: a symlink there is refused, not followed (SEC-113).
+		tmp, err := safefs.OpenTree(siteDir, filepath.Join(".wpsync", "proxy-tmp"))
+		if err != nil {
 			return false, err
 		}
+		tmp.Close()
 	}
 	changed := false
 	for path, content := range files {
