@@ -1,12 +1,15 @@
 package pull
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usermind/wpsync/internal/localenv"
+	"github.com/usermind/wpsync/internal/localgit"
 )
 
 // Review M1: zwei Pulls derselben Site laufen nie gleichzeitig. Der zweite bricht sofort ab,
@@ -102,4 +105,51 @@ func sitesRootTrace(root, site string) []string {
 		trace = append(trace, e.Name())
 	}
 	return trace
+}
+
+// Review M2: scheitert nur der Schnappschuss, bleibt der Pull erfolgreich – mit Warnung auf der
+// Ausgabe und snapshot_failed in Result.Warnings.
+func TestSnapshotFailureIsAWarning(t *testing.T) {
+	srv := agentServer(t, nil)
+	defer srv.Close()
+	o := pullOptions(t, srv.URL, newFakeDriver(false))
+	o.SiteDir = t.TempDir()
+	o.Docroot = filepath.Join(o.SiteDir, "html")
+	var res Result
+	o.Report = &res
+	gitDir := localgit.TreeGitDir(o.SiteDir)
+	os.MkdirAll(filepath.Dir(gitDir), 0o755)
+	os.WriteFile(gitDir, []byte("kein Repo"), 0o644)
+	if err := Run(o); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0] != WarningSnapshotFailed {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
+	if !strings.Contains(o.Out.(*bytes.Buffer).String(), "Schnappschuss") {
+		t.Fatalf("no warning in output:\n%s", o.Out)
+	}
+}
+
+// Liegengebliebene git-Locks eines gekillten Pulls blockieren den nächsten nicht.
+func TestRunClearsStaleGitLocks(t *testing.T) {
+	srv := agentServer(t, nil)
+	defer srv.Close()
+	o := pullOptions(t, srv.URL, newFakeDriver(false))
+	o.SiteDir = t.TempDir()
+	o.Docroot = filepath.Join(o.SiteDir, "html")
+	var res Result
+	o.Report = &res
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := localgit.TreeGitDir(o.SiteDir)
+	os.WriteFile(filepath.Join(gitDir, "index.lock"), nil, 0o644)
+	os.WriteFile(filepath.Join(gitDir, "HEAD.lock"), nil, 0o644)
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
 }

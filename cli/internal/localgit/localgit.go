@@ -134,8 +134,14 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 	if err := dropGitlinks(gitDir, siteDir); err != nil {
 		return err
 	}
-	return git(gitDir, siteDir, "-c", "user.name=wpsync", "-c", "user.email=wpsync@localhost",
-		"commit", "-q", "--allow-empty", "-m", message)
+	if err := git(gitDir, siteDir, "-c", "user.name=wpsync", "-c", "user.email=wpsync@localhost",
+		"commit", "-q", "--allow-empty", "-m", message); err != nil {
+		return err
+	}
+	if err := maintain(gitDir); err != nil {
+		fmt.Fprintf(out, "  ! git-Wartung des Schnappschuss-Repos fehlgeschlagen (Schnappschuss ist gespeichert): %v\n", err)
+	}
+	return nil
 }
 
 // writeGitignore replaces <siteDir>/.gitignore. On the Mac the site folder lies in the DDEV mount:
@@ -147,6 +153,44 @@ func writeGitignore(siteDir, content string) error {
 	}
 	defer root.Close()
 	return safefs.WriteFile(root, ".gitignore", strings.NewReader(content), int64(len(content)), time.Time{}, 0o644)
+}
+
+// staleLocks are the lock files git leaves in the git dir when it is killed mid-write.
+var staleLocks = []string{"index.lock", "HEAD.lock", "gc.pid", "packed-refs.lock", "config.lock"}
+
+// ClearStaleLocks removes lock files that a killed git left in gitDir: index.lock, HEAD.lock,
+// refs/heads/*.lock, gc.pid and the like, top level only. The caller must hold the site lock –
+// then no git of wpsync runs in this repo (pull takes it; a missing repo is no error).
+func ClearStaleLocks(gitDir string) error {
+	root, err := os.OpenRoot(gitDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	names := append([]string(nil), staleLocks...)
+	if heads, err := fs.ReadDir(root.FS(), "refs/heads"); err == nil {
+		for _, e := range heads {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".lock") {
+				names = append(names, filepath.Join("refs", "heads", e.Name()))
+			}
+		}
+	}
+	var errs []error
+	for _, name := range names {
+		if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// maintain runs git's automatic housekeeping in the foreground after a commit (gc.auto is 0 in
+// every other call). A failure only leaves loose objects; ClearStaleLocks removes its locks.
+func maintain(gitDir string) error {
+	return git(gitDir, "", "-c", "gc.auto=6700", "gc", "--auto", "--quiet")
 }
 
 // moveAside moves a pre-existing <site>/.git next to the snapshot repo without running git in it
@@ -281,8 +325,9 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 		// defence in depth, not the boundary: also reaches git's subprocesses in embedded repos, but does
 		// not stop their clean filters – only an index without gitlinks does (see Commit)
 		"-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull,
-		// auto gc/maintenance in the foreground: a detached one dies with a short-lived container and
-		// leaves HEAD.lock behind, which blocks the next pull's commit
+		// no auto gc/maintenance inside commit: killed with a short-lived container (or by SIGKILL)
+		// it leaves HEAD.lock behind, which blocked every later commit. Commit runs Maintain itself.
+		"-c", "gc.auto=0", "-c", "maintenance.auto=false",
 		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
 	cmd := exec.Command("git", append(base, args...)...)
 	cmd.Dir = gitDir

@@ -71,7 +71,12 @@ type Result struct {
 	AgentVersion       string `json:"agent_version"`
 	LocalAdminUser     string `json:"local_admin_user,omitempty"`
 	LocalAdminPassword string `json:"local_admin_password,omitempty"`
+	// Warnings name what failed without failing the pull; omitted when empty.
+	Warnings []string `json:"warnings,omitempty"`
 }
+
+// WarningSnapshotFailed: site, baseline and DB are pulled, but the snapshot commit failed.
+const WarningSnapshotFailed = "snapshot_failed"
 
 func (o *Options) progress(phase string, done, total int) {
 	if o.Progress != nil {
@@ -103,12 +108,20 @@ func (o *Options) dirs() (siteDir, docroot string, err error) {
 	return siteDir, docroot, nil
 }
 
-// commit records code and baseline in the site's snapshot repo.
+// commit records code and baseline in the site's snapshot repo. It runs under the site lock, so
+// git locks left by a killed predecessor are removed first.
 func (o *Options) commit(siteDir, docroot, message string) error {
 	if o.SiteDir == "" {
+		if err := localgit.ClearStaleLocks(localgit.GitDir(o.SitesRoot, o.Site.Name)); err != nil {
+			return err
+		}
 		return localgit.Commit(o.SitesRoot, o.Site.Name, message, o.Out)
 	}
-	return localgit.CommitTree(localgit.TreeGitDir(siteDir), siteDir, filepath.Base(docroot), message, o.Out)
+	gitDir := localgit.TreeGitDir(siteDir)
+	if err := localgit.ClearStaleLocks(gitDir); err != nil {
+		return err
+	}
+	return localgit.CommitTree(gitDir, siteDir, filepath.Base(docroot), message, o.Out)
 }
 
 // ErrNoProfile: a pull needs a profile from wpsync scan (Spec 5.1).
@@ -408,8 +421,11 @@ func run(o Options) error {
 	if err := baseline.Save(siteDir, next); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
+	// The pull itself is done: a failed snapshot is a warning, not a failed pull (Review M2).
+	var warnings []string
 	if err := o.commit(siteDir, docroot, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); err != nil {
-		return err
+		fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – die Site ist gezogen, der Stand fehlt in der Historie: %v\n", err)
+		warnings = append(warnings, WarningSnapshotFailed)
 	}
 
 	localURL, err := drv.LocalURL(name)
@@ -422,6 +438,7 @@ func run(o Options) error {
 			TablesLoaded: len(tables), TablesTotal: len(delta.Tables),
 			Requests: client.Stats.Requests, BytesIn: client.Stats.BytesIn,
 			DurationMS: time.Since(started).Milliseconds(), LocalURL: localURL, AgentVersion: delta.Env.AgentVersion,
+			Warnings: warnings,
 		}
 		if !o.NoAnonymize {
 			o.Report.LocalAdminUser, o.Report.LocalAdminPassword = LocalAdminUser, LocalAdminPassword

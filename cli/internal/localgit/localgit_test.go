@@ -1022,18 +1022,59 @@ func TestCommitTreeMovesSiteGitNextToTheRepo(t *testing.T) {
 	}
 }
 
-// Container-Modus: wpsync endet mit dem Container. Ein abgekoppeltes Auto-gc stürbe mit und liesse
-// HEAD.lock zurück, der nächste Pull könnte nicht mehr committen (Abnahme Server-Modus, Folge-Pull).
-func TestAutoMaintenanceRunsInForeground(t *testing.T) {
+// Container-Modus: wpsync endet mit dem Container. Ein Auto-gc während des Commits stürbe mit und
+// liesse HEAD.lock zurück (Abnahme Server-Modus, Folge-Pull; Review M2): kein Auto-gc und keine
+// Auto-Maintenance in den git-Aufrufen, abgekoppelt schon gar nicht.
+func TestNoAutoMaintenanceInGitCalls(t *testing.T) {
 	gitDir := filepath.Join(t.TempDir(), "history.git")
 	if out, err := exec.Command("git", "init", "-q", "--bare", gitDir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
-	for _, key := range []string{"gc.autoDetach", "maintenance.autoDetach"} {
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false", "gc.autoDetach": "false", "maintenance.autoDetach": "false"} {
 		out, err := run(gitDir, "", "config", "--get", key)
-		if err != nil || strings.TrimSpace(string(out)) != "false" {
-			t.Errorf("%s = %q, %v; want false", key, out, err)
+		if err != nil || strings.TrimSpace(string(out)) != want {
+			t.Errorf("%s = %q, %v; want %s", key, out, err, want)
 		}
+	}
+}
+
+// Review M2: ein hart beendeter Commit oder gc hinterlässt Locks im Snapshot-Repo; ohne Aufräumen
+// scheiterte jeder weitere Pull. ClearStaleLocks entfernt nur die Top-Level-Locks des git-dir.
+func TestClearStaleLocks(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "html/wp-content/a.php")
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "html", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{"index.lock", "HEAD.lock", "refs/heads/main.lock", "gc.pid"}
+	for _, rel := range stale {
+		os.WriteFile(filepath.Join(gitDir, filepath.FromSlash(rel)), nil, 0o644)
+	}
+	keep := filepath.Join(gitDir, "refs", "heads", "x", "y.lock")
+	os.MkdirAll(filepath.Dir(keep), 0o755)
+	os.WriteFile(keep, nil, 0o644)
+	write(t, siteDir, "html/wp-content/b.php")
+	if err := CommitTree(gitDir, siteDir, "html", "blocked", io.Discard); err == nil {
+		t.Fatal("commit with index.lock must fail (test setup)")
+	}
+	if err := ClearStaleLocks(gitDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range stale {
+		if _, err := os.Lstat(filepath.Join(gitDir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("%s still there", rel)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("nested lock removed")
+	}
+	os.Remove(keep)
+	if err := CommitTree(gitDir, siteDir, "html", "second", io.Discard); err != nil {
+		t.Fatalf("commit after cleanup: %v", err)
+	}
+	if err := ClearStaleLocks(filepath.Join(t.TempDir(), "missing.git")); err != nil {
+		t.Fatalf("missing repo: %v", err)
 	}
 }
 
