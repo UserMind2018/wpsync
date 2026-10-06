@@ -73,13 +73,8 @@ func PostSetup(r localenv.Runner, env agentapi.Env, localURL string, o PostSetup
 		}
 	}
 
-	for _, args := range [][]string{
-		{"wp", "config", "set", "WP_ENVIRONMENT_TYPE", "local", "--type=constant"},
-		{"wp", "config", "set", "DISABLE_WP_CRON", "true", "--raw", "--type=constant"},
-	} {
-		if err := r.Run(args...); err != nil {
-			return err
-		}
+	if err := setLocalConstants(r, out); err != nil {
+		return err
 	}
 
 	var deactivate []string
@@ -178,4 +173,45 @@ func MailguardCheck(r localenv.Runner) error {
 		return ErrMailguardMissing
 	}
 	return nil
+}
+
+// localConstants are the wp-config.php constants every local copy needs, with their JSON value.
+var localConstants = []struct{ name, json string }{
+	{"WP_ENVIRONMENT_TYPE", `"local"`},
+	{"DISABLE_WP_CRON", "true"},
+}
+
+// setLocalConstants sets the local constants that are missing or differ. A wp-config.php the caller
+// provides read-only (Website Studio) and that already defines them is left alone; one that
+// differs and cannot be written still fails the post-setup.
+func setLocalConstants(r localenv.Runner, out io.Writer) error {
+	set := 0
+	for _, c := range localConstants {
+		got, err := r.Output("wp", "config", "get", c.name, "--type=constant", "--format=json")
+		if err == nil && constantMatches(got, c.json) {
+			continue
+		}
+		args := []string{"wp", "config", "set", c.name, strings.Trim(c.json, `"`), "--type=constant"}
+		if c.json == "true" {
+			args = []string{"wp", "config", "set", c.name, "true", "--raw", "--type=constant"}
+		}
+		if err := r.Run(args...); err != nil {
+			return fmt.Errorf("wp-config.php: %s auf %s setzen: %w", c.name, c.json, err)
+		}
+		set++
+	}
+	if set == 0 {
+		fmt.Fprintln(out, "  wp-config.php: lokale Konstanten schon gesetzt")
+	}
+	return nil
+}
+
+// constantMatches compares the JSON output of `wp config get --format=json` with the wanted value;
+// a constant defined as 1 counts as true.
+func constantMatches(got, want string) bool {
+	got = strings.TrimSpace(got)
+	if got == want {
+		return true
+	}
+	return want == "true" && (got == "1" || got == `"1"`)
 }
