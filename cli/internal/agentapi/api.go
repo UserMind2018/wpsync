@@ -119,14 +119,14 @@ func Discover(hc *http.Client, rawURL string) (string, error) {
 	req.Header.Set("User-Agent", UserAgent())
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("discover %s: %w", rawURL, err)
+		return "", fmt.Errorf("%w: discover %s: %w", ErrUnreachable, rawURL, err)
 	}
 	defer resp.Body.Close()
 	var index struct {
 		Namespace string `json:"namespace"`
 	}
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&index) != nil || index.Namespace != "wpsync/v1" {
-		return "", fmt.Errorf("discover %s: wpsync agent not found (HTTP %d)", rawURL, resp.StatusCode)
+		return "", fmt.Errorf("%w: discover %s: wpsync agent not found (HTTP %d)", ErrUnreachable, rawURL, resp.StatusCode)
 	}
 	final := resp.Request.URL
 	return final.Scheme + "://" + final.Host + strings.TrimRight(final.Path, "/"), nil
@@ -143,7 +143,7 @@ func Pair(hc *http.Client, baseURL, code, device string) (*PairResult, error) {
 	req.Header.Set("User-Agent", UserAgent())
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("pair: %w", err)
+		return nil, fmt.Errorf("%w: pair: %w", ErrUnreachable, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, readAPIError(resp)

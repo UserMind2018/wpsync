@@ -3,6 +3,7 @@ package agentapi
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,9 @@ func UserAgent() string { return "wpsync/" + Version }
 // ErrSuspectedBan: the server stopped answering after earlier success. Never retried –
 // retries extend fail2ban bans (Konzept E16, AC-26).
 var ErrSuspectedBan = errors.New("server stopped responding after earlier success – suspected IP ban")
+
+// ErrUnreachable: the agent could not be reached (DNS, connection, TLS) – exit code agent_unreachable.
+var ErrUnreachable = errors.New("wpsync-Agent nicht erreichbar")
 
 // APIError is a non-200 answer from the agent.
 type APIError struct {
@@ -58,6 +62,8 @@ type Client struct {
 	Now         func() time.Time
 	Sleep       func(time.Duration)
 	Stats       Stats
+	// Ctx aborts running requests and backoff waits (SIGTERM in the server mode); nil = never.
+	Ctx context.Context
 
 	last      time.Time
 	successes int
@@ -94,7 +100,7 @@ func (c *Client) Post(route string, body any) (*http.Response, error) {
 	}
 	for attempt := 0; ; attempt++ {
 		c.throttle()
-		req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/?rest_route="+route, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(c.ctx(), http.MethodPost, c.BaseURL+"/?rest_route="+route, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
@@ -103,15 +109,20 @@ func (c *Client) Post(route string, body any) (*http.Response, error) {
 		c.Stats.Requests++
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			if ctxErr := c.ctx().Err(); ctxErr != nil {
+				return nil, fmt.Errorf("request %s: %w", route, ctxErr)
+			}
 			if c.successes > 0 && isConnectionFailure(err) {
 				return nil, fmt.Errorf("%w: %v", ErrSuspectedBan, err)
 			}
-			return nil, fmt.Errorf("request %s: %w", route, err)
+			return nil, fmt.Errorf("%w: request %s: %w", ErrUnreachable, route, err)
 		}
 		if backoffStatus[resp.StatusCode] && attempt < maxBackoffs {
 			wait := retryAfter(resp, time.Duration(10<<attempt)*time.Second)
 			resp.Body.Close()
-			c.Sleep(wait)
+			if err := c.pause(wait); err != nil {
+				return nil, fmt.Errorf("request %s: %w", route, err)
+			}
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -133,6 +144,29 @@ func (c *Client) PostJSON(route string, body, out any) error {
 		return fmt.Errorf("decode %s: %w", route, err)
 	}
 	return nil
+}
+
+func (c *Client) ctx() context.Context {
+	if c.Ctx == nil {
+		return context.Background()
+	}
+	return c.Ctx
+}
+
+// pause waits for a backoff; with Ctx it ends early on cancellation.
+func (c *Client) pause(d time.Duration) error {
+	if c.Ctx == nil {
+		c.Sleep(d)
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-c.Ctx.Done():
+		return c.Ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func (c *Client) throttle() {
