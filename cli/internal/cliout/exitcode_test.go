@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/pull"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // Spec Server-Modus §9: je Exit-Code ein Test.
@@ -72,5 +75,26 @@ func TestEveryCodeHasAName(t *testing.T) {
 		if Names[code] == "" {
 			t.Errorf("code %d has no name", code)
 		}
+	}
+}
+
+type enospcReader struct{}
+
+func (enospcReader) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}
+}
+
+// Review N1: der Fehler eines Datei-Schreibvorgangs im Pull (safefs.WriteFile, so wie
+// pull.DownloadFiles ihn weiterreicht) wird als disk_full klassifiziert.
+func TestFileWriteENOSPCIsDiskFull(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	werr := safefs.WriteFile(root, "wp-content/a.txt", enospcReader{}, 10, time.Time{}, 0o644)
+	err = fmt.Errorf("bundle with 1 files (first: wp-content/a.txt): %w", fmt.Errorf("wp-content/a.txt: %w", werr))
+	if f := Classify(err); f.Exit != ExitDiskFull {
+		t.Fatalf("Classify(%v) = %d, want %d", err, f.Exit, ExitDiskFull)
 	}
 }

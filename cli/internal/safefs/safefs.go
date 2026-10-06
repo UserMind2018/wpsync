@@ -121,7 +121,11 @@ func WriteFile(r *os.Root, rel string, src io.Reader, size int64, mtime time.Tim
 	closeErr := f.Close()
 	if copyErr != nil || closeErr != nil || (size >= 0 && n != size) {
 		r.Remove(tmp)
-		return fmt.Errorf("write %s: %d/%d bytes: %v %v", rel, n, size, copyErr, closeErr)
+		// %w keeps ENOSPC & co. for the exit code (disk_full); a short body has neither error.
+		if err := errors.Join(copyErr, closeErr); err != nil {
+			return fmt.Errorf("write %s: %d/%d bytes: %w", rel, n, size, err)
+		}
+		return fmt.Errorf("write %s: %d/%d bytes", rel, n, size)
 	}
 	if !mtime.IsZero() {
 		if err := r.Chtimes(tmp, mtime, mtime); err != nil {
