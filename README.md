@@ -471,7 +471,13 @@ abbilden lässt, sofern das Profil sie kopiert.
 
 - **Der Riegel erfasst nur WordPress-Wege:** die HTTP-API von WordPress und `wp_mail`/PHPMailer.
   Ein Plugin, das mit eigenem cURL oder Socket nach draussen spricht (so arbeiten einige
-  Zahlungs-SDKs), geht daran vorbei. Die Liste der gesperrten Dienste ist eine Untergrenze.
+  Zahlungs-SDKs), geht daran vorbei. Die Liste der gesperrten Dienste ist eine Untergrenze:
+  Gesperrt sind bekannte Mail-, Zahlungs- und Newsletter-Dienste. Eine Testbestellung auf
+  Staging kann bei anderen angebundenen Diensten (Rechnungs-, Versand-, ERP-Schnittstellen)
+  echte Vorgänge auslösen – solche Plugins vor dem Test in der Kopie deaktivieren.
+- **Absolute Pfade in Plugin-Optionen:** Die Uploads der Kopie liegen immer in ihrem eigenen
+  Ordner. Andere Plugin-Optionen mit absolutem Pfad auf Live (Log-, Cache-, Export-Ordner)
+  werden nicht umgeschrieben; ein solches Plugin schreibt aus der Kopie in den Ordner von Live.
 - **Erfundenes Zugangs-Cookie:** Der Webserver prüft nur, ob ein Cookie `wpsync_stg` mitkommt;
   den Wert prüft der Riegel, sobald WordPress lädt. Mit einem erfundenen Cookie sind deshalb
   statische Dateien der Kopie erreichbar und PHP-Dateien, die sich direkt aufrufen lassen, ohne
