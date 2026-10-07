@@ -81,6 +81,18 @@ final class PushUnitsTest extends TestCase
         $this->assertFalse(PushUnits::isProtected('plugins/a', '00-local-mailguard.php'), 'only mu-plugins has protected names');
     }
 
+    /** AC-100 */
+    public function testStagingBoltIsProtected(): void
+    {
+        $this->assertTrue(PushUnits::isProtected('mu-plugins', '00-wpsync-staging.php'));
+        $this->assertTrue(PushUnits::isProtected('mu-plugins', '00-WPSYNC-staging.php'));
+        $this->assertTrue(PushUnits::isProtected('mu-plugins', 'wpsync-staging/StagingAccess.php'));
+        $this->assertTrue(PushUnits::isProtected('mu-plugins', 'wpsync-staging'));
+        $this->assertFalse(PushUnits::validFile('mu-plugins', '00-wpsync-staging.php'));
+        $this->assertFalse(PushUnits::validFile('mu-plugins', 'wpsync-staging/StagingHosts.php'));
+        $this->assertFalse(PushUnits::isProtected('plugins/x', '00-wpsync-staging.php'));
+    }
+
     public function testVersionFromPluginHeader(): void
     {
         file_put_contents($this->root . '/plugin/readme.php', "<?php\n// Version: 9.9.9 – kein Plugin-Kopf\n");

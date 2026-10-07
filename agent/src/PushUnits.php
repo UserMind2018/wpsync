@@ -42,8 +42,8 @@ final class PushUnits
     }
 
     /**
-     * Der lokale Mail-Riegel würde auf Live den Mailversand blockieren; wpsync-eigene Dateien
-     * gehören dem Agent (P11). Beides bleibt beim Tausch unverändert stehen.
+     * Der lokale Mail-Riegel würde auf Live den Mailversand blockieren; der Staging-Riegel und
+     * wpsync-eigene Dateien gehören dem Agent (P11, AC-100). Alles bleibt beim Tausch stehen.
      */
     public static function isProtected(string $unit, string $rel): bool
     {
@@ -51,7 +51,7 @@ final class PushUnits
             return false;
         }
         $top = strtolower(explode('/', $rel)[0]);
-        return $top === '00-local-mailguard.php' || strpos($top, 'wpsync') === 0;
+        return $top === '00-local-mailguard.php' || $top === '00-wpsync-staging.php' || strpos($top, 'wpsync') === 0;
     }
 
     /** Version aus dem Plugin-Kopf bzw. der style.css; leer, wenn es keinen gibt. */

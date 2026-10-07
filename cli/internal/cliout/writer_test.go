@@ -56,3 +56,15 @@ func TestResultAgentOutdated(t *testing.T) {
 		t.Fatal("failed result must not carry data")
 	}
 }
+
+// T4: push --json schreibt Schritte als {"event":…,"data":…}
+func TestWriterEvent(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.Event("plan", map[string]any{"target": "staging"})
+	w.Event("commit", nil)
+	got := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(got) != 2 || got[0] != `{"event":"plan","data":{"target":"staging"}}` || got[1] != `{"event":"commit","data":{}}` {
+		t.Errorf("events = %q", got)
+	}
+}

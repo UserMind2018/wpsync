@@ -18,6 +18,8 @@ final class PushRescue
     public const MAX_ATTEMPTS = 5;
     public const LOCK_SECONDS = 600;
     public const ID           = '/^p_[0-9]{8}_[a-f0-9]{12}\z/';
+    /** Ordner einer Staging-Kopie im Webroot – wie StagingGuard::DIR_RE, das rescue.php nicht lädt. */
+    public const STAGING_DIR  = '/^wpsync-staging-[a-f0-9]{12}\z/';
 
     public static function newId(int $now): string
     {
@@ -92,12 +94,38 @@ final class PushRescue
     }
 
     /**
-     * Einstieg für rescue.php.
+     * wp-content von Live und – daneben im Webroot – das jeder Staging-Kopie (Spec 2b 5.8, V8).
+     * Ohne glob: nur echte Ordner mit genau dem Namen, den der Agent vergibt, keine Symlinks.
      *
+     * @return list<string>
+     */
+    public static function contentDirs(string $liveContent): array
+    {
+        clearstatcache(true);
+        $live = rtrim(str_replace('\\', '/', $liveContent), '/');
+        $dirs = [$live];
+        $base = dirname($live);
+        foreach ((array) @scandir($base) as $name) {
+            if (!is_string($name) || preg_match(self::STAGING_DIR, $name) !== 1) {
+                continue;
+            }
+            $content = $base . '/' . $name . '/wp-content';
+            if (!is_link($base . '/' . $name) && !is_link($content) && is_dir($content)) {
+                $dirs[] = $content;
+            }
+        }
+        return $dirs;
+    }
+
+    /**
+     * Einstieg für rescue.php. Sucht den Push in wp-content von Live und der Staging-Kopie (V8);
+     * jeder Datensatz wird nur gegen das wp-content geprüft, in dem er liegt.
+     *
+     * @param list<string>         $contentDirs
      * @param array<string, mixed> $post
      * @return array{0: int, 1: array<string, mixed>} HTTP-Status und JSON-Antwort
      */
-    public static function handle(string $contentDir, array $post, int $now): array
+    public static function handle(array $contentDirs, array $post, int $now): array
     {
         $action = $post['action'] ?? '';
         if ($action === 'ping') {
@@ -108,30 +136,35 @@ final class PushRescue
         if ($action !== 'rollback' || !is_string($pushId) || !is_string($key) || preg_match(self::ID, $pushId) !== 1) {
             return [400, ['ok' => false, 'error' => 'bad request']];
         }
-        // glob() liefert bei einem Fehler false – (array) false wäre [false] und damit der Pfad ''.
-        foreach (glob($contentDir . '/wpsync-push-*', GLOB_ONLYDIR) ?: [] as $workDir) {
-            $record = self::read((string) $workDir, $pushId);
-            if ($record === null) {
-                continue;
-            }
-            if ((int) $record['locked_until'] > $now) {
-                return [429, ['ok' => false, 'error' => 'locked']];
-            }
-            if (!hash_equals((string) $record['key_hash'], hash('sha256', $key))) {
-                $record['attempts'] = (int) $record['attempts'] + 1;
-                if ($record['attempts'] >= self::MAX_ATTEMPTS) {
-                    $record['attempts']     = 0;
-                    $record['locked_until'] = $now + self::LOCK_SECONDS;
+        foreach ($contentDirs as $contentDir) {
+            // glob() liefert bei einem Fehler false – (array) false wäre [false] und damit der Pfad ''.
+            foreach (glob($contentDir . '/wpsync-push-*', GLOB_ONLYDIR) ?: [] as $workDir) {
+                if (is_link((string) $workDir)) {
+                    continue; // der Agent legt den Arbeitsordner als echten Ordner an
                 }
-                self::save((string) $workDir, $record);
-                return [403, ['ok' => false, 'error' => 'wrong key']];
+                $record = self::read((string) $workDir, $pushId);
+                if ($record === null) {
+                    continue;
+                }
+                if ((int) $record['locked_until'] > $now) {
+                    return [429, ['ok' => false, 'error' => 'locked']];
+                }
+                if (!hash_equals((string) $record['key_hash'], hash('sha256', $key))) {
+                    $record['attempts'] = (int) $record['attempts'] + 1;
+                    if ($record['attempts'] >= self::MAX_ATTEMPTS) {
+                        $record['attempts']     = 0;
+                        $record['locked_until'] = $now + self::LOCK_SECONDS;
+                    }
+                    self::save((string) $workDir, $record);
+                    return [403, ['ok' => false, 'error' => 'wrong key']];
+                }
+                // Notfallweg nur für den unbestätigten Push (U18): einen bestätigten rollt nur der Agent
+                // zurück – per CLI bei offenem Push-Fenster oder im WP-Admin. rescue.php kennt kein Fenster.
+                if ($record['status'] === self::CONFIRMED) {
+                    return [409, ['ok' => false, 'error' => 'confirmed']];
+                }
+                return self::rollback((string) $contentDir, (string) $workDir, $pushId);
             }
-            // Notfallweg nur für den unbestätigten Push (U18): einen bestätigten rollt nur der Agent
-            // zurück – per CLI bei offenem Push-Fenster oder im WP-Admin. rescue.php kennt kein Fenster.
-            if ($record['status'] === self::CONFIRMED) {
-                return [409, ['ok' => false, 'error' => 'confirmed']];
-            }
-            return self::rollback($contentDir, (string) $workDir, $pushId);
         }
         return [404, ['ok' => false, 'error' => 'unknown push']];
     }
@@ -154,10 +187,14 @@ final class PushRescue
         if ($record['superseded_by'] !== null) {
             return [409, ['ok' => false, 'error' => 'superseded', 'by' => $record['superseded_by']]];
         }
-        $root = rtrim(str_replace('\\', '/', (string) realpath($contentDir)), '/');
+        // Der Arbeitsordner und jeder Pfad des Datensatzes müssen in genau diesem wp-content liegen:
+        // ein Datensatz der Staging-Kopie tauscht nichts auf Live und umgekehrt (Spec 2b 5.8).
+        if (!self::confined($contentDir, $workDir . '/' . $pushId)) {
+            return [409, ['ok' => false, 'error' => 'path outside wp-content']];
+        }
         foreach ($record['pairs'] as $pair) {
             foreach ([$pair['target'], $pair['snapshot'], $pair['discard']] as $path) {
-                if ($path !== null && !self::inside($root, (string) $path)) {
+                if ($path !== null && !self::confined($contentDir, (string) $path)) {
                     return [409, ['ok' => false, 'error' => 'path outside wp-content']];
                 }
             }
@@ -187,6 +224,36 @@ final class PushRescue
             }
         }
         return [200, ['ok' => true, 'status' => self::ROLLED_BACK]];
+    }
+
+    /**
+     * Liegt $path in diesem wp-content – auch aufgelöst? In einer Staging-Kopie darf auf dem Weg
+     * kein Symlink liegen (StagingFiles kopiert keine). Live darf welche haben (2a), nur keinen,
+     * der in eine Staging-Kopie führt.
+     */
+    public static function confined(string $contentDir, string $path): bool
+    {
+        // Auch der realpath-Cache: ein PHP-FPM-Prozess merkt sich aufgelöste Pfade über Requests hinweg
+        // und sähe einen eben erst gesetzten Symlink sonst nicht.
+        clearstatcache(true);
+        $root = rtrim(str_replace('\\', '/', (string) realpath($contentDir)), '/');
+        $path = str_replace('\\', '/', $path);
+        if (!self::inside($root, $path)) {
+            return false;
+        }
+        $dir = dirname($path);
+        while (strlen($dir) > strlen($root) && !file_exists($dir)) {
+            $dir = dirname($dir);
+        }
+        $real = realpath($dir);
+        if ($real === false) {
+            return false;
+        }
+        $real = rtrim(str_replace('\\', '/', $real), '/');
+        if (preg_match(self::STAGING_DIR, basename(dirname($root))) === 1) {
+            return $real === $dir;
+        }
+        return strpos($real . '/', dirname($root) . '/wpsync-staging-') !== 0;
     }
 
     private static function inside(string $root, string $path): bool

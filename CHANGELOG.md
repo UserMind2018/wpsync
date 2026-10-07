@@ -3,6 +3,65 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.4.0] – YYYY-MM-DD · Agent 0.5.0
+
+**CLI und Agent ändern sich.** `staging` und `push --to staging` brauchen Agent 0.5.0; Pull,
+Scan und Push nach Live laufen weiter mit älteren Agents.
+
+### Neu
+- `wpsync staging create|refresh|open|status|delete`: Staging-Kopie auf dem Server des Kunden –
+  Unterordner im Webroot, eigene Tabellen mit eigenem Präfix, anonymisiert, nach Pull-Profil,
+  ohne Uploads (Weiterleitung auf Live). Zugang nur per Einmal-Link mit Auto-Login (5 Minuten,
+  einmal gültig, nur am Einstieg der Kopie einlösbar); während eines Jobs und nach dem Verfall
+  liefert die Kopie für alles 403
+- `wpsync push … --to staging`: Code auf die Kopie, mit Push-Fenster, Snapshot, Health-Check
+  und Rollback wie nach Live; Baseline und internes Git bleiben unverändert
+- Mehrmals nach Staging pushen ohne `--force`: Die CLI merkt sich den Stand der gepushten
+  Einheiten in der Kopie in `.wpsync/staging-base.json` (mit dem Pairing-Secret versiegelt) und
+  vergleicht den nächsten Push nach Staging damit. Der Stand verfällt bei `staging create` und
+  `staging refresh --code`, nicht bei `staging refresh` ohne Code (Agent-Feld `code_copied_at`).
+  Ein Push nach Live liest die Datei nie
+- Unterbrochene Läufe: Trifft `staging create`, `refresh` oder `delete` auf einen laufenden Job
+  derselben Art, setzt derselbe Befehl ihn fort; sonst Exit 44
+- `--json` für `staging`, `push`, `pushes`, `rollback`; `--secret-stdin` für `staging`. Neue
+  Exit-Codes 40–44 (Push) und 50–53 (Staging). `wpsync status` meldet die Kopie
+- `error.reason` bei Exit 1: `staging_failed`, `staging_state`, `staging_copy`, `foreign_url`
+
+### Geändert
+- `wpsync rollback <site>` ohne Push-ID nimmt den neuesten Push nach Live; Staging-Pushes mit
+  `--to staging` oder ID. `rollback <id> --to <anderes Ziel>` wird abgelehnt
+- Exit-Codes von `push` bei geschlossenem Fenster (40), Konflikt (41), hängendem Push (42),
+  automatischem Rollback (43) und belegter Site auf dem Server (44) statt 1. Die lokale
+  Site-Sperre bleibt Exit 20 mit `error.reason: "site_locked"`
+- Exit 21 (`disk_full`) auch, wenn der Server keinen Platz meldet (HTTP 507) – für `push`
+  bisher Exit 1
+- `wpsync pushes` zeigt das Ziel jedes Pushs (Spalte ZIEL, `target` in `--json`)
+- `push --to` nimmt nur `live` oder `staging`; alles andere ist Exit 2
+
+### Behoben
+- Pull von einer Quelle mit PHP vor 8.0.16 und MariaDB ab 10: Die Quelle meldet die Version als
+  `5.5.5-10.11.19-MariaDB`, wpsync verlangte von DDEV deshalb `mariadb:5.5` und die lokale
+  Umgebung startete nicht. Das Präfix `5.5.5-` wird jetzt übergangen
+
+### Sicherheit
+- Die Kopie schreibt nie in Live-Tabellen oder ausserhalb ihres Ordners: eine Prüf-Funktion für
+  jede Tabelle und jeden Pfad, kein Präfix, das mit dem Live-Präfix beginnt. Live liefert
+  Staging-Tabellen und -Ordner nie aus. Mails, Zahlungs-, Newsletter-Dienste und Live selbst sind
+  von der Kopie aus gesperrt, auch als Ziel einer Weiterleitung; eigene Salts, Cookies und
+  Cache-Salt
+- Nie in der Kopie: `wp-config.php` von Live und ihre Varianten, `.user.ini` und jede `.htaccess`
+  eines Unterordners mit Rewrite-Direktiven (sie nähme dem Ordner die Zugangssperre) – auch nicht
+  über einen Push nach Staging
+- Ein Agent, der in einer Kopie geladen wird, beantwortet keinen Aufruf
+- `staging create`, `refresh`, `delete` und `open` brauchen ein offenes Push-Fenster wie ein
+  Push (sonst Exit 40, auf dem Server ändert sich nichts) – auch die Probeläufe. Administrator
+  der Kopie zu sein, heisst PHP im selben Server-Benutzer wie Live auszuführen; ein entwendetes
+  Pairing-Secret allein reicht dafür nicht mehr. `staging status` und das Fortsetzen eines
+  laufenden Jobs gehen ohne Fenster
+- `staging open` warnt, die Kopie nicht im selben Browserprofil zu öffnen, in dem man bei Live
+  angemeldet ist: sie liegt auf demselben Origin wie Live (`--json`: `data.warnings`)
+- Bekannte Grenzen der Kopie stehen im README unter „Staging auf dem Server“
+
 ## [0.3.1] – 2026-10-06 · Agent 0.4.1
 
 **Nur die CLI ändert sich.** Agent 0.4.1 bleibt.

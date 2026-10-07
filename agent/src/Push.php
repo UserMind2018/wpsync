@@ -5,7 +5,8 @@ defined('ABSPATH') || exit;
 
 /**
  * Ablauf eines Code-Pushs (Spec Stufe 2, 5.3): begin → upload → commit → confirm, dazu
- * rollback und list. Der Zustand liegt im Arbeitsordner wp-content/wpsync-push-<zufall>/<id>/:
+ * rollback und list. Der Zustand liegt im Arbeitsordner wp-content/wpsync-push-<zufall>/<id>/
+ * – im wp-content des Ziels, bei einem Push nach Staging also in der Kopie (Spec 2b 5.8):
  *   plan.json    Soll-Manifest, benötigte und übernommene Dateien, Hash des Rollback-Schlüssels
  *   stage/<n>/   hochgeladene Dateien der n-ten Einheit
  *   new/<n>/     fertig gebautes Verzeichnis vor dem Tausch
@@ -29,6 +30,8 @@ final class Push
     public const MAX_UNITS  = 50;
     /** Rohdaten pro Upload-Request – Base64 und JSON bleiben unter post_max_size 8 MB (U13). */
     public const MAX_UPLOAD = 4194304;
+    /** Ziele eines Pushs (Spec 2b 5.8). Das Ziel steht im Datensatz des Pushs und wechselt nie. */
+    public const TARGETS    = ['live', 'staging'];
 
     /** @var string */
     private static $pluginDir = '';
@@ -85,19 +88,25 @@ final class Push
 
     /**
      * Prüft Einheiten, Konflikte, Rechte und Platz. Mit dry nur Auskunft; sonst legt es den Push
-     * an und nimmt die Sperre.
+     * an und nimmt die Sperre. Ziel live oder staging (Spec 2b 5.8): der Client nennt nur das Wort,
+     * das Verzeichnis kommt aus dem Staging-Datensatz.
      *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
      */
     public static function begin(array $params, string $keyId)
     {
-        $content = self::content();
-        if ($content === '' || rtrim(wp_normalize_path((string) realpath(dirname(self::$pluginDir, 2))), '/') !== $content) {
+        $live = self::content();
+        if ($live === '' || rtrim(wp_normalize_path((string) realpath(dirname(self::$pluginDir, 2))), '/') !== $live) {
             return self::error('wpsync_layout', 'Push braucht das Standardlayout wp-content/plugins/wpsync-agent.', 400);
         }
-        if (($params['target'] ?? 'live') !== 'live') {
-            return self::error('wpsync_push_target', 'Unbekanntes Ziel – dieser Agent kennt nur „live“.', 400);
+        $target = $params['target'] ?? 'live';
+        if (!is_string($target) || !in_array($target, self::TARGETS, true)) {
+            return self::error('wpsync_push_target', 'Unbekanntes Ziel – erlaubt sind „live“ und „staging“.', 400);
+        }
+        $content = $target === 'staging' ? self::stagingContent() : $live;
+        if ($content instanceof \WP_Error) {
+            return $content;
         }
         $units = self::parseUnits($params['units'] ?? null);
         if ($units instanceof \WP_Error) {
@@ -112,9 +121,13 @@ final class Push
         $readonly   = [];
         $bytes      = 0;
         foreach ($units as $unit) {
-            $dir       = $content . '/' . $unit['path'];
+            $dir = $content . '/' . $unit['path'];
+            if (!self::confined($target, $content, $dir)) {
+                return self::error('wpsync_push_unit', 'Einheit liegt nicht im wp-content des Ziels: ' . $unit['path'], 400);
+            }
             $exists    = is_dir($dir);
-            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path']) : [], $unit['base']);
+            $base      = $target === 'staging' ? self::copyBase($live . '/' . $unit['path'], $dir, $unit['path'], $unit['base']) : $unit['base'];
+            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path']) : [], $base);
             $writable  = is_writable(dirname($dir)) && (!$exists || is_writable($dir));
             $plans[]   = [
                 'path'      => $unit['path'],
@@ -137,8 +150,9 @@ final class Push
         $pending = self::pending();
         $answer  = [
             'push_id'       => '',
+            'target'        => $target,
             'agent_version' => WPSYNC_VERSION,
-            'health_urls'   => self::healthUrls(),
+            'health_urls'   => $target === 'staging' ? Staging::healthUrls() : self::healthUrls(),
             'window_open'   => PushWindow::open(Store::pushUntil($keyId), $now),
             'pending'       => $pending,
             'units'         => $plans,
@@ -165,7 +179,7 @@ final class Push
         if ($free !== false && $free < 2 * $bytes) {
             return self::error('wpsync_push_space', 'Zu wenig freier Speicherplatz für Push und Snapshot.', 507);
         }
-        $work = self::workDir();
+        $work = self::workDir($content);
         foreach ($units as $unit) {
             if (!PushSwap::probe($work, dirname($content . '/' . $unit['path']))) {
                 return self::error('wpsync_push_perms', 'Verzeichnisse lassen sich nicht umbenennen (Rechte oder anderes Dateisystem): ' . dirname($unit['path']), 409);
@@ -173,7 +187,7 @@ final class Push
         }
 
         $pushId = PushRescue::newId($now);
-        if (!self::acquire($pushId, $keyId, $now)) {
+        if (!self::acquire($pushId, $keyId, $target, $now)) {
             return self::error('wpsync_push_locked', 'Auf dieser Site läuft bereits ein Push.', 423);
         }
         $salt     = bin2hex(random_bytes(16));
@@ -210,7 +224,7 @@ final class Push
                 'push_id' => $pushId,
                 'key_id'  => $keyId,
                 'device'  => Store::deviceFor($keyId),
-                'target'  => 'live',
+                'target'  => $target,
                 'status'  => self::UPLOADING,
                 'forced'  => empty($params['force']) ? 0 : 1,
                 'units'   => (string) wp_json_encode($summary),
@@ -308,8 +322,7 @@ final class Push
         if ($open instanceof \WP_Error) {
             return $open;
         }
-        list($pushId, $plan, $work) = $open;
-        $content  = self::content();
+        list($pushId, $plan, $work, $content, $target) = $open;
         $base     = $work . '/' . $pushId;
         $cursor   = is_array($params['cursor'] ?? null) ? $params['cursor'] : [];
         $u        = max(0, (int) ($cursor['u'] ?? 0));
@@ -336,11 +349,20 @@ final class Push
             }
             // Der Cursor kommt vom Client: vor dem Tausch muss jede Manifest-Datei wirklich liegen.
             foreach ($plan['units'] as $n => $unit) {
+                // Und jede Einheit noch im wp-content ihres Ziels: nie Live bei einem Staging-Push, nie umgekehrt.
+                if (!PushUnits::valid((string) $unit['path']) || !self::confined($target, $content, $content . '/' . $unit['path'])) {
+                    throw new \RuntimeException('unit outside its target: ' . self::printable((string) $unit['path']));
+                }
                 foreach ($unit['files'] as $rel => $want) {
                     $built = $base . '/new/' . $n . '/' . $rel;
                     if (!is_file($built) || (int) filesize($built) !== (int) $want['size']) {
                         throw new \RuntimeException('not built: ' . $unit['path'] . '/' . $rel);
                     }
+                }
+            }
+            if ($target === 'staging') {
+                foreach (array_keys($plan['units']) as $n) {
+                    self::keepTheGate($base . '/new/' . $n);
                 }
             }
         } catch (\RuntimeException $e) {
@@ -394,6 +416,9 @@ final class Push
             ];
         }
         Store::updatePush($pushId, ['status' => PushRescue::COMMITTED, 'committed' => time(), 'units' => (string) wp_json_encode($summary)]);
+        if ($target === 'staging') {
+            Staging::markUsed(); // ein Push zählt als Nutzung der Kopie (Spec 2b 5.9)
+        }
         self::touchLock($pushId, time());
         return new \WP_REST_Response(['next' => null, 'stamps' => (object) $stamps]);
     }
@@ -415,7 +440,11 @@ final class Push
             if ($push['status'] !== PushRescue::COMMITTED) {
                 return self::error('wpsync_push_state', 'Push ist im Status ' . $push['status'] . '.', 409);
             }
-            PushRescue::setStatus(self::workDir(), $push['push_id'], PushRescue::CONFIRMED);
+            $dirs = self::dirs($push['target']);
+            if ($dirs instanceof \WP_Error) {
+                return $dirs;
+            }
+            PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
             self::release($push['push_id']);
             self::prune(time());
@@ -464,7 +493,11 @@ final class Push
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 return self::error('wpsync_push_state', 'Für diesen Push gibt es keinen Snapshot (Status ' . $push['status'] . ').', 409);
             }
-            list($status, $body) = PushRescue::rollback(self::content(), self::workDir(), $pushId);
+            $dirs = self::dirs($push['target']);
+            if ($dirs instanceof \WP_Error) {
+                return $dirs;
+            }
+            list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
             if ($status !== 200) {
                 $why = ($body['error'] ?? '') === 'superseded'
                     ? 'Zuerst den späteren Push ' . ($body['by'] ?? '') . ' zurückrollen.'
@@ -488,25 +521,37 @@ final class Push
         return new \WP_REST_Response(['pushes' => $pushes]);
     }
 
-    /** Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat. */
+    /** Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. */
     public static function sync(): void
     {
-        $work = self::content() . '/' . Store::pushDirName();
+        $name = Store::pushDirName();
         foreach (Store::pushes(50) as $push) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 continue;
             }
-            $record = PushRescue::read($work, $push['push_id']);
+            $content = self::content($push['target']);
+            if ($content === '') {
+                // Die Kopie ist weg (z. B. per FTP gelöscht), ihre Snapshots auch. Ohne das hier
+                // bliebe ein unbestätigter Staging-Push ewig „pending“ und sperrte jeden Push nach Live.
+                if ($push['target'] === 'staging') {
+                    self::discard($push['push_id'], $push['status']);
+                }
+                continue;
+            }
+            $record = PushRescue::read($content . '/' . $name, $push['push_id']);
             if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
                 self::finishRollback($push['push_id']);
             }
         }
     }
 
-    /** Räumt verfallene Uploads und alte Snapshots weg. Unbestätigte Pushes bleiben immer (AC-69). */
+    /**
+     * Räumt verfallene Uploads und alte Snapshots weg, getrennt pro Ziel (Spec 2b 5.8): Pushes nach
+     * Staging verdrängen keinen Snapshot von Live. Unbestätigte Pushes bleiben immer (AC-69).
+     */
     public static function prune(int $now): void
     {
-        $kept = 0;
+        $kept = [];
         foreach (Store::pushes(200) as $push) {
             if ($push['pruned']) {
                 continue;
@@ -514,28 +559,130 @@ final class Push
             if ($push['status'] === self::UPLOADING && $now - $push['created'] > self::UPLOAD_TTL) {
                 self::discard($push['push_id'], self::EXPIRED);
             } elseif ($push['status'] === PushRescue::CONFIRMED) {
-                $kept++;
-                if ($kept > self::KEEP || $now - $push['created'] > self::MAX_AGE) {
+                $kept[$push['target']] = ($kept[$push['target']] ?? 0) + 1;
+                if ($kept[$push['target']] > self::KEEP || $now - $push['created'] > self::MAX_AGE) {
                     self::discard($push['push_id'], PushRescue::CONFIRMED);
                 }
             }
         }
     }
 
-    private static function content(): string
+    /**
+     * wp-content des Ziels, aufgelöst; '' wenn es das Ziel nicht (mehr) gibt. Für Staging nur ein
+     * Ordner, den auch rescue.php fände: <webroot>/wpsync-staging-<zufall>/wp-content, kein Symlink,
+     * nie Live selbst.
+     */
+    private static function content(string $target = 'live'): string
     {
-        return rtrim(wp_normalize_path((string) realpath(WP_CONTENT_DIR)), '/');
+        $live = rtrim(wp_normalize_path((string) realpath(WP_CONTENT_DIR)), '/');
+        if ($target === 'live') {
+            return $live;
+        }
+        if ($target !== 'staging' || $live === '') {
+            return '';
+        }
+        $dir = rtrim(wp_normalize_path(Staging::contentDir()), '/');
+        return $dir !== '' && $dir !== $live && in_array($dir, PushRescue::contentDirs($live), true) && Staging::inside($dir) ? $dir : '';
     }
 
-    private static function workDir(): string
+    /**
+     * wp-content der Kopie für begin, upload und commit: nur solange sie bereit ist und kein
+     * Staging-Job läuft (V9) – geprüft bei jedem Aufruf, nicht nur beim Anlegen des Pushs.
+     *
+     * @return string|\WP_Error
+     */
+    private static function stagingContent()
     {
-        $dir = self::content() . '/' . Store::pushDirName();
+        $dir = Staging::pushContent();
+        if ($dir instanceof \WP_Error) {
+            return $dir;
+        }
+        if (!is_string($dir) || $dir === '' || rtrim(wp_normalize_path($dir), '/') !== self::content('staging')) {
+            return self::error('wpsync_staging_missing', 'Der Ordner der Staging-Kopie ist nicht benutzbar.', 409);
+        }
+        return self::content('staging');
+    }
+
+    /** Liegt das Verzeichnis einer Einheit wirklich im wp-content ihres Ziels (Spec 2b 5.8)? */
+    private static function confined(string $target, string $content, string $dir): bool
+    {
+        return PushRescue::confined($content, $dir) && ($target !== 'staging' || Staging::inside($dir));
+    }
+
+    private static function workDir(string $content): string
+    {
+        $dir = $content . '/' . Store::pushDirName();
         if (!is_dir($dir)) {
             wp_mkdir_p($dir);
             file_put_contents($dir . '/.htaccess', "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n");
             file_put_contents($dir . '/index.php', "<?php\n// Silence is golden.\n");
         }
         return $dir;
+    }
+
+    /**
+     * wp-content und Arbeitsordner eines bestehenden Pushs – aus dem Ziel in seinem Datensatz.
+     *
+     * @param bool $ready für upload und commit: die Kopie muss bereit sein
+     * @return array{0: string, 1: string}|\WP_Error
+     */
+    private static function dirs(string $target, bool $ready = false)
+    {
+        $content = $ready && $target === 'staging' ? self::stagingContent() : self::content($target);
+        if ($content instanceof \WP_Error) {
+            return $content;
+        }
+        if ($content === '') {
+            return $target === 'staging'
+                ? self::error('wpsync_staging_missing', 'Die Staging-Kopie dieses Pushs gibt es nicht mehr.', 409)
+                : self::error('wpsync_push_state', 'Das Ziel dieses Pushs ist nicht benutzbar.', 409);
+        }
+        return [$content, self::workDir($content)];
+    }
+
+    /**
+     * Die Baseline des Clients beschreibt Live; die Kopie lässt davon Dateien weg (StagingFiles:
+     * .htaccess mit Rewrite-Direktiven, .user.ini, Varianten der wp-config.php). Was deshalb auf
+     * Staging fehlt, ist kein Konflikt – entschieden an der Datei von Live, nicht am Namen allein.
+     *
+     * @param array<string, mixed> $base
+     * @return array<string, mixed>
+     */
+    private static function copyBase(string $liveDir, string $dir, string $unit, array $base): array
+    {
+        foreach (array_keys($base) as $rel) {
+            $rel  = (string) $rel;
+            $from = $liveDir . '/' . $rel;
+            // Der Pfad kommt vom Client: nur einer, den auch ein Manifest nennen dürfte.
+            if (!PushUnits::validFile($unit, $rel) || file_exists($dir . '/' . $rel) || is_link($dir . '/' . $rel)) {
+                continue;
+            }
+            if (is_file($from) && !is_link($from) && StagingFiles::leftOut('wp-content/' . $unit . '/' . $rel, $from)) {
+                unset($base[$rel]);
+            }
+        }
+        return $base;
+    }
+
+    /**
+     * Vor dem Tausch in die Kopie: eine gepushte .htaccess, die ihrem Ordner die Cookie-Sperre nähme
+     * (StagingFiles::liftsTheGate), bleibt draussen – wie beim Kopieren. Symlinks werden nicht betreten.
+     *
+     * @throws \RuntimeException wenn sich eine solche Datei nicht entfernen lässt
+     */
+    private static function keepTheGate(string $dir): void
+    {
+        foreach (@scandir($dir) ?: [] as $name) {
+            $full = $dir . '/' . $name;
+            if ($name === '.' || $name === '..' || is_link($full)) {
+                continue;
+            }
+            if (is_dir($full)) {
+                self::keepTheGate($full);
+            } elseif (StagingFiles::liftsTheGate($full) && !@unlink($full)) {
+                throw new \RuntimeException('cannot leave out ' . self::printable($name));
+            }
+        }
     }
 
     /**
@@ -581,10 +728,11 @@ final class Push
     }
 
     /**
-     * Push im Status uploading, der diesem Pairing gehört, samt Plan.
+     * Push im Status uploading, der diesem Pairing gehört, samt Plan und Verzeichnissen seines
+     * Ziels. Das Ziel kommt aus dem Datensatz – ein „target“ im Request zählt hier nicht.
      *
      * @param array<string, mixed> $params
-     * @return array{0: string, 1: array<string, mixed>, 2: string}|\WP_Error
+     * @return array{0: string, 1: array<string, mixed>, 2: string, 3: string, 4: string}|\WP_Error [ID, Plan, Arbeitsordner, wp-content, Ziel]
      */
     private static function open(array $params, string $keyId)
     {
@@ -592,15 +740,19 @@ final class Push
         if ($push instanceof \WP_Error) {
             return $push;
         }
-        if ($push['status'] !== self::UPLOADING) {
+        if ($push['status'] !== self::UPLOADING || $push['pruned']) {
             return self::error('wpsync_push_state', 'Push ist im Status ' . $push['status'] . '.', 409);
         }
-        $work = self::workDir();
+        $dirs = self::dirs($push['target'], true);
+        if ($dirs instanceof \WP_Error) {
+            return $dirs;
+        }
+        list($content, $work) = $dirs;
         $plan = json_decode((string) @file_get_contents($work . '/' . $push['push_id'] . '/plan.json'), true);
         if (!is_array($plan) || !is_array($plan['units'] ?? null)) {
             return self::error('wpsync_push_state', 'Der Plan dieses Pushs fehlt.', 409);
         }
-        return [$push['push_id'], $plan, $work];
+        return [$push['push_id'], $plan, $work, $content, $push['target']];
     }
 
     /**
@@ -617,15 +769,42 @@ final class Push
         return $push;
     }
 
-    /** @return array{push_id: string, device: string, created: int}|null */
-    private static function pending(): ?array
+    /**
+     * Ein getauschter, unbestätigter Push – auf irgendeinem oder dem genannten Ziel (V9).
+     *
+     * @return array{push_id: string, device: string, created: int}|null
+     */
+    public static function pending(?string $target = null): ?array
     {
         foreach (Store::pushes(50) as $push) {
-            if (!$push['pruned'] && $push['status'] === PushRescue::COMMITTED) {
+            if (!$push['pruned'] && $push['status'] === PushRescue::COMMITTED && ($target === null || $push['target'] === $target)) {
                 return ['push_id' => $push['push_id'], 'device' => $push['device'], 'created' => $push['created']];
             }
         }
         return null;
+    }
+
+    /** Läuft gerade ein Push (Upload oder Tausch) mit diesem Ziel? Eine Sperre pro Site (V9). */
+    public static function running(string $target, int $now): bool
+    {
+        $lock = Store::getState('push_lock');
+        return $lock !== null && ($lock['target'] ?? 'live') === $target && $now - (int) ($lock['touched'] ?? 0) < self::LOCK_TTL;
+    }
+
+    /**
+     * refresh --code und delete verwerfen die Pushes eines Ziels samt Snapshots (Spec 2b 5.8).
+     * Ein offener Upload verfällt dabei – er dürfte sonst in die neue Kopie tauschen.
+     */
+    public static function dropTarget(string $target): void
+    {
+        if (!in_array($target, self::TARGETS, true)) {
+            return;
+        }
+        foreach (Store::pushes(200) as $push) {
+            if ($push['target'] === $target && !$push['pruned']) {
+                self::discard($push['push_id'], $push['status'] === self::UPLOADING ? self::EXPIRED : $push['status']);
+            }
+        }
     }
 
     /** Schliesst das Fenster mitten im Upload, bleibt nichts zurück (AC-52). */
@@ -639,9 +818,12 @@ final class Push
 
     private static function discard(string $pushId, string $status): void
     {
-        PushSwap::remove(self::content() . '/' . Store::pushDirName() . '/' . $pushId);
+        $push    = Store::getPush($pushId);
+        $content = self::content($push === null ? 'live' : $push['target']);
+        if ($content !== '') {
+            PushSwap::remove($content . '/' . Store::pushDirName() . '/' . $pushId);
+        }
         $fields = ['status' => $status, 'pruned' => 1];
-        $push   = Store::getPush($pushId);
         if ($push !== null && $push['finished'] === null) {
             $fields['finished'] = time();
         }
@@ -654,7 +836,7 @@ final class Push
         self::discard($pushId, PushRescue::ROLLED_BACK);
     }
 
-    private static function acquire(string $pushId, string $keyId, int $now): bool
+    private static function acquire(string $pushId, string $keyId, string $target, int $now): bool
     {
         global $wpdb;
         $name = Store::lockName('push');
@@ -666,7 +848,7 @@ final class Push
             if ($lock !== null && $now - (int) ($lock['touched'] ?? 0) < self::LOCK_TTL) {
                 return false;
             }
-            Store::setState('push_lock', ['push_id' => $pushId, 'key_id' => $keyId, 'touched' => $now]);
+            Store::setState('push_lock', ['push_id' => $pushId, 'key_id' => $keyId, 'target' => $target, 'touched' => $now]);
             return true;
         } finally {
             $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $name));
@@ -692,7 +874,7 @@ final class Push
 
     private static function windowClosed(): \WP_Error
     {
-        return self::error('wpsync_push_window', 'Das Push-Fenster ist geschlossen – im WP-Admin unter Werkzeuge → wpsync öffnen.', 403);
+        return PushWindow::closed();
     }
 
     private static function error(string $code, string $message, int $status): \WP_Error

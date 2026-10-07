@@ -18,6 +18,9 @@ type StatusResult struct {
 	FilesDeleted []string      `json:"files_deleted"`
 	Tables       []TableChange `json:"tables_changed"`
 	Requests     int           `json:"requests"`
+	// Staging is the staging copy on the server (Spec 2b 5.9); nil without one. URL is empty when
+	// the agent names an address outside the paired site.
+	Staging *agentapi.StagingSummary `json:"staging,omitempty"`
 }
 
 // TableChange is a changed table; PreviousMode is empty for a table new since the last pull.
@@ -50,6 +53,13 @@ func StatusReport(o Options) (*StatusResult, error) {
 	}
 	changed, deleted := DiffFiles(p.delta.Files, base, nil)
 	res.Pulled, res.LastPull = true, &base.PulledAt
+	if s := p.delta.Env.Staging; s != nil {
+		copy := *s
+		if !agentapi.SameOrigin(o.Site.URL, copy.URL) {
+			copy.URL = ""
+		}
+		res.Staging = &copy
+	}
 	for _, f := range changed {
 		res.FilesChanged = append(res.FilesChanged, f.Path)
 	}
@@ -88,6 +98,24 @@ func Status(o Options) error {
 		lines = append(lines, "  "+t.Name+modeNote(t))
 	}
 	printLimited(o.Out, lines, 20)
+
+	if s := res.Staging; s != nil {
+		labels := map[string]string{
+			agentapi.StagingCreating: "wird angelegt", agentapi.StagingReady: "bereit", agentapi.StagingRefreshing: "wird aufgefrischt",
+			agentapi.StagingLocked: "gesperrt (14 Tage ungenutzt)", agentapi.StagingFailed: "fehlgeschlagen", agentapi.StagingDeleting: "wird gelöscht",
+		}
+		label := labels[s.Status]
+		if label == "" {
+			label = agentapi.Printable(s.Status)
+		}
+		if s.URL != "" {
+			label += " – " + s.URL // on the paired site, so without anything a terminal would act on
+		}
+		fmt.Fprintf(o.Out, "\nStaging: %s\n", label)
+		if s.Status == agentapi.StagingLocked {
+			fmt.Fprintf(o.Out, "  entsperren: wpsync staging open %s\n", o.Site.Name)
+		}
+	}
 
 	fmt.Fprintf(o.Out, "\n%d Requests, keine Inhalte übertragen.\n", res.Requests)
 	return nil

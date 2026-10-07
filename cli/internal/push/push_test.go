@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,8 @@ import (
 const (
 	testID   = "p_20261005_0123456789ab"
 	testSalt = "00112233445566778899aabbccddeeff"
+	// testStaging is the folder of the staging copy on the fake site.
+	testStaging = "/wpsync-staging-0123456789ab"
 )
 
 // fakeSite plays agent, frontend and rescue.php of one site.
@@ -52,10 +56,36 @@ type fakeSite struct {
 	rescueKey  string
 	chunks     int
 	maxRaw     int // upper bound for the raw bytes of one upload request; 0: unchecked
+
+	stagingHits int      // pages of the staging copy answered with the access cookie
+	logins      int      // login links handed out
+	rbID        string   // push_id of the last /push/rollback
+	answerFor   string   // target /push/begin answers for; empty: the one asked for (agent 0.5.0)
+	realFor     string   // like answerFor, but only for the real begin
+	beginCode   string   // error code of /push/begin; empty: it answers
+	redirect    string   // where the front page of the copy redirects to; empty: it answers
+	cookies     []string // "path cookie-header" of every frontend request
+	stgHealth   []string // extra pages the agent names for a push to staging
+	leftOut     []string // "unit/file" the commit does not place (staging: a .htaccess with rewrite rules)
+
+	// The staging copy as /staging/status describes it and, when copy is set, its files: then a
+	// push to staging is checked against them like PushManifest::conflicts does.
+	copy       map[string]map[string]agentapi.PushStamp // unit → file → stamp; nil: conflicts as scripted
+	copyOld    map[string]map[string]agentapi.PushStamp // the units of the last commit before it
+	copyDir    string                                   // folder of the copy; empty: testStaging
+	copyMade   int64                                    // created
+	copyCopied int64                                    // copied_at
+	copyCode   int64                                    // code_copied_at; 0: an agent before the field
+	noStatus   bool                                     // /staging/status fails
+	statuses   int                                      // calls of /staging/status
+	ids        []string                                 // push ids of the next real begins; empty: testID
+	pushID     string                                   // id of the last real begin
+	forStaging bool                                     // the last real begin went to staging
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
 	f := &fakeSite{t: t, uploaded: map[string]string{}, version: "0.4.0", window: true, confirm: 200, rollback: 200, rescue: 200}
+	f.copyMade, f.copyCopied = 1790000000, 1790000100
 	f.versions = map[string]string{"plugins/x": "1.0"}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
@@ -63,6 +93,34 @@ func newFakeSite(t *testing.T) *fakeSite {
 }
 
 func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("rest_route") == "" && r.URL.Path != "/rescue.php" {
+		f.cookies = append(f.cookies, r.URL.Path+" "+r.Header.Get("Cookie"))
+	}
+	if strings.HasPrefix(r.URL.Path, testStaging) { // the staging copy: access cookie or 403
+		if r.URL.Query().Get("wpsync_login") == "tok" {
+			http.SetCookie(w, &http.Cookie{Name: "wpsync_stg", Value: strings.Repeat("c", 64), Path: testStaging + "/"})
+			http.SetCookie(w, &http.Cookie{Name: "wordpress_logged_in_x", Value: "admin", Path: testStaging + "/"})
+			http.Redirect(w, r, testStaging+"/wp-admin/", http.StatusFound)
+			return
+		}
+		if c, err := r.Cookie("wpsync_stg"); err != nil || c.Value != strings.Repeat("c", 64) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		f.stagingHits++
+		if f.redirect != "" && r.URL.Path == testStaging+"/" {
+			http.SetCookie(w, &http.Cookie{Name: "wordpress_logged_in_x", Value: "admin", Path: "/"})
+			http.Redirect(w, r, f.redirect, http.StatusFound)
+			return
+		}
+		if f.broken && f.committed && !f.rolledBack {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("Fatal error"))
+			return
+		}
+		w.Write([]byte("<html>staging</html>"))
+		return
+	}
 	if r.URL.Path == "/rescue.php" {
 		r.ParseForm()
 		if r.PostForm.Get("action") == "ping" {
@@ -81,6 +139,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.rolledBack = true
+		f.restoreCopy()
 		w.Write([]byte(`{"ok":true,"status":"rolled_back"}`))
 		return
 	}
@@ -94,16 +153,50 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("<html>ok</html>"))
 		return
 	}
+	if route == "/wpsync/v1/staging/status" { // read-only and not part of the push protocol: counted apart
+		f.statuses++
+		if f.noStatus || !AtLeast(f.version, "0.5.0") {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"code":"rest_no_route","message":"no route"}`))
+			return
+		}
+		dir := f.copyDir
+		if dir == "" {
+			dir = testStaging
+		}
+		json.NewEncoder(w).Encode(agentapi.StagingStatus{Exists: true, Status: "ready", URL: f.srv.URL + dir, Created: f.copyMade, CopiedAt: f.copyCopied, CodeCopiedAt: f.copyCode})
+		return
+	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
 	switch route {
+	case "/wpsync/v1/staging/login":
+		f.logins++
+		w.Write([]byte(`{"url":"` + f.srv.URL + testStaging + `/?wpsync_login=tok","expires":1}`))
 	case "/wpsync/v1/push/begin":
 		var req agentapi.PushBeginRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		f.begins = append(f.begins, req)
+		if f.beginCode != "" {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"code":"` + f.beginCode + `","message":"abgelehnt"}`))
+			return
+		}
 		res := agentapi.PushBegin{
 			AgentVersion: f.version, WindowOpen: f.window,
 			HealthURLs: append([]string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"}, f.health...),
 			Rescue:     agentapi.PushRescue{URL: f.srv.URL + "/rescue.php"},
+		}
+		if AtLeast(f.version, "0.5.0") {
+			res.Target = req.Target
+		}
+		if f.answerFor != "" {
+			res.Target = f.answerFor
+		}
+		if f.realFor != "" && !req.Dry {
+			res.Target = f.realFor
+		}
+		if req.Target == "staging" {
+			res.HealthURLs = append([]string{f.srv.URL + testStaging + "/", f.srv.URL + testStaging + "/wp-login.php"}, f.stgHealth...)
 		}
 		if f.pending {
 			res.Pending = &agentapi.PushPending{PushID: "p_20261004_ba9876543210", Device: "anderer-mac"}
@@ -112,6 +205,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			plan := agentapi.PushUnitPlan{Path: u.Path, Exists: len(u.Base) > 0 || f.unpulled[u.Path], Version: f.versions[u.Path], Conflicts: []string{}, Writable: !f.readonly}
 			if u.Path == "plugins/x" {
 				plan.Conflicts = append(plan.Conflicts, f.conflicts...)
+			}
+			if f.copy != nil && req.Target == "staging" {
+				plan.Exists = f.copy[u.Path] != nil
+				plan.Conflicts = append(plan.Conflicts, copyConflicts(f.copy[u.Path], u.Base)...)
 			}
 			if f.unpulled[u.Path] {
 				for rel := range u.Files {
@@ -127,6 +224,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if !req.Dry {
 			res.PushID, res.Rescue.Salt = testID, testSalt
+			if len(f.ids) > 0 {
+				res.PushID, f.ids = f.ids[0], f.ids[1:]
+			}
+			f.pushID, f.forStaging = res.PushID, req.Target == "staging"
 			f.uploaded, f.committed, f.rolledBack = map[string]string{}, false, false
 		}
 		json.NewEncoder(w).Encode(res)
@@ -158,15 +259,29 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		for _, u := range f.begins[len(f.begins)-1].Units {
 			stamps[u.Path] = map[string]agentapi.PushStamp{}
 			for rel, file := range u.Files {
-				stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
+				if !slices.Contains(f.leftOut, u.Path+"/"+rel) {
+					stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
+				}
+			}
+		}
+		if f.copy != nil && f.forStaging {
+			f.copyOld = map[string]map[string]agentapi.PushStamp{}
+			for unit, files := range stamps {
+				f.copyOld[unit], f.copy[unit] = f.copy[unit], files
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]any{"next": nil, "stamps": stamps})
 	case "/wpsync/v1/push/confirm":
 		f.status(w, f.confirm)
 	case "/wpsync/v1/push/rollback":
+		var rb struct {
+			PushID string `json:"push_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&rb)
+		f.rbID = rb.PushID
 		if f.rollback == 200 {
 			f.rolledBack = true
+			f.restoreCopy()
 		}
 		if f.rbCode != "" {
 			w.WriteHeader(f.rollback)
@@ -183,6 +298,37 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.t.Errorf("unexpected route %s", route)
 	}
+}
+
+// restoreCopy puts the units of the last commit back as they were: a rollback renames the
+// snapshot into place, the files keep their stamps.
+func (f *fakeSite) restoreCopy() {
+	for unit, files := range f.copyOld {
+		if files == nil {
+			delete(f.copy, unit)
+		} else {
+			f.copy[unit] = files
+		}
+	}
+	f.copyOld = nil
+}
+
+// copyConflicts mirrors PushManifest::conflicts: every file on the server whose stamp the client
+// does not know, and every file the client knows that the server no longer has.
+func copyConflicts(server, base map[string]agentapi.PushStamp) []string {
+	var out []string
+	for rel, stamp := range server {
+		if known, ok := base[rel]; !ok || known != stamp {
+			out = append(out, rel)
+		}
+	}
+	for rel := range base {
+		if _, ok := server[rel]; !ok {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (f *fakeSite) status(w http.ResponseWriter, status int) {

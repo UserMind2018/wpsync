@@ -20,9 +20,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 require __DIR__ . '/src/PushSwap.php';
 require __DIR__ . '/src/PushRescue.php';
 
-// Standardlayout wp-content/plugins/wpsync-agent/ – /push/begin lehnt jedes andere ab.
+// Standardlayout wp-content/plugins/wpsync-agent/ und wp-content direkt im Webroot – /push/begin und
+// /staging/begin lehnen jedes andere ab. Staging-Pushs liegen in der Kopie (Spec 2b 5.8, V8).
 try {
-    list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::handle(dirname(__DIR__, 2), $_POST, time());
+    list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::handle(\WpSync\PushRescue::contentDirs(dirname(__DIR__, 2)), $_POST, time());
 } catch (\Throwable $e) {
     // z. B. rescue.json nicht schreibbar: als JSON antworten statt mit leerem 500.
     list($wpsync_status, $wpsync_body) = [500, ['ok' => false, 'error' => 'rescue failed']];

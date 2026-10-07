@@ -5,7 +5,8 @@ defined('ABSPATH') || exit;
 
 /**
  * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen und widerrufen, Push-Fenster
- * öffnen, Pushes ansehen und zurückrollen. Das Secret wird nie angezeigt (Spike B19, AC-5).
+ * öffnen, Pushes ansehen und zurückrollen, Stand der Staging-Kopie ansehen. Das Secret wird nie
+ * angezeigt (Spike B19, AC-5).
  */
 final class Admin
 {
@@ -16,6 +17,15 @@ final class Admin
         PushRescue::ROLLED_BACK => 'zurückgerollt',
         Push::FAILED            => 'fehlgeschlagen',
         Push::EXPIRED           => 'verfallen',
+    ];
+
+    private const STAGING = [
+        Staging::CREATING   => 'wird angelegt',
+        Staging::READY      => 'bereit',
+        Staging::REFRESHING => 'wird aufgefrischt',
+        Staging::LOCKED     => 'gesperrt (14 Tage ungenutzt)',
+        Staging::FAILED     => 'fehlgeschlagen',
+        Staging::DELETING   => 'wird gelöscht',
     ];
 
     private const SECRET_STATE = [
@@ -70,7 +80,7 @@ final class Admin
         ?>
         <div class="wrap">
             <h1>wpsync</h1>
-            <p>Schnittstelle für <code>wpsync pull</code> (Live → Lokal) und <code>wpsync push</code> (Code, nur im Push-Fenster).</p>
+            <p>Schnittstelle für <code>wpsync pull</code> (Live → Lokal), <code>wpsync push</code> (Code, nur im Push-Fenster) und <code>wpsync staging</code> (Kopie auf dem Server).</p>
             <?php self::keyNotices(); ?>
 
             <h2>Neues Gerät koppeln</h2>
@@ -141,11 +151,12 @@ final class Admin
                 <p>Noch kein Push.</p>
             <?php else : ?>
                 <table class="widefat striped">
-                    <thead><tr><th>Zeit</th><th>Gerät</th><th>Einheiten</th><th>Status</th><th></th></tr></thead>
+                    <thead><tr><th>Zeit</th><th>Ziel</th><th>Gerät</th><th>Einheiten</th><th>Status</th><th></th></tr></thead>
                     <tbody>
                     <?php foreach ($pushes as $push) : ?>
                         <tr>
                             <td><?php echo esc_html(wp_date('d.m.Y H:i', $push['created'])); ?><br><code><?php echo esc_html($push['push_id']); ?></code></td>
+                            <td><?php echo esc_html($push['target'] === 'staging' ? 'Staging' : 'Live'); ?></td>
                             <td><?php echo esc_html($push['device']); ?></td>
                             <td>
                                 <?php foreach ($push['units'] as $unit) : ?>
@@ -168,7 +179,48 @@ final class Admin
                     </tbody>
                 </table>
             <?php endif; ?>
+
+            <h2>Staging</h2>
+            <?php self::staging(); ?>
         </div>
+        <?php
+    }
+
+    /**
+     * Abschnitt Staging: nur Anzeige, keine Aktion. Anlegen, Auffrischen, Löschen und der
+     * Einmal-Link laufen ausschliesslich über die signierten Routen der CLI (T1) – wer die
+     * Admin-Seite von Live sieht, ist damit noch nicht Administrator der Kopie. Alles aus dem
+     * Datensatz wird escaped: er kommt aus der Datenbank.
+     */
+    public static function staging(): void
+    {
+        $staging = Staging::summary();
+        if ($staging === null) {
+            ?>
+            <p>Keine Staging-Kopie. Anlegen im Terminal: <code>wpsync staging create &lt;site&gt;</code></p>
+            <?php
+            return;
+        }
+        $record = (array) Staging::record();
+        $status = (string) $staging['status'];
+        $error  = is_string($record['error'] ?? null) ? $record['error'] : '';
+        if ($status === Staging::LOCKED) {
+            self::notice('warning', 'Die Staging-Kopie ist nach 14 Tagen ohne Nutzung gesperrt. Entsperren: wpsync staging open <site>; löschen: wpsync staging delete <site>.');
+        }
+        ?>
+        <table class="widefat striped">
+            <tbody>
+            <tr><th>Status</th><td><?php echo esc_html(self::STAGING[$status] ?? $status); ?></td></tr>
+            <tr><th>Adresse</th><td><code><?php echo esc_html((string) $staging['url']); ?></code> (nur mit Link aus <code>wpsync staging open</code>)</td></tr>
+            <tr><th>Ordner</th><td><code><?php echo esc_html(is_string($record['dir'] ?? null) ? $record['dir'] : ''); ?></code></td></tr>
+            <tr><th>Tabellen-Präfix</th><td><code><?php echo esc_html(is_string($record['prefix'] ?? null) ? $record['prefix'] : ''); ?></code></td></tr>
+            <tr><th>Zuletzt genutzt</th><td><?php echo $staging['last_used'] > 0 ? esc_html(wp_date('d.m.Y H:i', (int) $staging['last_used'])) : '–'; ?></td></tr>
+            <?php if ($error !== '') : ?>
+                <tr><th>Fehler</th><td><?php echo esc_html($error); ?></td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+        <p>Die Kopie liegt in diesem Ordner im WordPress-Verzeichnis und in Tabellen mit eigenem Präfix in derselben Datenbank. Backup-Plugins sichern sie mit; Sicherheits-Scanner können den zweiten WordPress-Core melden.</p>
         <?php
     }
 

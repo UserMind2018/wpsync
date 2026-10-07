@@ -56,8 +56,10 @@ type PushRescue struct {
 }
 
 // PushBegin is the answer to /push/begin. PushID and Rescue.Salt are empty for a dry run.
+// Target is the target the agent answers for (agent 0.5.0); an older agent names none.
 type PushBegin struct {
 	PushID       string         `json:"push_id"`
+	Target       string         `json:"target"`
 	AgentVersion string         `json:"agent_version"`
 	HealthURLs   []string       `json:"health_urls"`
 	WindowOpen   bool           `json:"window_open"`

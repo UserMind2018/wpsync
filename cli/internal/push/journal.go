@@ -43,6 +43,21 @@ type Journal struct {
 	Units map[string]map[string]baseline.FileStamp `json:"units"`
 	// Applied: the baseline carries the pushed state.
 	Applied bool `json:"applied"`
+	// Target is live or staging; empty (journals before CLI 0.4.0) means live. A push to staging
+	// never touches the baseline (Spec 2b 6.2), so Applied stays false for it.
+	Target string `json:"target,omitempty"`
+}
+
+// target is the target of the push, live for a journal that names none.
+func (j *Journal) target() string {
+	if j.Target == TargetStaging {
+		return TargetStaging
+	}
+	return TargetLive
+}
+
+func knownTarget(target string) bool {
+	return target == "" || target == TargetLive || target == TargetStaging
 }
 
 func unitPrefix(unit string) string { return "wp-content/" + unit + "/" }
@@ -101,6 +116,9 @@ func SaveJournal(siteDir string, j *Journal) error {
 	if !saltRe.MatchString(j.Salt) {
 		return fmt.Errorf("der Agent nennt einen ungültigen Rescue-Salt %s", agentapi.Printable(j.Salt))
 	}
+	if !knownTarget(j.Target) {
+		return fmt.Errorf("invalid push target %s", agentapi.Printable(j.Target))
+	}
 	data, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
@@ -128,7 +146,7 @@ func LoadJournal(siteDir, pushID string) (*Journal, error) {
 		return nil, fmt.Errorf("zu Push %s gibt es auf diesem Rechner kein Journal", pushID)
 	}
 	var j Journal
-	if err := json.Unmarshal(data, &j); err != nil || j.PushID != pushID || !saltRe.MatchString(j.Salt) {
+	if err := json.Unmarshal(data, &j); err != nil || j.PushID != pushID || !saltRe.MatchString(j.Salt) || !knownTarget(j.Target) {
 		return nil, fmt.Errorf("das Journal zu Push %s ist beschädigt", pushID)
 	}
 	return &j, nil
@@ -143,9 +161,10 @@ func readJournal(siteDir, pushID string) ([]byte, error) {
 	return safefs.ReadFile(root, pushID+".json")
 }
 
-// LatestJournal returns the id of the newest push made from this machine, "" if there is none.
+// LatestJournal returns the id of the newest push made from this machine to the given target
+// (live or staging), "" if there is none. Journals that cannot be read count for no target.
 // Push ids start with the date, so the name order is the time order within a day's precision.
-func LatestJournal(siteDir string) string {
+func LatestJournal(siteDir, target string) string {
 	root, err := safefs.OpenDir(siteDir, journalRel)
 	if err != nil {
 		return ""
@@ -155,7 +174,9 @@ func LatestJournal(siteDir string) string {
 	var ids []string
 	for _, e := range entries {
 		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && pushIDRe.MatchString(id) && e.Type().IsRegular() {
-			ids = append(ids, id)
+			if j, err := LoadJournal(siteDir, id); err == nil && j.target() == target {
+				ids = append(ids, id)
+			}
 		}
 	}
 	if len(ids) == 0 {

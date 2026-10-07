@@ -64,7 +64,7 @@ func TestJournalRoundTrip(t *testing.T) {
 	if _, err := LoadJournal(dir, "../../etc/passwd"); err == nil {
 		t.Error("push ids are validated")
 	}
-	if id := LatestJournal(dir); id != "p_20261005_0123456789ab" {
+	if id := LatestJournal(dir, TargetLive); id != "p_20261005_0123456789ab" {
 		t.Errorf("LatestJournal = %q", id)
 	}
 }
@@ -115,7 +115,7 @@ func TestJournalNeverFollowsSymlinks(t *testing.T) {
 	if _, err := LoadJournal(site2, testID); err == nil {
 		t.Fatal("LoadJournal from a symlinked folder must fail")
 	}
-	if id := LatestJournal(site2); id != "" {
+	if id := LatestJournal(site2, TargetLive); id != "" {
 		t.Fatalf("LatestJournal through a symlink = %s", id)
 	}
 }

@@ -14,9 +14,13 @@ func TestDatabaseSpec(t *testing.T) {
 	cases := map[string]string{
 		"10.11.14-MariaDB-0ubuntu0.24.04.1": "mariadb:10.11",
 		"10.6.23-MariaDB-0ubuntu0.22.04.1":  "mariadb:10.6",
-		"8.0.35":                            "mysql:8.0",
-		"5.7.44-log":                        "mysql:5.7",
-		"9.1.0":                             "mysql:8.0",
+		// MariaDB ≥ 10 puts 5.5.5- in front for old clients; PHP before 8.0.16 hands it on as is.
+		"5.5.5-10.11.19-MariaDB-ubu2204-log": "mariadb:10.11",
+		"5.5.5-10.4.34-MariaDB":              "mariadb:10.4",
+		"5.5.68-MariaDB":                     "mariadb:5.5",
+		"8.0.35":                             "mysql:8.0",
+		"5.7.44-log":                         "mysql:5.7",
+		"9.1.0":                              "mysql:8.0",
 	}
 	for in, want := range cases {
 		if got := DatabaseSpec(in); got != want {

@@ -7,7 +7,7 @@ defined('ABSPATH') || exit;
  * Größen unter wp-content nach Gruppen für das Infosheet: plugins/<slug>, themes/<slug>,
  * uploads/<Jahr>, uploads/other, top/<Ordner>, top/. – seitenweise mit Pfad-Cursor.
  * Anders als FileWalker zählt SizeScan Backup- und Cache-Ordner mit (Auffälligkeiten, AC-8);
- * nur Symlinks und .git bleiben aussen vor.
+ * nur Symlinks, .git und eine Staging-Kopie (wpsync-staging-*) bleiben aussen vor.
  */
 final class SizeScan
 {
@@ -94,6 +94,9 @@ final class SizeScan
                 continue;
             }
             if (is_dir($full)) {
+                if (strpos(strtolower($name), Excludes::STAGING_DIR_PREFIX) === 0) {
+                    continue; // Spec Stufe 2b 5.10: die Kopie taucht in keinem Inventar auf
+                }
                 yield from $this->walk($full, $cmp === 0 ? ($parts[1] ?? '') : '');
                 continue;
             }

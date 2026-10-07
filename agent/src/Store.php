@@ -35,6 +35,9 @@ final class Store
 
     /**
      * Tabellen, die exportiert werden dürfen (siehe TableList); pro Request einmal ermittelt.
+     * Die Tabellen einer Staging-Kopie gehören nie dazu (AC-83) – weder für den Pull noch als
+     * Quelle der nächsten Kopie. Staging::hiddenPrefixes() liest über getState(): von dort aus
+     * darf diese Methode nie aufgerufen werden.
      *
      * @return list<string>
      */
@@ -43,7 +46,7 @@ final class Store
         global $wpdb;
         if (self::$dataTables === null) {
             $rows             = (array) $wpdb->get_results("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'", ARRAY_N);
-            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix);
+            self::$dataTables = TableList::filter($rows, (string) $wpdb->base_prefix, Staging::hiddenPrefixes());
         }
         return self::$dataTables;
     }
@@ -135,15 +138,19 @@ final class Store
         return is_array($value) ? $value : null;
     }
 
-    /** @param array<string, mixed>|null $value */
-    public static function setState(string $name, ?array $value): void
+    /**
+     * @param array<string, mixed>|null $value
+     * @return bool false, wenn der Zustand nicht geschrieben wurde – der Staging-Job bricht dann ab,
+     *              statt einen Schritt zu wiederholen
+     */
+    public static function setState(string $name, ?array $value): bool
     {
         global $wpdb;
         if ($value === null) {
-            $wpdb->delete(self::table('state'), ['name' => $name]);
-            return;
+            return false !== $wpdb->delete(self::table('state'), ['name' => $name]);
         }
-        $wpdb->replace(self::table('state'), ['name' => $name, 'value' => wp_json_encode($value)]);
+        $json = wp_json_encode($value);
+        return is_string($json) && false !== $wpdb->replace(self::table('state'), ['name' => $name, 'value' => $json]);
     }
 
     /**

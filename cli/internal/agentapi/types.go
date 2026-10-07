@@ -15,6 +15,8 @@ type Env struct {
 	AgentVersion     string   `json:"agent_version"`
 	// Anon is the agent's anonymization id: rule version plus key fingerprint. Empty before agent 0.3.0.
 	Anon string `json:"anon"`
+	// Staging is the staging copy of the site; nil without one or before agent 0.5.0.
+	Staging *StagingSummary `json:"staging,omitempty"`
 }
 
 // Table is one database table with its change marker.

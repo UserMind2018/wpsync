@@ -26,6 +26,9 @@ final class Excludes
 
     public const ANY_DIRS = ['.git', '.svn', '.hg'];
 
+    /** Ordner einer Staging-Kopie (StagingGuard::DIR_PREFIX) – in jeder Tiefe ausgeschlossen. */
+    public const STAGING_DIR_PREFIX = 'wpsync-staging-';
+
     /** Dateien mit Zugangsdaten – überall ausgeschlossen, zusätzlich alles, was mit „.env.“ beginnt. */
     public const SECRET_FILES = ['.htpasswd', '.env'];
 
@@ -40,7 +43,10 @@ final class Excludes
     public static function dir(string $name, bool $isTop): bool
     {
         $name = strtolower($name);
-        if (in_array($name, self::ANY_DIRS, true)) {
+        // wpsync-staging-<zufall>: die Staging-Kopie liegt im Webroot neben wp-content; ein verschobener
+        // Ordner oder Rest verlässt den Server auch von hier aus nie (Spec Stufe 2b 5.10). Am Namen
+        // erkannt, nicht am Datensatz.
+        if (in_array($name, self::ANY_DIRS, true) || strpos($name, self::STAGING_DIR_PREFIX) === 0) {
             return true;
         }
         // wpsync-push-<zufall>: Arbeitsordner mit Snapshots und Rollback-Datensätzen (Spec Stufe 2, AC-71)

@@ -26,6 +26,7 @@ Uploads der Live-Site schreibt wpsync nie.
 - [Pull-Profile](#pull-profile)
 - [Was beim Pull passiert](#was-beim-pull-passiert)
 - [Code pushen](#code-pushen)
+- [Staging auf dem Server](#staging-auf-dem-server)
 - [Sicherheit](#sicherheit)
 - [Serverschonung und IP-Sperren](#serverschonung-und-ip-sperren)
 - [Lokale Ablage und Konfiguration](#lokale-ablage-und-konfiguration)
@@ -134,9 +135,14 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`). `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
-| `wpsync push <site> code [einheit…] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. Details: [Code pushen](#code-pushen). |
-| `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
-| `wpsync rollback <site> [push-id]` | Nimmt den letzten bzw. den genannten Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. |
+| `wpsync push <site> code [einheit…] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
+| `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
+| `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
+| `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
+| `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. Nicht im selben Browserprofil öffnen, in dem man bei Live angemeldet ist (siehe [Zugang](#staging-auf-dem-server)). |
+| `wpsync staging refresh <site> [--code] [--yes] [--no-anonymize]` | Datenbank der Kopie neu von Live, mit `--code` auch den Code. Fragt nach, weil Daten der Kopie verloren gehen. |
+| `wpsync staging status <site>` | Zustand, Adresse, Alter, letzte Nutzung, laufender Job und Pushes nach Staging. |
+| `wpsync staging delete <site> [--yes]` | Löscht die Kopie: ihre Tabellen und ihren Ordner. |
 | `wpsync version` | Version der CLI. |
 
 ---
@@ -328,8 +334,8 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
 - Er aktiviert nichts: Ein neues Plugin liegt danach inaktiv auf der Site.
 - Er löscht nichts: Ein lokal entferntes Plugin bleibt auf der Site bestehen.
 - Er schreibt weder Datenbank noch Uploads.
-- Er überträgt nie den Agent selbst, den lokalen Mail-Riegel (`00-local-mailguard.php`),
-  Dateien in `mu-plugins`, die mit `wpsync` beginnen, `.git`, `*.log`, `.env*`, `.DS_Store`
+- Er überträgt nie den Agent selbst, den lokalen Mail-Riegel (`00-local-mailguard.php`), den
+  Staging-Riegel (`00-wpsync-staging.php`), Dateien in `mu-plugins`, die mit `wpsync` beginnen, `.git`, `*.log`, `.env*`, `.DS_Store`
   und Symlinks. Was davon auf der Site liegt, bleibt beim Tausch unverändert stehen.
 
 **Grenzen.**
@@ -350,6 +356,157 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
   Verzeichnis nicht ersetzen, bricht der Push vor dem Upload ab.
 - **Nicht unterstützt:** Einzeldatei-Plugins direkt unter `plugins/`, Drop-ins, Sprachdateien
   unter `languages/`, Multisite, ein verschobenes `wp-content/plugins`.
+
+## Staging auf dem Server
+
+Eine Kopie der Live-Site auf dem Server des Kunden – mit dessen PHP, Datenbank und Plugins –,
+um gepushten Code zu testen, bevor er nach Live geht. Agent 0.5.0 oder neuer.
+
+Alle Staging-Befehle ausser `status` brauchen ein offenes Push-Fenster (WP-Admin → Werkzeuge →
+wpsync), genau wie ein Push.
+
+```sh
+wpsync staging create kunde            # Kopie anlegen (anonymisiert, nach Pull-Profil)
+wpsync staging open kunde              # Einmal-Link: Zugang + Anmeldung als Admin wpsync
+wpsync push kunde code themes/x --to staging
+wpsync push kunde code themes/x        # nach dem Test: derselbe Push nach Live
+wpsync staging refresh kunde [--code]  # Datenbank (und Code) neu von Live
+wpsync staging status kunde
+wpsync staging delete kunde
+```
+
+**Wie die Kopie aussieht.** Ordner `wpsync-staging-<zufall>/` im WordPress-Verzeichnis, Tabellen
+mit eigenem Präfix `stg<zufall>_` in derselben Datenbank, eigene `wp-config.php` (eigene Salts,
+Cookies nur unter dem Staging-Pfad, kein Cache, kein WP-Cron, keine Updates). Code und Datenbank
+kommen nach dem Pull-Profil – `staging create` braucht also ein Profil aus `wpsync scan`. Die
+Daten verlassen die Datenbank dabei nicht. Personenbezogene Daten sind pseudonymisiert wie beim
+Pull (gleiche Pseudonyme); Klartext nur mit `--no-anonymize` und eigener Bestätigung.
+
+**Was die Kopie nicht bekommt.**
+
+- Uploads: fehlende Medien leitet die Kopie auf Live weiter (302).
+- `wp-config.php` von Live und jede Datei, deren Name mit `wp-config` beginnt (Sicherungen wie
+  `wp-config.php.bak`), `wp-admin/setup-config.php`, `.user.ini`.
+- Jede `.htaccess` in einem Unterordner, die eine Rewrite-Direktive enthält: sie nähme ihrem
+  Ordner die Zugangssperre der Kopie. Ein Push nach Staging entfernt eine solche Datei ebenfalls
+  aus der Einheit; die CLI nennt sie. Ein Push nach Live überträgt sie unverändert.
+- Den Agent, Drop-ins (`advanced-cache.php`, `object-cache.php`, `db.php` …), Symlinks,
+  VCS-Ordner und alles unter `wp-content`, was auch der Pull auslässt (Logs, `.env*`, Dumps …).
+- Plugins, die das Profil abwählt, sowie Caching-, SMTP- und Sicherheits-Plugins sind in der
+  Kopie nicht aktiv; Tabellen, die das Profil ausschliesst, existieren dort leer.
+
+**Zugang.** Ohne Zugangs-Cookie liefert die Kopie 403. `wpsync staging open` holt einen Link,
+der 5 Minuten und genau einmal gilt, das Cookie setzt (12 Stunden) und als Staging-Admin `wpsync`
+anmeldet. Einlösen lässt er sich nur am Einstieg der Kopie (`/wpsync-staging-<zufall>/`), an
+keiner anderen Adresse. Es gibt kein Passwort; einem Kunden zeigt man Staging per Bildschirm.
+Während ein Job läuft (`create`, `refresh`, `delete`), nach einem gescheiterten `refresh` oder
+`delete` und nach dem Verfall liefert die Kopie für alles 403 – auch mit Cookie.
+
+**Push-Fenster.** `staging create`, `refresh`, `delete` und `open` gehen nur, solange ein
+Administrator das Push-Fenster des Geräts geöffnet hat; sonst Exit 40 und auf dem Server ändert
+sich nichts. Grund: Wer Administrator der Kopie ist, kann dort PHP ausführen (etwa über ein
+Snippet-Plugin, das mitkopiert wurde) – im selben Server-Benutzer und mit den
+Datenbank-Zugangsdaten von Live. Ohne Fenster reicht ein entwendetes Pairing-Secret dafür nicht.
+`staging status` und das Fortsetzen eines laufenden Jobs brauchen kein Fenster; ein neuer Job
+startet ohne Fenster nie.
+
+**Eigenes Browserprofil.** Die Kopie liegt unter derselben Adresse (Origin) wie Live. Ein Skript
+in der Kopie – eingeschleust oder ungetesteter gepushter Code – kann im Browser deshalb alles,
+was die Live-Sitzung desselben Browsers darf; getrennte Cookie-Pfade schützen davor nicht.
+Die Kopie nie in einem Browser(-profil) öffnen, in dem jemand bei Live im WP-Admin angemeldet
+ist: privates Fenster oder eigenes Profil, den Link dafür mit `wpsync staging open <site> --print`.
+`staging open` erinnert jedes Mal daran.
+
+**Riegel.** Mails gehen an `blocked@mailguard.invalid` (auch mit SMTP-Plugin). Anfragen an
+Mail-, Zahlungs- und Newsletter-Dienste und an Live selbst werden abgelehnt, auch als Ziel einer
+Weiterleitung; als Live zählt die Domain mit und ohne `www.`, über `http` wie `https`. Eine
+Adresse, die sich nicht eindeutig lesen lässt, ist gesperrt. Serverseitig darf die Kopie von Live
+nur Uploads abrufen, und die nur ohne Query-String. WooCommerce-Webhooks sind pausiert,
+Online-Zahlungsarten deaktiviert (Überweisung, Scheck, Nachnahme bleiben), kein
+Action-Scheduler-Runner, `noindex`. Lässt sich der Zugang nicht prüfen oder ist der Riegel
+unvollständig, sperrt die Kopie.
+
+**Kein Weg zurück.** Es gibt keinen Befehl von Staging nach Live. Ein Push nach Staging ändert
+weder die Baseline noch das interne Git; nach dem Test geht derselbe lokale Stand per
+`wpsync push` nach Live – mit Push-Fenster, Konfliktprüfung und Rollback wie immer. Auch der
+Push nach Staging braucht ein offenes Push-Fenster.
+
+**Mehrmals nach Staging pushen.** Nach einem bestätigten Push nach Staging merkt sich die CLI in
+`.wpsync/staging-base.json`, welche Dateien die gepushten Einheiten in der Kopie jetzt haben
+(Grösse und Zeitstempel, wie der Agent sie meldet). Der nächste Push nach Staging vergleicht
+diese Einheiten damit statt mit der Baseline – so geht „pushen, testen, nachbessern, wieder
+pushen“ ohne `--force`, und eine Änderung direkt in der Kopie wird weiterhin als Konflikt
+gemeldet. Ein Push nach Live liest die Datei nie. Sie gilt für genau einen Code-Stand der Kopie:
+nach `staging create` und `staging refresh --code` wird sie verworfen und es zählt wieder der
+letzte Pull; ein `staging refresh` ohne `--code` lässt sie gelten. Ein `rollback` eines
+Staging-Pushs setzt die Einträge auf den Stand davor zurück. Die Datei ist mit dem Pairing-Secret
+versiegelt; ist sie beschädigt oder fremd, wird sie ignoriert und gelöscht.
+
+**Rollback.** `wpsync rollback <site>` ohne Push-ID nimmt den neuesten Push nach **Live** zurück,
+auch wenn zuletzt nach Staging gepusht wurde. Für die Kopie: `wpsync rollback <site> --to staging`
+oder die Push-ID. Passt `--to` nicht zum Ziel des genannten Pushs, bricht die CLI ab, ohne etwas
+zurückzurollen. Snapshots werden pro Ziel aufbewahrt; `staging refresh --code` und
+`staging delete` verwerfen die Pushes nach Staging samt Snapshots.
+
+**Unterbrochener Lauf.** Trifft `staging create`, `refresh` oder `delete` auf einen laufenden Job
+derselben Art, den ein abgebrochener Lauf auf dem Server gelassen hat, setzt derselbe Befehl ihn
+fort – solange sein letzter Schritt höchstens 10 Minuten her ist und er zum Aufruf passt (gleiche
+Art, gleiche Einstellung zu `--no-anonymize`, nicht mehr in der Probe). Sonst endet der Befehl
+mit Exit 44; `wpsync staging status <site>` zeigt den Job. Nach den 10 Minuten setzt kein Befehl
+mehr fort, dann räumt `wpsync staging delete <site>` auf. Ob ein laufendes `refresh` den Code
+einschliesst, ist dabei nicht zu erkennen: ein `refresh --code` kann ein `refresh` ohne Code
+fortsetzen und umgekehrt.
+
+**Verfall.** Nach 14 Tagen ohne Nutzung wird die Kopie gesperrt (alles 403), nicht gelöscht.
+`wpsync staging open` entsperrt sie. Deaktivieren des Agents löscht die Kopie samt Tabellen.
+
+**Voraussetzungen.** Apache oder LiteSpeed, die `.htaccess` auswerten (Rewrite, Zugriffssperre).
+Vor dem Anlegen prüft die CLI das von aussen mit drei Proben; auf reinem nginx gibt es kein
+Staging, die Meldung nennt die nötige Server-Regel. Nicht unterstützt: Multisite, WordPress mit
+abweichender WordPress- und Website-Adresse, `wp-content` ausserhalb des WordPress-Ordners,
+Tabellen-Präfixe wie `s`, `st`, `stg` und Tabellen, deren Name sich mit dem Staging-Präfix nicht
+abbilden lässt, sofern das Profil sie kopiert.
+
+**Bekannte Grenzen.**
+
+- **Der Riegel erfasst nur WordPress-Wege:** die HTTP-API von WordPress und `wp_mail`/PHPMailer.
+  Ein Plugin, das mit eigenem cURL oder Socket nach draussen spricht (so arbeiten einige
+  Zahlungs-SDKs), geht daran vorbei. Die Liste der gesperrten Dienste ist eine Untergrenze:
+  Gesperrt sind bekannte Mail-, Zahlungs- und Newsletter-Dienste. Eine Testbestellung auf
+  Staging kann bei anderen angebundenen Diensten (Rechnungs-, Versand-, ERP-Schnittstellen)
+  echte Vorgänge auslösen – solche Plugins vor dem Test in der Kopie deaktivieren.
+- **Absolute Pfade in Plugin-Optionen:** Die Uploads der Kopie liegen immer in ihrem eigenen
+  Ordner. Andere Plugin-Optionen mit absolutem Pfad auf Live (Log-, Cache-, Export-Ordner)
+  werden nicht umgeschrieben; ein solches Plugin schreibt aus der Kopie in den Ordner von Live.
+- **Erfundenes Zugangs-Cookie:** Der Webserver prüft nur, ob ein Cookie `wpsync_stg` mitkommt;
+  den Wert prüft der Riegel, sobald WordPress lädt. Mit einem erfundenen Cookie sind deshalb
+  statische Dateien der Kopie erreichbar und PHP-Dateien, die sich direkt aufrufen lassen, ohne
+  WordPress zu laden – derselbe Code wie auf Live, keine Uploads, keine Datenbankinhalte.
+  Nie ausgeliefert werden Dateien, deren Name mit `wp-config` oder `.env` beginnt, `.log`, `.sql`
+  und `wpsync-staging.json`.
+- **Login-Token im Access-Log:** Der Einmal-Link trägt sein Token in der Adresse; es steht nach
+  dem Einlösen – verbraucht – im Access-Log des Webservers.
+- **Live-URLs, die bleiben:** Doppelt escaptes JSON und kaputte serialisierte Werte werden nicht
+  umgeschrieben und zeigen weiter auf Live. `skipped_values` im Ergebnis zählt die übersprungenen
+  serialisierten Werte und ist eine Obergrenze. Absolute Dateipfade werden nicht umgeschrieben.
+- **Was als Live gilt:** nur die Domain der Site mit und ohne `www.` auf demselben Port. Andere
+  Subdomains von Live und eine Umlaut-Domain in der jeweils anderen Schreibweise (Punycode) sind
+  für den Riegel fremde Hosts und nicht gesperrt.
+- **Gleicher Origin wie Live:** Die Kopie ist ein Unterordner der Live-Domain, keine eigene
+  Subdomain; siehe „Eigenes Browserprofil“ oben.
+- **Abbruch mitten im Schritt:** Stirbt PHP genau zwischen einem Datenbank-Schritt und dem
+  Speichern des Fortschritts, wiederholt der nächste Aufruf diesen Schritt. Tabellen ohne
+  Primärschlüssel ab 50 000 Zeilen können danach doppelte Zeilen enthalten.
+- Übersprungene Dateien (siehe oben) zählt und meldet `staging create` nicht.
+- Pusht ein zweiter Rechner nach Staging, kennt der erste dessen Stand nicht und bekommt beim
+  nächsten Push einen Konflikt. Dasselbe gilt nach `wpsync pushes --confirm` für einen Push nach
+  Staging: Er hinterlässt keinen gemerkten Stand.
+- Backup-Plugins auf Live sichern die Staging-Tabellen und ggf. den Staging-Ordner mit.
+- Sicherheits-Scanner auf Live (Wordfence u. ä.) können den zweiten WordPress-Core melden.
+- Server-Caches vor PHP (LiteSpeed, Varnish, Hoster-Cache) dürfen den Staging-Pfad nicht cachen;
+  die 403 ohne Cookie speichern gängige Caches nicht, geprüft ist das nicht für jeden Hoster.
+- Das Datenbank-Kontingent ist von PHP aus nicht prüfbar; über 1 GB Bedarf fragt die CLI nach.
+- Konstanten aus der Live-`wp-config.php` ausser Datenbank und Speicherlimit werden nicht übernommen.
 
 ---
 
@@ -387,6 +544,8 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
   `wpsync_*`-Tabellen und -Optionen. Code schreibt er ausschliesslich über `wpsync push`, pro
   Gerät und nur solange ein Administrator das Push-Fenster geöffnet hat (höchstens 8 Stunden).
   Ein Push ist Code-Ausführung auf dem Server – das Fenster nur öffnen, wenn gepusht wird.
+  Dasselbe Fenster brauchen `staging create`, `refresh`, `delete` und `open`: Administrator der
+  Kopie zu sein, ist ebenfalls Code-Ausführung auf dem Server.
 - **Push-Schutz im Agent, nicht in der CLI:** erlaubte Einheiten, verbotene Dateinamen,
   Hash-Prüfung vor dem Tausch und die Sperre „ein Push gleichzeitig" prüft der Server selbst.
 - **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
@@ -562,13 +721,16 @@ als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_
 
 | Schalter | Befehle | Wirkung |
 |---|---|---|
-| `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
-| `--secret-stdin` | `scan`, `pull`, `status` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
+| `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version`, `staging`, `push`, `pushes`, `rollback` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
+| `--secret-stdin` | `scan`, `pull`, `status`, `staging` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
 | `--secret-out` | `pair --json` | Secret einmal im Ergebnis-JSON (`data.secret`), nichts in der Keychain |
 | `--driver container` | `pull`, `status`, `list`, `stop` | Vorhandener WordPress-Container statt DDEV, siehe unten |
 | `--server` | `doctor` | Nur Version, Mail-Riegel, Docker-CLI, `WPSYNC_CONFIG_DIR` |
 
-`push`, `pushes`, `rollback` und `trust` bleiben Mac-Befehle: kein `--json`, kein `--driver`.
+`push`, `pushes` und `rollback` kennen `--json` (ab CLI 0.4.0), bleiben aber Mac-Befehle: Secret
+aus der Keychain, DDEV-Layout, kein `--secret-stdin`, kein `--driver` (beides Exit 2). `trust`
+hat kein `--json`. Die `staging`-Befehle brauchen keine lokalen Dateien und laufen mit
+`--secret-stdin` auch im Container.
 
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
@@ -580,6 +742,41 @@ fehlt das Feld, gab es keine. Werte:
   internen Git fehlt (Meldung auf stderr). Der nächste Pull committet wieder.
 - `symlink_skipped` – Dateien unter einem symbolischen Link im Docroot wurden nicht geschrieben
   (Pfade auf stderr). Sie fehlen in der Baseline, der nächste Pull fragt sie erneut an.
+
+**`staging --json`** (ab CLI 0.4.0, Agent 0.5.0). `command` im Ergebnis ist `staging create`,
+`staging refresh`, `staging open`, `staging status` oder `staging delete`. Mit `--json` (und ohne
+Terminal) fragt kein Befehl nach: `refresh`, `delete`, `create --no-anonymize` und ein `create`
+über 1 GB brauchen `--yes`, sonst Exit 2.
+
+- `create`, `refresh`, `delete`: Fortschritt als `phase`-Zeilen wie beim Pull. Phasen über alle
+  drei: `probe`, `files`, `remove-code`, `tables`, `anonymize`, `fixup`, `urls`, `settings`,
+  `lock`, `drop`, `remove`. Ergebnis `data` von `create` und `refresh`: `url`, `prefix`, `anonymized`, `replaced` (Tabelle → geänderte Zeilen),
+  `skipped_values`, `files`.
+- `status`: `data` mit `exists`, `status` (`creating`, `ready`, `refreshing`, `locked`, `failed`,
+  `deleting`), `url`, `prefix`, `created`, `copied_at`, `code_copied_at` (wann der Code der Kopie
+  zuletzt von Live kam: `create`, `refresh --code`), `last_used`, `anonymized`, `db_bytes`, `job`,
+  `error`, `pushes`. Leere Felder fehlen – ausser `exists` und `anonymized` ist jedes Feld
+  optional. Exit 0 mit Kopie, 50 ohne, 53 gesperrt; `data` ist in allen drei Fällen gesetzt.
+- `open`: `data.url` (der Einmal-Link, nicht protokollieren), `data.expires` und
+  `data.warnings` (Liste von Hinweisen für den Menschen, derzeit: die Kopie nicht im selben
+  Browserprofil wie eine Live-Anmeldung öffnen); es startet kein Browser.
+- `create`, `refresh`, `delete`, `open` ohne offenes Push-Fenster: Exit 40 `push_window_closed`,
+  auf dem Server ist nichts angelegt oder geändert. `status` braucht kein Fenster.
+- `delete`: `data` = `{"site":…,"status":"deleted"}`.
+- Ein leeres `url` in `create`, `refresh` oder `status` heisst: der Agent nannte eine Adresse
+  ausserhalb der gekoppelten Site; die CLI gibt sie nicht weiter (Warnung auf stderr).
+
+`wpsync status --json` enthält zusätzlich `staging` (`status`, `url`, `last_used`), wenn es eine
+Kopie gibt.
+
+**`push`, `pushes`, `rollback --json`.** `push` meldet die Ereignisse `plan`, `upload` (je
+Einheit), `commit` und `health` als `{"event":…,"data":{…}}` und endet mit `data`: `push_id`,
+`target` (`live`, `staging`), `status`, `units`. `status` ist `dry_run`, `confirmed`,
+`rolled_back`, `committed` (getauscht, aber weder bestätigt noch zurückgerollt – die Site braucht
+Aufmerksamkeit) oder leer (auf der Site wurde nichts geändert). `pushes` liefert `data.pushes`,
+neueste zuerst, `pushes --confirm` `push_id` und `status`; `rollback` dieselben Felder wie `push`.
+`push` braucht mit `--json` `--yes`, bei geänderter Version zusätzlich `--allow-version-change`.
+`--to` kennt nur `live` und `staging`, genau so geschrieben; alles andere ist Exit 2.
 
 **Site-Lock.** Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (`flock` auf
 `<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
@@ -596,7 +793,7 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | Code | Name | Beispiel |
 |---|---|---|
 | 0 | ok | |
-| 1 | unknown | auch: die Quelle meldet unzulässige Werte (Tabellenpräfix, `home`/`siteurl`, PHP-Version, Tabellennamen) |
+| 1 | unknown | auch: die Quelle meldet unzulässige Werte (Tabellenpräfix, `home`/`siteurl`, PHP-Version, Tabellennamen). Bei Staging mit `error.reason`, siehe unten |
 | 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus, ungültiger `--docroot` |
 | 10 | agent_unreachable | Site oder Plugin nicht erreichbar |
 | 11 | agent_outdated | Agent unter der Mindestversion; `error.installed`, `error.required` |
@@ -604,9 +801,31 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | 13 | auth_failed | Kopplung widerrufen |
 | 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
 | 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits (`error.reason: "site_locked"`) |
-| 21 | disk_full | |
+| 21 | disk_full | lokal kein Platz – oder der Server meldet keinen (HTTP 507, bei `push` und `staging`) |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
+| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open` |
+| 41 | push_conflict | Einheit auf dem Server geändert |
+| 42 | push_pending | ein unbestätigter Push blockiert – auch `staging refresh`/`delete` bei unbestätigtem Push nach Staging |
+| 43 | push_rolled_back | Health-Check schlechter als vorher, zurückgerollt |
+| 44 | busy | auf dem Server läuft ein anderer Push oder ein Staging-Job (HTTP 423) |
+| 50 | staging_missing | keine Staging-Kopie vorhanden |
+| 51 | staging_exists | `staging create`, obwohl es eine Kopie oder Reste einer abgebrochenen gibt |
+| 52 | staging_unsupported | Probe von aussen gescheitert (nginx), Multisite, abweichende WordPress-/Website-Adresse, Tabellen-Präfix |
+| 53 | staging_locked | Kopie nach Verfall gesperrt; `staging open` hebt die Sperre auf |
+
+40–44 und 50–53 gibt es ab CLI 0.4.0; bis 0.3.1 endete `push` in diesen Fällen mit 1. Die lokale
+Site-Sperre bleibt Exit 20 mit `error.reason: "site_locked"` – 44 meint nur die Sperre auf dem
+Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11.
+
+`error.reason` bei Exit 1 (Aufrufer prüfen `reason`, nicht den Meldungstext):
+
+| `reason` | Bedeutung |
+|---|---|
+| `staging_failed` | Der Staging-Job ist gescheitert und hat aufgeräumt; Phase und Grund stehen in der Meldung |
+| `staging_state` | Der Zustand der Kopie lässt den Aufruf nicht zu, z. B. `refresh`, `open` oder ein Push bei `failed` |
+| `staging_copy` | Die Anfrage hat einen Agent in einer Staging-Kopie erreicht statt den der Live-Site |
+| `foreign_url` | Der Agent nannte eine Adresse ausserhalb der gekoppelten Site (Probe, Login-Link) |
 
 **Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
 Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
@@ -694,6 +913,9 @@ scripts/e2e-local.sh       # endet mit „E2E OK“; Arbeitsordner: $WPSYNC_E2E_
 
 # Sicherheits-Regressionen (braucht die Quelle aus e2e-local.sh)
 scripts/e2e-security.sh
+
+# Staging-Kopie gegen eine Apache-Quelle mit PHP 7.4 (eigene DDEV-Projekte, braucht jq)
+scripts/e2e-staging.sh
 ```
 
 Struktur:
@@ -713,14 +935,16 @@ cli/
     ├── mailguard/         mitgelieferter Mail-Riegel (mu-plugin) und Auswahl
     ├── profile/           Presets, Profil-Auflösung, Scope
     ├── pull/              Delta, Dateien, DB, Post-Setup, Status
-    ├── push/              Push, Health-Check, Rollback, Journal
+    ├── push/              Push, Health-Check, Rollback, Journal, Staging-Stempel
     ├── scan/              Infosheet-Darstellung, Checkliste
     ├── secretstore/       Secret aus Keychain oder stdin
     ├── setup/             setup und doctor
-    └── sites/             Site-Konfiguration
+    ├── sites/             Site-Konfiguration
+    └── staging/           Staging-Befehle, Probe von aussen, Zugang ohne Browser
 agent/
 ├── wpsync-agent.php       Plugin-Header, Bootstrap
 ├── src/                   Endpunkte, Signatur, Infosheet, Klassifizierung, Scope
+├── staging/               Riegel der Staging-Kopie (mu-plugin, wird in die Kopie gelegt)
 └── tests/                 PHPUnit
 ```
 

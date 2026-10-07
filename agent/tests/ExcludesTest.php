@@ -92,4 +92,22 @@ final class ExcludesTest extends TestCase
         $this->assertFalse(Excludes::dir('wpsync-push-0123456789abcdef', false), 'only directly below wp-content');
         $this->assertSame('excluded_dir', Excludes::path('wpsync-push-0123456789abcdef/p_20261005_0123456789ab/old/0/main.php', 10));
     }
+
+    /**
+     * Spec 2b 5.10: die Staging-Kopie liegt im Webroot neben wp-content. Taucht ihr Ordner doch
+     * irgendwo unter wp-content auf (verschoben, Rest), verlässt er den Server trotzdem nie – am
+     * Namen erkannt, ohne Datensatz.
+     */
+    public function testStagingCopyIsExcludedEverywhereByName(): void
+    {
+        $this->assertTrue(Excludes::dir('wpsync-staging-0123456789ab', true));
+        $this->assertTrue(Excludes::dir('wpsync-staging-0123456789ab', false));
+        $this->assertTrue(Excludes::dir('WPSYNC-Staging-0123456789AB', false));
+        $this->assertTrue(Excludes::dir('wpsync-staging-old', true), 'jeder Name nach dem Muster, nicht nur der aus dem Datensatz');
+        $this->assertSame('excluded_dir', Excludes::path('wpsync-staging-0123456789ab/wp-config.php', 10));
+        $this->assertSame('excluded_dir', Excludes::path('uploads/wpsync-staging-0123456789ab/wp-content/uploads/a.jpg', 10));
+        $this->assertSame('excluded_dir', Excludes::path('plugins/x/wpsync-staging-0123456789ab/wpsync-staging.json', 10));
+        $this->assertFalse(Excludes::dir('wpsync-staging', false), 'Helfer des Riegels in mu-plugins der Kopie');
+        $this->assertNull(Excludes::path('uploads/wpsync-staging-notes.txt', 10), 'nur Ordner');
+    }
 }

@@ -58,4 +58,52 @@ final class TableListTest extends TestCase
         $rows = $this->base(['wp_options', 'wp_wpsync_pushes', 'wp_wpsync_pushes_archive']);
         $this->assertSame(['wp_options', 'wp_wpsync_pushes_archive'], TableList::filter($rows, 'wp_'));
     }
+
+    /** AC-83, Spec 5.10 */
+    public function testHiddenPrefixesNeverLeaveTheServer(): void
+    {
+        $rows = [['wp_options', 'BASE TABLE'], ['wp_posts', 'BASE TABLE'], ['stgabc123_options', 'BASE TABLE'], ['wp_stgx_options', 'BASE TABLE']];
+        $this->assertSame(['wp_options', 'wp_posts', 'wp_stgx_options'], TableList::filter($rows, 'wp_', ['stgabc123_']));
+        $this->assertSame(['wp_options', 'wp_posts'], TableList::filter($rows, 'wp_', ['wp_stgx_']));
+        $this->assertSame(['wp_options', 'wp_posts', 'wp_stgx_options'], TableList::filter($rows, 'wp_'));
+    }
+
+    /** Leeres Live-Präfix: nur das versteckte Präfix trennt die Kopie; "_" ist kein Platzhalter. */
+    public function testHiddenPrefixIsComparedLiterally(): void
+    {
+        $rows = $this->base(['options', 'posts', 'stgabc123_options', 'stgabc123xoptions']);
+        $this->assertSame(['options', 'posts', 'stgabc123xoptions'], TableList::filter($rows, '', ['stgabc123_', '']));
+    }
+
+    /**
+     * Verwaiste Staging-Tabellen ohne Datensatz (abgebrochenes create, Datensatz verloren): das
+     * Namensmuster genügt. Sichtbar wären sie nur neben einem Live-Präfix, das selbst Anfang von
+     * „stg“ ist – jedes andere Präfix lässt sie schon am Anfang fallen.
+     */
+    public function testOrphanedStagingTablesAreHiddenByPattern(): void
+    {
+        $names = ['options', 'posts', 'stgabc123_options', 'stgabc123_wc_orders', 'stg_notes', 'stgabc12_x', 'stgabcxyz_x', 'STGABC123_x'];
+        $this->assertSame(
+            ['options', 'posts', 'stg_notes', 'stgabc12_x', 'stgabcxyz_x', 'STGABC123_x'],
+            TableList::filter($this->base($names), '')
+        );
+        $rows = $this->base(['stgoptions', 'stgposts', 'stgabc123_options', 'stg0a1b2c_posts']);
+        $this->assertSame(['stgoptions', 'stgposts'], TableList::filter($rows, 'stg'));
+        $this->assertSame(['stgoptions', 'stgposts'], TableList::filter($rows, 'st'));
+    }
+
+    /** Ein Live-Präfix, das selbst in den zufälligen Teil reicht, behält seine eigenen Tabellen. */
+    public function testLiveTablesBehindAStagingLookingPrefixStay(): void
+    {
+        $rows = $this->base(['stgabc123_options', 'stgabc123_posts', 'stgdef456_options']);
+        $this->assertSame(['stgabc123_options', 'stgabc123_posts'], TableList::filter($rows, 'stgabc123_'));
+        $this->assertSame(['stgabc123_options', 'stgabc123_posts'], TableList::filter($rows, 'stga'));
+    }
+
+    public function testThePatternNeedsNoRecordAndNoHiddenPrefix(): void
+    {
+        $rows = $this->base(['wp_options', 'wp_posts', 'stgabc123_options']);
+        $this->assertSame(['wp_options', 'wp_posts'], TableList::filter($rows, 'wp_'));
+        $this->assertSame(['wp_options', 'wp_posts'], TableList::filter($rows, 'wp_', []));
+    }
 }

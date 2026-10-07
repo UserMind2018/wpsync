@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -55,30 +56,94 @@ func webURL(rawURL string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
+// stagingDirRe is the folder of a staging copy as the agent draws it (StagingGuard::DIR_RE).
+var stagingDirRe = regexp.MustCompile(`^wpsync-staging-[a-f0-9]{12}$`)
+
+// copyAccess is the way of the health check into the staging copy (Spec 2b 6.2, V20): the access
+// cookie and the only place it may travel to.
+type copyAccess struct {
+	site   string       // paired site
+	base   string       // staging URL without a slash at the end
+	path   string       // its path
+	cookie *http.Cookie // wpsync_stg, name and value only
+}
+
+// newCopyAccess accepts a staging URL only on the paired site and only in a folder named like a
+// staging copy – with any other base the cookie would travel to pages of live.
+func newCopyAccess(siteURL, base string, cookie *http.Cookie) (*copyAccess, error) {
+	base = strings.TrimRight(base, "/")
+	u, err := url.Parse(base)
+	if err != nil || !agentapi.SameOrigin(siteURL, base) || u.RawQuery != "" || u.Fragment != "" ||
+		!stagingDirRe.MatchString(u.Path[strings.LastIndex(u.Path, "/")+1:]) || hasDots(u.Path) {
+		return nil, fmt.Errorf("%w (Staging-Kopie)", agentapi.ErrForeignURL)
+	}
+	if cookie == nil || cookie.Name == "" || cookie.Value == "" {
+		return nil, errors.New("kein Zugangs-Cookie für die Staging-Kopie")
+	}
+	return &copyAccess{site: siteURL, base: base, path: u.Path, cookie: &http.Cookie{Name: cookie.Name, Value: cookie.Value}}, nil
+}
+
+// inside: rawURL lies on the paired site below the staging folder.
+func (a *copyAccess) inside(rawURL string) bool {
+	if !agentapi.SameOrigin(a.site, rawURL) {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	return err == nil && strings.HasPrefix(u.Path, a.path+"/") && !hasDots(u.Path)
+}
+
+// hasDots: the decoded path climbs or stands still somewhere; a server would resolve that.
+func hasDots(path string) bool {
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // Check requests every URL once, with pause between two requests. A redirect is followed only on
 // the host of the page itself; any other answers as the 3xx it is.
 func Check(hc *http.Client, urls []string, pause func()) []Probe {
-	sameHost := *hc
-	sameHost.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	return check(hc, urls, pause, nil)
+}
+
+// check is Check; with acc it checks a staging copy: every request carries the access cookie and
+// nothing else, uses no cookie jar (the copy also starts an admin session – V20), and neither a
+// page nor a redirect outside the copy is requested, so the cookie never reaches live or another
+// host.
+func check(hc *http.Client, urls []string, pause func(), acc *copyAccess) []Probe {
+	client := *hc
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
 		if !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 			return http.ErrUseLastResponse
 		}
+		if acc != nil && !acc.inside(req.URL.String()) {
+			return http.ErrUseLastResponse
+		}
 		return nil
+	}
+	if acc != nil {
+		client.Jar = nil
 	}
 	probes := make([]Probe, len(urls))
 	for i, u := range urls {
 		if i > 0 {
 			pause()
 		}
-		probes[i] = probe(&sameHost, u)
+		if acc != nil && !acc.inside(u) {
+			probes[i] = Probe{URL: u, Empty: true} // never requested
+			continue
+		}
+		probes[i] = probe(&client, u, acc)
 	}
 	return probes
 }
 
-func probe(hc *http.Client, rawURL string) Probe {
+func probe(hc *http.Client, rawURL string, acc *copyAccess) Probe {
 	p := Probe{URL: rawURL, Empty: true}
 	nonce := make([]byte, 4)
 	_, _ = rand.Read(nonce)
@@ -93,6 +158,9 @@ func probe(hc *http.Client, rawURL string) Probe {
 	}
 	req.Header.Set("User-Agent", agentapi.UserAgent())
 	req.Header.Set("Cache-Control", "no-cache")
+	if acc != nil {
+		req.AddCookie(acc.cookie)
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return p
