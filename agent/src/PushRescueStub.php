@@ -6,7 +6,8 @@ defined('ABSPATH') || exit;
 /**
  * Zweiter Weg zu rescue.php über den Webroot (Spec Stufe 2, 12; B1). Sicherheits-Plugins wie
  * iThemes/Solid Security sperren HTTP-Aufrufe von PHP-Dateien unter wp-content/plugins/, nicht
- * aber ein require im Dateisystem. Der Stub enthält nur dieses require mit relativem Pfad.
+ * aber ein require im Dateisystem. Der Stub enthält nur dieses require mit relativem Pfad – und
+ * antwortet 404, wenn der Agent fehlt.
  * Reine Dateisystem-Arbeit; wann ein Stub entsteht und verschwindet, entscheidet Push.
  */
 final class PushRescueStub
@@ -35,8 +36,11 @@ final class PushRescueStub
         }
         $name = 'wpsync-rescue-' . bin2hex(random_bytes(16)) . '.php';
         $tmp  = $webroot . '/.' . $name . '.tmp';
+        // Fehlt der Agent (per FTP gelöscht), 404 statt eines Fatals mit absolutem Pfad.
         $code = "<?php\n// wpsync: Rückweg für einen laufenden Push (rescue.php), wird danach gelöscht.\n"
-            . 'require __DIR__ . ' . var_export($rel, true) . ";\n";
+            . '$f = __DIR__ . ' . var_export($rel, true) . ";\n"
+            . "if (!is_file(\$f)) {\n    http_response_code(404);\n    exit;\n}\n"
+            . "require \$f;\n";
         if (@file_put_contents($tmp, $code) !== strlen($code) || !@chmod($tmp, 0644) || !@rename($tmp, $webroot . '/' . $name)) {
             @unlink($tmp);
             return null;

@@ -54,7 +54,7 @@ final class PushRescueStubTest extends TestCase
     {
         $script = '$_SERVER["REQUEST_METHOD"] = "POST"; $_POST = json_decode((string) getenv("POST"), true); require getenv("STUB");';
         $cmd    = 'STUB=' . escapeshellarg($this->root . '/' . $stub) . ' POST=' . escapeshellarg((string) json_encode($post))
-            . ' ' . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($script);
+            . ' ' . escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -r ' . escapeshellarg($script) . ' 2>&1';
         return (string) shell_exec($cmd);
     }
 
@@ -66,7 +66,9 @@ final class PushRescueStubTest extends TestCase
         $this->assertMatchesRegularExpression(PushRescueStub::NAME, (string) $name);
         $this->assertSame([$name], $this->stubs());
         $code = (string) file_get_contents($this->root . '/' . $name);
-        $this->assertStringContainsString("require __DIR__ . '/wp-content/plugins/wpsync-agent/rescue.php';", $code);
+        $this->assertStringContainsString("\$f = __DIR__ . '/wp-content/plugins/wpsync-agent/rescue.php';", $code);
+        $this->assertStringContainsString('if (!is_file($f)) {', $code);
+        $this->assertStringContainsString('require $f;', $code);
         $this->assertStringNotContainsString($this->root, $code, 'no absolute server path');
         $this->assertSame('0644', substr(sprintf('%o', fileperms($this->root . '/' . $name)), -4));
         $this->assertSame([], glob($this->root . '/.wpsync-rescue-*') ?: [], 'no temp file left');
@@ -82,6 +84,14 @@ final class PushRescueStubTest extends TestCase
         $key = PushRescue::key(str_repeat('ab', 32), self::ID, 'salt');
         PushRescue::write($this->root . '/wp-content/wpsync-push-0123456789abcdef', self::ID, hash('sha256', $key), [], PushRescue::COMMITTED);
         $this->assertSame('{"ok":true,"status":"rolled_back"}', $this->post($name, ['action' => 'rollback', 'push_id' => self::ID, 'key' => $key]));
+    }
+
+    /** N1: Agent-Ordner per FTP gelöscht – der verwaiste Stub verrät keinen Serverpfad. */
+    public function testAnOrphanedStubAnswersWithoutAPath(): void
+    {
+        $name = (string) PushRescueStub::create($this->root, $this->plugin);
+        rename($this->plugin, $this->plugin . '-off');
+        $this->assertSame('', $this->post($name, ['action' => 'ping']));
     }
 
     /** R6 */
