@@ -343,7 +343,7 @@ func (a *app) cmdPair(args []string) error {
 			return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
 		}
 	}
-	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1}); err != nil {
+	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1, Device: *device}); err != nil {
 		return err
 	}
 	data := pairResult{Site: *name, URL: base, KeyID: res.KeyID, AgentVersion: res.AgentVersion,

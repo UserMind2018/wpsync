@@ -24,6 +24,9 @@ type Site struct {
 	Profile *profile.Profile `yaml:"profile,omitempty"`
 	// HealthURLs are checked before and after a push, in addition to the pages the agent names.
 	HealthURLs []string `yaml:"health_urls,omitempty"`
+	// Device is the name pair sent for this pairing (--device or the host name); the WP admin lists
+	// the push window under it. Empty for pairings before CLI 0.5.0.
+	Device string `yaml:"device,omitempty"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
