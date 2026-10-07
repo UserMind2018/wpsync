@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace WpSync\Tests;
 
 use PHPUnit\Framework\TestCase;
+use WpSync\StagingAccess;
 use WpSync\StagingConfig;
 
 final class StagingConfigTest extends TestCase
@@ -41,6 +42,73 @@ final class StagingConfigTest extends TestCase
         exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg($file) . ' 2>&1', $out, $code);
         unlink($file);
         $this->assertSame(0, $code, implode("\n", $out));
+    }
+
+    /**
+     * N1: die Zugangsprüfung läuft in der wp-config.php vor wp-settings.php – ohne Zugang lädt
+     * nichts aus WordPress, auch kein mu-plugin. Gegen den eingebauten Webserver von PHP.
+     */
+    public function testWpConfigChecksAccessBeforeWordPressLoads(): void
+    {
+        $root = sys_get_temp_dir() . '/wpsync-gate-' . bin2hex(random_bytes(6));
+        $copy = $root . self::PATH;
+        mkdir($copy . '/wp-content/mu-plugins/wpsync-staging', 0777, true);
+        copy(__DIR__ . '/../src/StagingAccess.php', $copy . '/wp-content/mu-plugins/wpsync-staging/StagingAccess.php');
+        file_put_contents($copy . '/wp-config.php', StagingConfig::wpConfig($this->db(), 'stgabc123_', 'http://127.0.0.1' . self::PATH, StagingConfig::salts(), []));
+        file_put_contents($copy . '/wp-settings.php', "<?php echo 'WP-LOADED';\n");
+        foreach (['index.php', 'wp-login.php'] as $entry) {
+            file_put_contents($copy . '/' . $entry, "<?php require __DIR__ . '/wp-config.php';\n");
+        }
+        $access = new StagingAccess($copy . '/wp-content/wpsync-staging.json');
+        $access->init('https://example.com', 'https://example.com/wp-content/uploads', self::PATH, time(), time());
+        $token  = $access->issueToken(time());
+        $cookie = (string) $access->redeemToken($access->issueToken(time()), time());
+
+        $port   = random_int(20000, 60000);
+        $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $port, '-t', $root], [['pipe', 'r'], ['file', '/dev/null', 'w'], ['file', '/dev/null', 'w']], $pipes);
+        $this->assertIsResource($server);
+        try {
+            for ($i = 0; $i < 50 && @fsockopen('127.0.0.1', $port) === false; $i++) {
+                usleep(100000);
+            }
+            $get = static function (string $path, string $cookie = '') use ($port): array {
+                $socket = fsockopen('127.0.0.1', $port);
+                fwrite($socket, "GET $path HTTP/1.0\r\nHost: 127.0.0.1\r\n" . ($cookie === '' ? '' : 'Cookie: ' . StagingAccess::COOKIE . '=' . $cookie . "\r\n") . "\r\n");
+                $raw = (string) stream_get_contents($socket);
+                fclose($socket);
+                [$head, $body] = array_pad(explode("\r\n\r\n", $raw, 2), 2, '');
+                return [explode("\r\n", $head)[0], $body, $head];
+            };
+
+            $denied = $get(self::PATH . '/');
+            $this->assertStringContainsString(' 403', $denied[0]);
+            $this->assertStringNotContainsString('WP-LOADED', $denied[1]);
+            $this->assertStringContainsString('Kein gültiger Zugang.', $denied[1]);
+            foreach (['Cache-Control: no-store, private', 'Referrer-Policy: no-referrer', 'X-Robots-Tag: noindex, nofollow'] as $header) {
+                $this->assertStringContainsString($header, $denied[2]);
+            }
+            $this->assertStringContainsString(' 403', $get(self::PATH . '/wp-login.php', str_repeat('a', 64))[0], 'forged cookie');
+            $this->assertStringContainsString(' 403', $get(self::PATH . '/wp-login.php?wpsync_login=' . $token)[0], 'a link counts only at the entry point');
+            $forged = $get(self::PATH . '/?wpsync_login=' . str_repeat('a', 64));
+            $this->assertStringContainsString(' 403', $forged[0]);
+            $this->assertStringContainsString('abgelaufen', $forged[1]);
+
+            $this->assertSame('WP-LOADED', $get(self::PATH . '/wp-login.php', $cookie)[1]);
+            // Den Link löst erst der Riegel ein – die frühe Prüfung lässt ihn nur durch.
+            $this->assertSame('WP-LOADED', $get(self::PATH . '/?wpsync_login=' . $token)[1]);
+            $this->assertNotNull($access->redeemToken($token, time()), 'the early check does not use the link up');
+
+            unlink($copy . '/wp-content/mu-plugins/wpsync-staging/StagingAccess.php');
+            $this->assertStringContainsString(' 403', $get(self::PATH . '/wp-login.php', $cookie)[0], 'fail-closed without the class');
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+        }
+
+        // WP-CLI prüft keinen Zugang.
+        exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($copy . '/index.php') . ' 2>&1', $out);
+        $this->assertSame('WP-LOADED', implode("\n", $out));
+        exec('rm -rf ' . escapeshellarg($root));
     }
 
     public function testHttpCopyHasNoProxyLine(): void

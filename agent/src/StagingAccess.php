@@ -92,6 +92,41 @@ final class StagingAccess
         return $cookie;
     }
 
+    /**
+     * Das Token eines Einmal-Links – nur am Einstieg der Kopie (Staging-Pfad mit oder ohne /,
+     * index.php). An jeder anderen Stelle gilt die Anfrage als eine ohne Token.
+     *
+     * @param array<mixed> $query
+     */
+    public static function loginToken(array $query, string $requestUri, string $stagingPath): ?string
+    {
+        if (!isset($query['wpsync_login']) || !is_string($query['wpsync_login'])) {
+            return null;
+        }
+        $base = rtrim($stagingPath, '/');
+        $path = explode('?', $requestUri, 2)[0];
+        if ($base === '' || !in_array($path, [$base, $base . '/', $base . '/index.php'], true)) {
+            return null;
+        }
+        return $query['wpsync_login'];
+    }
+
+    /**
+     * Prüfung vor WordPress (wp-config.php der Kopie): durch nur mit gültigem Cookie oder mit einem
+     * offenen Einmal-Link, den danach der Riegel einlöst. Liest nur, schreibt nichts.
+     */
+    public function admits(?string $token, string $cookie, int $now): bool
+    {
+        if ($this->cookieValid($cookie, $now)) {
+            return true;
+        }
+        if ($token === null || preg_match(self::SECRET_RE, $token) !== 1) {
+            return false;
+        }
+        $state = $this->read();
+        return !$state['locked'] && ($state['tokens'][hash('sha256', $token)] ?? 0) >= $now;
+    }
+
     public function cookieValid(string $value, int $now): bool
     {
         if (preg_match(self::SECRET_RE, $value) !== 1) {

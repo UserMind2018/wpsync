@@ -56,21 +56,13 @@ foreach ([__DIR__ . '/wpsync-staging/StagingAccess.php', __DIR__ . '/wpsync-stag
 /**
  * Das Token eines Einmal-Links – nur am Einstieg der Kopie (Staging-Pfad mit oder ohne /, index.php),
  * unabhängig von der .htaccess. An jeder anderen Stelle gilt die Anfrage als eine ohne Token, und
- * das Token bleibt unverbraucht.
+ * das Token bleibt unverbraucht. Dieselbe Regel gilt in der wp-config.php der Kopie.
  *
  * @param array<mixed> $query
  */
 function wpsync_staging_login_token(array $query, string $requestUri, string $stagingPath): ?string
 {
-    if (!isset($query['wpsync_login']) || !is_string($query['wpsync_login'])) {
-        return null;
-    }
-    $base = rtrim($stagingPath, '/');
-    $path = explode('?', $requestUri, 2)[0];
-    if ($base === '' || !in_array($path, [$base, $base . '/', $base . '/index.php'], true)) {
-        return null;
-    }
-    return $query['wpsync_login'];
+    return \WpSync\StagingAccess::loginToken($query, $requestUri, $stagingPath);
 }
 
 /**

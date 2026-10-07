@@ -40,6 +40,40 @@ final class StagingAccessTest extends TestCase
         $this->assertTrue($access->cookieValid((string) $cookie, self::NOW + 12));
     }
 
+    /** N1: die Prüfung vor WordPress liest nur – ein offener Link bleibt für den Riegel gültig. */
+    public function testAdmitsOnlyACookieOrAnOpenLinkWithoutUsingIt(): void
+    {
+        $access = $this->access();
+        $token  = $access->issueToken(self::NOW);
+        $this->assertTrue($access->admits($token, '', self::NOW + 10));
+        $this->assertTrue($access->admits($token, '', self::NOW + 10), 'not used up');
+        $this->assertFalse($access->admits($token, '', self::NOW + StagingAccess::TOKEN_TTL + 1), 'expired');
+        $this->assertFalse($access->admits(str_repeat('a', 64), '', self::NOW));
+        $this->assertFalse($access->admits('kein-token', '', self::NOW));
+        $this->assertFalse($access->admits(null, '', self::NOW));
+        $cookie = (string) $access->redeemToken($token, self::NOW + 10);
+        $this->assertFalse($access->admits($token, '', self::NOW + 11), 'redeemed');
+        $this->assertTrue($access->admits(null, $cookie, self::NOW + 11));
+        $access->lock();
+        $this->assertFalse($access->admits(null, $cookie, self::NOW + 12), 'locked');
+    }
+
+    /** T1: ein Link zählt nur am Einstieg der Kopie. */
+    public function testLoginTokenOnlyAtTheEntryPoint(): void
+    {
+        $base  = '/wpsync-staging-0123456789ab';
+        $query = ['wpsync_login' => 'x'];
+        foreach ([$base, $base . '/', $base . '/index.php', $base . '/?a=b'] as $uri) {
+            $this->assertSame('x', StagingAccess::loginToken($query, $uri, $base), $uri);
+        }
+        foreach ([$base . '/wp-login.php', $base . '//', '/', ''] as $uri) {
+            $this->assertNull(StagingAccess::loginToken($query, $uri, $base), $uri);
+        }
+        $this->assertNull(StagingAccess::loginToken(['wpsync_login' => ['x']], $base . '/', $base));
+        $this->assertNull(StagingAccess::loginToken([], $base . '/', $base));
+        $this->assertNull(StagingAccess::loginToken($query, '/', ''));
+    }
+
     /** AC-92 */
     public function testTokenExpiresAfterFiveMinutes(): void
     {

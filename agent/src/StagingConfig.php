@@ -77,6 +77,7 @@ final class StagingConfig
             $lines[] = "if ((\$_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') { \$_SERVER['HTTPS'] = 'on'; }";
         }
         $lines[] = "if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }";
+        $lines[] = self::earlyGate($path);
         $lines[] = "require_once ABSPATH . 'wp-settings.php';";
         return implode("\n", $lines) . "\n";
     }
@@ -147,6 +148,48 @@ final class StagingConfig
             . "    location ~ /(wp-config\\.php|wpsync-staging\\.json)\$ { return 403; }\n"
             . "    try_files \$uri \$uri/ $path/index.php?\$args;\n"
             . "}\n";
+    }
+
+    /**
+     * Zugangsprüfung vor WordPress (N1): ohne gültiges Cookie oder offenen Einmal-Link am Einstieg
+     * lädt weder ein mu-plugin von Live noch sonst etwas aus WordPress. Fail-closed, nur für
+     * Web-Requests; den Link löst danach wie bisher der Riegel ein (Anmeldung braucht WordPress).
+     */
+    private static function earlyGate(string $path): string
+    {
+        $base = var_export($path, true);
+        return <<<PHP
+if (PHP_SAPI !== 'cli') {
+    (static function (): void {
+        \$token = null;
+        try {
+            \$class = ABSPATH . 'wp-content/mu-plugins/wpsync-staging/StagingAccess.php';
+            if (is_readable(\$class)) {
+                require_once \$class;
+                \$cookie = isset(\$_COOKIE[\\WpSync\\StagingAccess::COOKIE]) && is_string(\$_COOKIE[\\WpSync\\StagingAccess::COOKIE]) ? \$_COOKIE[\\WpSync\\StagingAccess::COOKIE] : '';
+                \$uri    = isset(\$_SERVER['REQUEST_URI']) && is_string(\$_SERVER['REQUEST_URI']) ? \$_SERVER['REQUEST_URI'] : '';
+                \$token  = \\WpSync\\StagingAccess::loginToken(\$_GET, \$uri, {$base});
+                if ((new \\WpSync\\StagingAccess(ABSPATH . 'wp-content/wpsync-staging.json'))->admits(\$token, \$cookie, time())) {
+                    return;
+                }
+            }
+        } catch (\\Throwable \$e) {
+            error_log('wpsync-staging: early access check: ' . \$e->getMessage());
+        }
+        if (!headers_sent()) {
+            http_response_code(403);
+            header('Content-Type: text/html; charset=utf-8');
+            header('Cache-Control: no-store, private');
+            header('Referrer-Policy: no-referrer');
+            header('X-Robots-Tag: noindex, nofollow');
+        }
+        echo '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><title>Staging</title>'
+            . '<p>Diese Staging-Kopie ist gesperrt. ' . (\$token === null ? 'Kein gültiger Zugang.' : 'Der Link ist abgelaufen oder wurde schon benutzt.') . '</p>'
+            . '<p>Zugang: <code>wpsync staging open &lt;site&gt;</code></p>';
+        exit;
+    })();
+}
+PHP;
     }
 
     private static function define(string $name, string $value): string
