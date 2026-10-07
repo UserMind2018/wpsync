@@ -1286,3 +1286,26 @@ func TestFifoSwappedInDoesNotHangTheSnapshot(t *testing.T) {
 		t.Fatalf("tree:\n%s", got)
 	}
 }
+
+// Security-Audit F-3: bricht der Strom ab, weil eine Datei beim Kopieren kürzer wird, hinterlässt
+// git fast-import einen fast_import_crash_* im Repo. CommitTree räumt ihn weg.
+func TestFailedImportLeavesNoCrashReport(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "docroot/wp-content/plugins/a/a.php")
+	victim := filepath.Join(siteDir, "docroot/wp-content/plugins/a/a.php")
+	os.WriteFile(victim, []byte(strings.Repeat("x", 4096)), 0o644)
+	testHookAfterStat = func(rel string) {
+		if rel == "plugins/a/a.php" {
+			os.Truncate(victim, 10)
+		}
+	}
+	t.Cleanup(func() { testHookAfterStat = nil })
+	gitDir := TreeGitDir(siteDir)
+	err := CommitTree(gitDir, siteDir, "docroot", "pull 1", io.Discard)
+	if err == nil || errors.Is(err, ErrIncomplete) {
+		t.Fatalf("err = %v, want a failure", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(gitDir, "fast_import_crash_*")); len(left) != 0 {
+		t.Fatalf("crash reports left: %v", left)
+	}
+}
