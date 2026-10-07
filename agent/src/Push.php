@@ -151,18 +151,20 @@ final class Push
             }
         }
         $pending = self::pending();
+        $open    = PushWindow::open(Store::pushUntil($keyId), $now);
         $answer  = [
             'push_id'       => '',
             'target'        => $target,
             'agent_version' => WPSYNC_VERSION,
             'health_urls'   => $target === 'staging' ? Staging::healthUrls() : self::healthUrls(),
-            'window_open'   => PushWindow::open(Store::pushUntil($keyId), $now),
+            'window_open'   => $open,
             'pending'       => $pending,
             'units'         => $plans,
             // Die URL schon im Probelauf: die CLI prüft den Rückweg, bevor sie einen Push anlegt (AC-66).
-            // Mit rescue_stub ein Stub im Webroot, falls PHP unter plugins/ gesperrt ist (Spec 12, R3).
+            // Mit rescue_stub ein Stub im Webroot, falls PHP unter plugins/ gesperrt ist (Spec 12, R3) –
+            // nur bei offenem Fenster: sonst bricht die CLI vor dem Ping ab, der Stub läge umsonst da.
             'rescue'        => [
-                'url'       => self::rescueUrl(!empty($params['rescue_stub']), $now),
+                'url'       => self::rescueUrl(!empty($params['rescue_stub']) && $open, $now),
                 'salt'      => '',
                 'hardening' => PushRescueStub::hardening(self::activePlugins()),
             ],

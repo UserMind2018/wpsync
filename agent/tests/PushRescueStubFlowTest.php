@@ -102,6 +102,15 @@ final class PushRescueStubFlowTest extends TestCase
         $this->assertSame([], $this->stubs());
     }
 
+    /** N2: ein Stub nur bei offenem Push-Fenster – sonst bricht die CLI ohnehin vor dem Ping ab. */
+    public function testAClosedWindowGetsThePluginUrlAndNoStub(): void
+    {
+        Store::$until = time() - 60;
+        $this->assertSame(self::PLUGIN, $this->url($this->begin(['dry' => true, 'rescue_stub' => true])));
+        $this->assertSame([], $this->stubs());
+        $this->assertNull(Store::getState('rescue_stub'));
+    }
+
     /** AC-132, R4 */
     public function testTheDryRunCreatesTheStubAndTheRealBeginReusesIt(): void
     {
