@@ -195,6 +195,36 @@ final class PushRescueStubFlowTest extends TestCase
         $this->assertSame([], $this->stubs());
     }
 
+    /** N3, R5: liegt der Commit länger als 10 Minuten zurück, zählen confirm und Rollback neu. */
+    public function testALateConfirmKeepsTheStub(): void
+    {
+        $id = $this->swap();
+        $this->age();
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::confirm(['push_id' => $id], self::KEY));
+        $this->assertCount(1, $this->stubs());
+    }
+
+    /** N3, R5 */
+    public function testALateRollbackKeepsTheStub(): void
+    {
+        $id = $this->swap();
+        $this->age();
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollbackPush($id));
+        Push::prune(time());
+        $this->assertCount(1, $this->stubs());
+    }
+
+    /** Datiert Stub-Zustand und Sperre zurück, als läge der Commit mehr als 10 Minuten zurück. */
+    private function age(): void
+    {
+        foreach (['rescue_stub', 'push_lock'] as $name) {
+            $state = Store::getState($name);
+            $this->assertNotNull($state, $name);
+            $state['touched'] = time() - Push::LOCK_TTL - 60;
+            Store::setState($name, $state);
+        }
+    }
+
     /** AC-134 */
     public function testAStubNobodyUsesIsPrunedAfterTenMinutes(): void
     {

@@ -458,6 +458,8 @@ final class Push
             PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
             self::release($push['push_id']);
+            // Die 10 Minuten des Stubs ab jetzt: eine verlorene confirm-Antwort braucht rescue.php (R5).
+            self::touchStub(time());
             self::prune(time());
             self::scheduleTidy();
         }
@@ -517,6 +519,7 @@ final class Push
                 return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
             }
             self::finishRollback($pushId);
+            self::touchStub(time()); // wie bei confirm (R5)
             self::scheduleTidy();
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
