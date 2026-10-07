@@ -134,6 +134,8 @@ namespace WpSync {
         public static $pushes = [];
         /** @var int */
         public static $until = 0;
+        /** @var bool Datenbank antwortet nicht: Lesezugriffe liefern null/[], dbOk() false */
+        public static $dbError = false;
 
         public static function install(): void
         {
@@ -142,7 +144,7 @@ namespace WpSync {
         /** @return array<string, mixed>|null */
         public static function getState(string $name): ?array
         {
-            return self::$state[$name] ?? null;
+            return self::$dbError ? null : (self::$state[$name] ?? null);
         }
 
         /** @param array<string, mixed>|null $value */
@@ -198,17 +200,25 @@ namespace WpSync {
         /** @return array<string, mixed>|null */
         public static function getPush(string $pushId): ?array
         {
-            return isset(self::$pushes[$pushId]) ? self::row(self::$pushes[$pushId]) : null;
+            return !self::$dbError && isset(self::$pushes[$pushId]) ? self::row(self::$pushes[$pushId]) : null;
         }
 
         /** @return list<array<string, mixed>> neueste zuerst */
         public static function pushes(int $limit): array
         {
+            if (self::$dbError) {
+                return [];
+            }
             $rows = array_values(self::$pushes);
             usort($rows, static function (array $a, array $b): int {
                 return [$b['created'], $b['push_id']] <=> [$a['created'], $a['push_id']];
             });
             return array_map([self::class, 'row'], array_slice($rows, 0, $limit));
+        }
+
+        public static function dbOk(): bool
+        {
+            return !self::$dbError;
         }
 
         /**

@@ -582,8 +582,10 @@ final class Push
 
     /**
      * Arbeitsordner ohne aktive Zeile in wpsync_pushes (abgebrochener Push, gelöschte Zeile) nach
-     * UPLOAD_TTL – ausser rescue.json steht auf committed: dort liegt der einzige Snapshot eines
-     * getauschten Pushs (Spec Stufe 2, 12, R10). Live und Kopie getrennt.
+     * UPLOAD_TTL – nur was nachweislich fertig ist: nie getauscht (keine rescue.json), zurückgerollt
+     * oder bestätigt. committed ist der einzige Snapshot eines getauschten Pushs, eine unlesbare
+     * rescue.json ebenso möglich; beides bleibt (Spec Stufe 2, 12, R10). Bei einem DB-Fehler ist
+     * eine fehlende Zeile kein Beweis – dann wird gar nichts gelöscht. Live und Kopie getrennt.
      */
     private static function pruneOrphans(int $now): void
     {
@@ -593,18 +595,29 @@ final class Push
                 continue;
             }
             $work = $content . '/' . Store::pushDirName();
+            if (is_link($work)) {
+                continue;
+            }
             foreach ((array) @scandir($work) as $name) {
                 if (!is_string($name) || preg_match(PushRescue::ID, $name) !== 1) {
                     continue;
                 }
                 $dir = $work . '/' . $name;
-                $row = Store::getPush($name);
-                if (is_link($dir) || !is_dir($dir) || ($row !== null && !$row['pruned']) || $now - (int) @filemtime($dir) < self::UPLOAD_TTL) {
+                if (is_link($dir) || !is_dir($dir) || $now - (int) @filemtime($dir) < self::UPLOAD_TTL) {
                     continue;
                 }
-                $record = PushRescue::read($work, $name);
-                if ($record !== null && $record['status'] === PushRescue::COMMITTED) {
+                $row = Store::getPush($name);
+                if (!Store::dbOk()) {
+                    return;
+                }
+                if ($row !== null && !$row['pruned']) {
                     continue;
+                }
+                if (file_exists(PushRescue::file($work, $name))) {
+                    $record = PushRescue::read($work, $name);
+                    if ($record === null || !in_array($record['status'], [PushRescue::ROLLED_BACK, PushRescue::CONFIRMED], true)) {
+                        continue;
+                    }
                 }
                 PushSwap::remove($dir);
             }
@@ -966,10 +979,21 @@ final class Push
         if ($content === '') {
             return;
         }
+        // Jeder Lesezugriff einzeln geprüft: bei einem DB-Fehler sähe alles nach „frei“ aus (M1).
         $state = Store::getState('rescue_stub');
-        $name  = is_string($state['name'] ?? null) ? $state['name'] : null;
-        $lock  = Store::getState('push_lock');
-        $busy  = self::pending() !== null
+        if (!Store::dbOk()) {
+            return;
+        }
+        $lock = Store::getState('push_lock');
+        if (!Store::dbOk()) {
+            return;
+        }
+        $pending = self::pending();
+        if (!Store::dbOk()) {
+            return;
+        }
+        $name = is_string($state['name'] ?? null) ? $state['name'] : null;
+        $busy = $pending !== null
             || ($lock !== null && $now - (int) ($lock['touched'] ?? 0) < self::LOCK_TTL)
             || ($name !== null && $now - (int) ($state['touched'] ?? 0) < self::LOCK_TTL);
         if ($busy) {

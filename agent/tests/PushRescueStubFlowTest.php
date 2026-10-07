@@ -252,6 +252,66 @@ final class PushRescueStubFlowTest extends TestCase
         $this->assertDirectoryExists($other);
     }
 
+    /** M1: ohne verlässliche Datenbank ist eine fehlende Zeile kein Beweis – nichts wird gelöscht. */
+    public function testADatabaseErrorKeepsEveryWorkDir(): void
+    {
+        $old       = time() - Push::UPLOAD_TTL - 60;
+        $orphan    = $this->workDir($this->live, 'p_20261001_aaaaaaaaaaaa', null, $old);
+        $confirmed = $this->workDir($this->live, 'p_20261001_bbbbbbbbbbbb', PushRescue::CONFIRMED, $old);
+        Store::$dbError = true;
+
+        Push::prune(time());
+
+        $this->assertDirectoryExists($orphan);
+        $this->assertDirectoryExists($confirmed, 'a snapshot whose row could not be read');
+    }
+
+    /** M1: der Stub bleibt, solange pending, Sperre und Stub-Zustand nicht lesbar sind. */
+    public function testADatabaseErrorKeepsTheStub(): void
+    {
+        $this->begin(['dry' => true, 'rescue_stub' => true]);
+        $this->assertCount(1, $this->stubs());
+        Store::$dbError = true;
+
+        Push::prune(time() + Push::LOCK_TTL + 1);
+
+        $this->assertCount(1, $this->stubs());
+    }
+
+    /** M1: gelöscht wird nur, was nachweislich fertig ist; eine kaputte rescue.json bleibt. */
+    public function testOnlyProvablyFinishedWorkDirsArePruned(): void
+    {
+        $old    = time() - Push::UPLOAD_TTL - 60;
+        $broken = $this->workDir($this->live, 'p_20261001_111111111111', null, $old);
+        file_put_contents($broken . '/rescue.json', '{"push_id":');
+        touch($broken, $old);
+        $odd = $this->workDir($this->live, 'p_20261001_222222222222', 'unknown', $old);
+        $confirmed = $this->workDir($this->live, 'p_20261001_333333333333', PushRescue::CONFIRMED, $old);
+        $pruned    = $this->workDir($this->live, 'p_20261001_444444444444', PushRescue::CONFIRMED, $old);
+        Store::addPush(['push_id' => 'p_20261001_444444444444', 'key_id' => self::KEY, 'device' => 'd', 'target' => 'live',
+            'status' => PushRescue::CONFIRMED, 'forced' => 0, 'units' => '[]', 'created' => time(), 'pruned' => 1]);
+
+        Push::prune(time());
+
+        $this->assertDirectoryExists($broken, 'unreadable rescue.json');
+        $this->assertDirectoryExists($odd, 'unknown status');
+        $this->assertDirectoryDoesNotExist($confirmed, 'confirmed and its row is gone');
+        $this->assertDirectoryDoesNotExist($pruned, 'confirmed and its row is pruned');
+    }
+
+    /** M1: ein Arbeitsordner, der ein Symlink ist, wird nicht durchsucht. */
+    public function testASymlinkedWorkDirIsSkipped(): void
+    {
+        $elsewhere = $this->root . '/elsewhere';
+        mkdir($elsewhere . '/p_20261001_555555555555', 0777, true);
+        touch($elsewhere . '/p_20261001_555555555555', time() - Push::UPLOAD_TTL - 60);
+        symlink($elsewhere, $this->live . '/' . Store::pushDirName());
+
+        Push::prune(time());
+
+        $this->assertDirectoryExists($elsewhere . '/p_20261001_555555555555');
+    }
+
     /** AC-138: auch im Arbeitsordner der Staging-Kopie. */
     public function testOrphanedWorkDirsOfTheCopyArePruned(): void
     {
