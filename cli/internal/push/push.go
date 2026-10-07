@@ -38,6 +38,12 @@ type Options struct {
 	Site      sites.Site
 	Secret    string
 	SitesRoot string
+	// SiteDir holds baseline, journals and staging stamps; default SitesRoot/<name> with the Mac
+	// lock and the snapshot repo in localgit.GitDir. With SiteDir set (container mode) lock and
+	// snapshot repo lie in <SiteDir>/.wpsync like the container pull (Spec Container-Push C1, C10).
+	SiteDir string
+	// Docroot holds the WordPress files; default SiteDir/public. Must lie directly below SiteDir.
+	Docroot string
 
 	Units              []string // empty: every unit with local changes
 	Force              bool     // overwrite although the server changed since the last pull
@@ -155,13 +161,23 @@ func (o Options) defaults() Options {
 		if out == nil {
 			out = io.Discard
 		}
-		// The snapshot repo lives next to the site folder (localgit.GitDir), never inside it.
-		// It runs under the site lock (Run, Rollback), so git locks of a killed run are cleared first.
+		// The snapshot repo never lies inside the site folder's reach: on the Mac next to the site
+		// folder (localgit.GitDir), in the container mode in <SiteDir>/.wpsync/history.git, out of
+		// the docroot mount. It runs under the site lock (Run, Rollback), so git locks of a killed
+		// run are cleared first.
+		container, docroot := o.SiteDir != "", o.Docroot
 		o.Commit = func(siteDir, message string) error {
-			if err := localgit.ClearStaleLocks(localgit.GitDir(filepath.Dir(siteDir), filepath.Base(siteDir))); err != nil {
+			if !container {
+				if err := localgit.ClearStaleLocks(localgit.GitDir(filepath.Dir(siteDir), filepath.Base(siteDir))); err != nil {
+					return err
+				}
+				return localgit.Commit(filepath.Dir(siteDir), filepath.Base(siteDir), message, out)
+			}
+			gitDir := localgit.TreeGitDir(siteDir)
+			if err := localgit.ClearStaleLocks(gitDir); err != nil {
 				return err
 			}
-			return localgit.Commit(filepath.Dir(siteDir), filepath.Base(siteDir), message, out)
+			return localgit.CommitTree(gitDir, siteDir, filepath.Base(docroot), message, out)
 		}
 	}
 	if o.ChunkBytes <= 0 {
@@ -171,6 +187,23 @@ func (o Options) defaults() Options {
 		o.Access = staging.Access
 	}
 	return o
+}
+
+// dirs resolves site folder and docroot like pull does: the docroot lies directly below the site
+// folder, which holds .wpsync next to it.
+func (o Options) dirs() (siteDir, docroot string, err error) {
+	siteDir = o.SiteDir
+	if siteDir == "" {
+		siteDir = filepath.Join(o.SitesRoot, o.Site.Name)
+	}
+	docroot = o.Docroot
+	if docroot == "" {
+		docroot = filepath.Join(siteDir, "public")
+	}
+	if filepath.Dir(docroot) != filepath.Clean(siteDir) {
+		return "", "", fmt.Errorf("docroot %s must lie directly below %s", docroot, siteDir)
+	}
+	return siteDir, docroot, nil
 }
 
 // checkTarget refuses a target that is neither named nor known; a typo must never mean live.
@@ -286,9 +319,11 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string
 	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list}
 }
 
-// lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site.
+// lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site –
+// on the Mac next to the snapshot repo, in the container mode <SiteDir>/.wpsync/lock like the
+// container pull (Spec Container-Push C10).
 func lock(o Options) (func(), error) {
-	l, err := sitelock.Acquire(sitelock.Path(o.SitesRoot, o.Site.Name, ""))
+	l, err := sitelock.Acquire(sitelock.Path(o.SitesRoot, o.Site.Name, o.SiteDir))
 	if err != nil {
 		return nil, localenv.Wrap("lock", err)
 	}
@@ -352,8 +387,10 @@ func Run(o Options) error {
 	if o.Report != nil {
 		defer func() { *o.Report = *report }()
 	}
-	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
-	docroot := filepath.Join(siteDir, "public")
+	siteDir, docroot, err := o.dirs()
+	if err != nil {
+		return err
+	}
 
 	base, err := baseline.Load(siteDir)
 	if err != nil {

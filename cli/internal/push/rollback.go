@@ -3,7 +3,6 @@ package push
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -99,7 +98,10 @@ func Rollback(o Options, pushID string) error {
 	}
 	defer unlock()
 	o = o.defaults()
-	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
+	siteDir, _, err := o.dirs()
+	if err != nil {
+		return err
+	}
 	target := "" // where the push went, as far as anyone can tell
 	var units []string
 	if pushID == "" {
