@@ -60,6 +60,8 @@ eq() { if [ "$2" = "$3" ]; then pass; else bad "$1 (ist: $2, soll: $3)"; fi; } #
 ok() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then pass; else bad "$what"; fi; }
 no() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$what"; else pass; fi; }
 hasF() { grep -qF -- "$2" "$1"; } # hasF <datei> <text>
+match() { if printf %s "$2" | grep -Eq -- "$3"; then pass; else bad "$1 (ist: $2)"; fi; } # match <was> <ist> <regex>
+stubs() { find "$PUB" -maxdepth 1 -name 'wpsync-rescue-*.php' | wc -l | tr -d ' '; }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 last() { tail -n 1 "$JSON/$1.jsonl" | jq -r "$2"; } # last <name> <jq>: über der Ergebniszeile
 event() { jq -c "select(.event == \"$2\") | .data" "$JSON/$1.jsonl" | tail -n 1; } # event <name> <event>
@@ -119,6 +121,7 @@ finish() {
   docker network rm "$NET" >/dev/null 2>&1
   if [ -f "$SRC/.ddev/config.yaml" ] && cd "$SRC"; then
     rm -f "$WPC/mu-plugins/e2e-fatal.php"
+    rm -f "$WPC/plugins/.htaccess"
     [ ! -f "$WPC/plugins/wpsync-agent/rescue.php.off" ] || mv "$WPC/plugins/wpsync-agent/rescue.php.off" "$WPC/plugins/wpsync-agent/rescue.php"
     chmod u+w "$WPC/themes"
     [ -z "$KEY_ID" ] || window 0 2>/dev/null
@@ -313,7 +316,9 @@ jrun push-live s1 push "$SLUG" code "$THEME_REL" "${C[@]}" --yes --json
 eq "AC-115 Push nach Live: Exit 0" "$RC" 0
 PUSH_A="$(last push-live '.data.push_id')"
 eq "AC-115 Status" "$(last push-live '.data.status')" confirmed
-eq "AC-121 rescue_url" "$(last push-live '.data.rescue_url')" "$SOURCE_URL/wp-content/plugins/wpsync-agent/rescue.php"
+RESCUE_A="$(last push-live '.data.rescue_url')"
+match "AC-121/AC-132 rescue_url ist der Stub im Webroot" "$RESCUE_A" "^$SOURCE_URL/wpsync-rescue-[a-f0-9]{32}\.php\$"
+eq "AC-134 Stub bleibt nach confirm 10 Minuten" "$(stubs)" 1
 eq "AC-127 Felder des Ergebnisses" "$(last push-live '.data | keys | join(" ")')" "push_id rescue_url status target units"
 ok "AC-115 Live hat den lokalen Stand" cmp -s "$THEME/index.php" "$WPC/$THEME_REL/index.php"
 no "AC-115 Baseline fortgeschrieben" test "$(unit_base "$THEME_REL")" = "$BEFORE_LIVE"
@@ -323,7 +328,7 @@ ok "AC-115 Journal im Site-Ordner" test -s "$SITE/.wpsync/pushes/$PUSH_A.json"
 jrun pushes s1 pushes "$SLUG" "${C[@]}" --json
 eq "AC-121 pushes: eigener Push mit Journal" \
   "$(last pushes ".data.pushes[] | select(.push_id == \"$PUSH_A\") | [.journal, .rescue_url] | @tsv")" \
-  "true"$'\t'"$SOURCE_URL/wp-content/plugins/wpsync-agent/rescue.php"
+  "true"$'\t'"$RESCUE_A"
 STG_ID="$(last push-staging-second '.data.push_id')"
 mv "$SITE/.wpsync/pushes/$STG_ID.json" "$E2E/stg-journal.json" # wie ein Push von einem anderen Gerät
 sleep 5 # Bind-Mount-Cache (OrbStack): der Container soll das verschobene Journal nicht mehr sehen
@@ -406,6 +411,29 @@ ok "AC-116 Journal angewandt" sh -c "jq -e .applied '$SITE/.wpsync/pushes/$(last
 ok "AC-116 Live hat den Stand" grep -q "e2e-marker v$MARK" "$WPC/$THEME_REL/index.php"
 rm "$GITDIR/HEAD"
 mv "$E2E/HEAD.e2e" "$GITDIR/HEAD"
+
+echo "== B1/AC-132/AC-134: PHP unter wp-content/plugins gesperrt wie iThemes Security"
+cat > "$WPC/plugins/.htaccess" <<'EOF'
+# wie iThemes/Solid Security „Disable PHP in Plugins“
+<FilesMatch "\.(php[1-7]?|pht|phtml?|phps)$">
+Require all denied
+</FilesMatch>
+EOF
+eq "B1 Sperre greift" "$(code -X POST --data action=ping "$SOURCE_URL/wp-content/plugins/wpsync-agent/rescue.php")" 403
+mark 31
+jrun push-b1 s1 push "$SLUG" code "$THEME_REL" "${C[@]}" --yes --json
+eq "AC-132 Push trotz Sperre: Exit 0" "$RC" 0
+eq "AC-132 Status" "$(last push-b1 '.data.status')" confirmed
+ok "AC-132 Live hat v31" grep -q 'e2e-marker v31' "$WPC/$THEME_REL/index.php"
+B1_URL="$(last push-b1 '.data.rescue_url')"
+match "AC-132 rescue_url" "$B1_URL" "^$SOURCE_URL/wpsync-rescue-[a-f0-9]{32}\.php\$"
+eq "AC-132 Stub antwortet trotz Sperre" "$(curl -s -X POST --data action=ping "$B1_URL")" '{"ok":true}'
+no "AC-135 Stub nennt keinen Serverpfad" grep -q "$PUB" "$PUB/$(basename "$B1_URL")"
+# 10 Minuten vorspulen: der Stub-Zeitstempel wird zurückdatiert, dann räumt der Cron-Lauf auf.
+(cd "$SRC" && ddev wp eval '$s = WpSync\Store::getState("rescue_stub"); $s["touched"] = time() - 700; WpSync\Store::setState("rescue_stub", $s); WpSync\Push::maintain();' >/dev/null)
+eq "AC-134 Stub nach dem Aufräumen weg" "$(stubs)" 0
+eq "AC-134 Notfallweg danach 404" "$(code -X POST --data action=ping "$B1_URL")" 404
+rm "$WPC/plugins/.htaccess"
 
 echo "== S-8: der Mail-Riegel geht nie nach Live"
 mkdir -p "$DOCROOT/wp-content/mu-plugins"
