@@ -704,7 +704,7 @@ func (a *app) cmdPull(args []string) error {
 		opts.Progress = a.jw.Phase
 	}
 	if *dryRun {
-		return a.status(opts, site)
+		return a.status(opts, site, true)
 	}
 	if err := pull.Run(opts); err != nil {
 		return pullError(err, site)
@@ -744,17 +744,21 @@ func (a *app) cmdStatus(args []string) error {
 		opts.Docroot = filepath.Clean(*df.docroot)
 		opts.SiteDir = filepath.Dir(opts.Docroot)
 	}
-	return a.status(opts, site)
+	return a.status(opts, site, false)
 }
 
-// status prints the changes since the last pull, or returns them as JSON data.
-func (a *app) status(opts pull.Options, site *sites.Site) error {
+// status prints the changes since the last pull, or returns them as JSON data. For pull --dry-run
+// (dryRun) the JSON says "dry_run" and that nothing was pulled, like push --dry-run.
+func (a *app) status(opts pull.Options, site *sites.Site, dryRun bool) error {
 	if !a.json {
 		return pullError(pull.Status(opts), site)
 	}
 	res, err := pull.StatusReport(opts)
 	if err != nil {
 		return pullError(err, site)
+	}
+	if dryRun {
+		res.MarkDryRun()
 	}
 	a.data = res
 	return nil
