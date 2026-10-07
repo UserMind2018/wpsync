@@ -74,6 +74,31 @@ function wpsync_staging_login_token(array $query, string $requestUri, string $st
 }
 
 /**
+ * Upload-Ordner der Kopie (Leitplanke 4), egal was in der Datenbank steht: ein absolutes upload_path
+ * von Live zeigte sonst auf die Uploads von Live, und Löschen oder Neuberechnen auf Staging träfe
+ * Live. Die Adresse liegt unter der Kopie, damit fehlende Medien per .htaccess von Live kommen.
+ * Ein Unterordner bleibt, solange er nicht aus dem Ordner herausführt.
+ *
+ * @param mixed $dirs Ergebnis von wp_upload_dir()
+ * @return array<mixed>
+ */
+function wpsync_staging_upload_dir($dirs, string $contentDir, string $home): array
+{
+    $dirs   = is_array($dirs) ? $dirs : [];
+    $subdir = isset($dirs['subdir']) && is_string($dirs['subdir']) ? $dirs['subdir'] : '';
+    if ($subdir !== '' && (preg_match('#^(/[^/\\\\\0]+)+\z#', $subdir) !== 1 || preg_match('#/\.\.?(/|\z)#', $subdir) === 1)) {
+        $subdir = '';
+    }
+    $dirs['basedir'] = rtrim($contentDir, '/') . '/uploads';
+    $dirs['baseurl'] = rtrim($home, '/') . '/wp-content/uploads';
+    $dirs['subdir']  = $subdir;
+    $dirs['path']    = $dirs['basedir'] . $subdir;
+    $dirs['url']     = $dirs['baseurl'] . $subdir;
+    $dirs['error']   = $dirs['error'] ?? false;
+    return $dirs;
+}
+
+/**
  * Zugangsprüfung, fail-closed: wirft StagingAccess (Zustandsdatei nicht zu öffnen), ist das eine
  * Ablehnung – nie ein Durchlassen und nie ein Fatal.
  *
@@ -246,6 +271,11 @@ add_action('requests-requests.before_redirect', static function ($location) use 
     $class = class_exists('\WpOrg\Requests\Exception') ? '\WpOrg\Requests\Exception' : '\Requests_Exception'; // vor WordPress 6.2
     throw new $class('wpsync Staging: Weiterleitung gesperrt (' . $why . ').', 'wpsync_staging_blocked');
 }, 0, 1);
+
+// Leitplanke 4: nach jedem Plugin – Uploads der Kopie nie im Ordner von Live.
+add_filter('upload_dir', static function ($dirs): array {
+    return wpsync_staging_upload_dir($dirs, WP_CONTENT_DIR, defined('WP_HOME') ? (string) WP_HOME : '');
+}, PHP_INT_MAX);
 
 // noindex (AC-93) – zusätzlich zum Header der .htaccess.
 add_filter('wp_robots', static function (array $robots): array {

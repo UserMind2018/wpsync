@@ -30,6 +30,10 @@ function add_filter(...$args): void {}
 function add_action(...$args): void {}
 require __DIR__ . '/mu-plugins/00-wpsync-staging.php';
 $access = new \WpSync\StagingAccess($argv[1]);
+if ($argv[1] === 'uploads') {
+    echo "\n" . json_encode(wpsync_staging_upload_dir(json_decode($argv[2], true), $argv[3], $argv[4]));
+    exit;
+}
 if ($argv[1] === 'headers') {
     echo "\n" . json_encode(wpsync_staging_headers());
     exit;
@@ -119,7 +123,8 @@ PHP);
         ] as $needle) {
             $this->assertStringContainsString($needle, $src, $needle);
         }
-        $this->assertSame(3, substr_count($src, 'PHP_INT_MAX'), 'mail filters run after every other plugin');
+        $this->assertSame(4, substr_count($src, 'PHP_INT_MAX'), 'mail and upload filters run after every other plugin');
+        $this->assertStringContainsString("add_filter('upload_dir'", $src);
         $this->assertSame('wpsync_stg', StagingAccess::COOKIE);
         $this->assertSame('blocked@mailguard.invalid', StagingHosts::SINK);
     }
@@ -215,6 +220,59 @@ PHP);
         $login = substr($src, (int) strpos($src, 'function wpsync_staging_login('));
         $this->assertLessThan(strpos($login, 'wp_safe_redirect('), strpos($login, 'wpsync_staging_headers()'), 'before the redirect');
         $this->assertStringNotContainsString("\$_GET['wpsync_login']", $src, 'the token is read in one place only');
+    }
+
+    /** H1, Leitplanke 4: ein absolutes upload_path von Live führt nie in die Uploads von Live. */
+    public function testUploadsStayInsideTheCopy(): void
+    {
+        $this->withClasses();
+        $copy = '/srv/www/wpsync-staging-0123456789ab/wp-content';
+        $home = 'https://kunde.example/wpsync-staging-0123456789ab';
+        $live = [
+            'path'    => '/srv/www/wp-content/uploads/2024/05',
+            'url'     => 'https://kunde.example/wp-content/uploads/2024/05',
+            'subdir'  => '/2024/05',
+            'basedir' => '/srv/www/wp-content/uploads',
+            'baseurl' => 'https://kunde.example/wp-content/uploads',
+            'error'   => false,
+        ];
+        $this->assertSame([
+            'path'    => $copy . '/uploads/2024/05',
+            'url'     => $home . '/wp-content/uploads/2024/05',
+            'subdir'  => '/2024/05',
+            'basedir' => $copy . '/uploads',
+            'baseurl' => $home . '/wp-content/uploads',
+            'error'   => false,
+        ], $this->uploads($live, $copy . '/', $home . '/'));
+
+        // Ein Unterordner, der herausführt, fällt weg – lieber der Ordner der Kopie als einer von Live.
+        foreach (['/../../../wp-content/uploads', '/2024/..', '/./x', '2024/05', '/2024//05', '/2024/05/', "/a\\..\\b"] as $subdir) {
+            $dirs = $this->uploads(['subdir' => $subdir] + $live, $copy, $home);
+            $this->assertSame($copy . '/uploads', $dirs['path'], $subdir);
+            $this->assertSame('', $dirs['subdir'], $subdir);
+        }
+        $woo = $this->uploads(['subdir' => '/woocommerce_uploads/2024/05'] + $live, $copy, $home);
+        $this->assertSame($copy . '/uploads/woocommerce_uploads/2024/05', $woo['path']);
+
+        $broken = $this->uploads('kaputt', $copy, $home);
+        $this->assertSame($copy . '/uploads', $broken['path']);
+        $this->assertFalse($broken['error']);
+    }
+
+    /**
+     * @param mixed $dirs
+     * @return array<string, mixed>
+     */
+    private function uploads($dirs, string $contentDir, string $home): array
+    {
+        $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($this->root . '/run.php');
+        foreach (['uploads', (string) json_encode($dirs), $contentDir, $home] as $arg) {
+            $cmd .= ' ' . escapeshellarg($arg);
+        }
+        exec($cmd . ' 2>&1', $out);
+        $result = json_decode((string) end($out), true);
+        $this->assertIsArray($result, implode("\n", $out));
+        return $result;
     }
 
     public function testDeniesWithoutItsClasses(): void

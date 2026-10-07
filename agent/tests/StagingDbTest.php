@@ -486,7 +486,10 @@ final class StagingDbTest extends TestCase
         $this->assertContains("UPDATE `stgabc123_options` SET `option_value` = '" . addslashes(serialize(['enabled' => 'no', 'title' => 'Karte'])) . "' WHERE `option_name` = 'woocommerce_stripe_settings'", $writes);
         $this->assertContains("UPDATE `stgabc123_options` SET `option_value` = '" . addslashes(serialize(['title' => 'ohne enabled', 'enabled' => 'no'])) . "' WHERE `option_name` = 'woocommerce_my-pay_settings'", $writes);
         $this->assertContains("UPDATE `stgabc123_wc_webhooks` SET `status` = 'paused' WHERE `status` <> 'paused'", $writes);
-        $this->assertCount(5, $writes);
+        // Leitplanke 4: kein Upload-Ordner von Live
+        $this->assertContains("UPDATE `stgabc123_options` SET `option_value` = '' WHERE `option_name` = 'upload_path'", $writes);
+        $this->assertContains("UPDATE `stgabc123_options` SET `option_value` = '' WHERE `option_name` = 'upload_url_path'", $writes);
+        $this->assertCount(7, $writes);
         $this->assertNotContains("SELECT `option_value` FROM `stgabc123_options` WHERE `option_name` = 'woocommerce_bacs_settings'", $this->db->queries);
     }
 
@@ -498,7 +501,7 @@ final class StagingDbTest extends TestCase
 
         $writes = $this->db->writes();
         $this->assertContains("UPDATE `stgabc123_options` SET `option_value` = 'a:0:{}' WHERE `option_name` = 'active_plugins'", $writes);
-        $this->assertCount(2, $writes);
+        $this->assertCount(4, $writes);
     }
 
     /** Ein Lesefehler darf weder Plugins noch Webhooks aktiv lassen. */

@@ -462,6 +462,17 @@ ok "5.5 Hinweis in der Admin-Leiste nennt Live" grep -qF "STAGING – Kopie von 
 eq "AC-86 Seite der Kopie" "$(code -b "$JAR" "$STG_URL/kontakt/")" 200
 eq "AC-86 fehlende Medien kommen von Live" "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$JAR" "$STG_URL/wp-content/uploads/2020/01/live-only.jpg")" \
   "$SOURCE_URL/wp-content/uploads/2020/01/live-only.jpg"
+# H1, Leitplanke 4: ein absolutes upload_path (wie von Live mitgebracht) zeigt nicht auf die Uploads
+# von Live – und ein Medium, das auf Staging gelöscht wird, bleibt auf Live.
+eq "Leitplanke 4: upload_path der Kopie geleert" "$(SQL "SELECT option_value FROM ${STG}options WHERE option_name = 'upload_path'")" ""
+stg option update upload_path /var/www/html/public/wp-content/uploads >/dev/null
+stg option update upload_url_path "$SOURCE_URL/wp-content/uploads" >/dev/null
+eq "Leitplanke 4: Uploads der Kopie trotz absolutem upload_path" "$(stg eval '$u = wp_upload_dir(null, false); echo $u["basedir"], " ", $u["baseurl"];')" \
+  "/var/www/html/public/$STG_DIR/wp-content/uploads $STG_URL/wp-content/uploads"
+stg eval '$id = wp_insert_attachment(["post_mime_type" => "image/jpeg", "post_title" => "e2e-h1", "post_status" => "inherit"], "2020/01/live-only.jpg"); wp_delete_attachment($id, true);' >/dev/null
+ok "Leitplanke 4: Medium auf Staging gelöscht, Datei auf Live bleibt" test -f "$WPC/uploads/2020/01/live-only.jpg"
+stg option update upload_path '' >/dev/null
+stg option update upload_url_path '' >/dev/null
 
 echo "== AC-87: serialisierte Werte und Elementor-JSON"
 eq "AC-87 serialisierte Option" "$(stg eval '$v = get_option("e2e_serialized"); echo is_array($v) && strpos($v["url"], "/'"$STG_DIR"'/x") !== false && strpos($v["list"][0], "'"$STG_DIR"'") !== false ? "ok" : "bad";')" ok

@@ -301,6 +301,9 @@ final class StagingDb
         global $wpdb;
         $options = $guard->table($guard->stagingPrefix() . 'options');
         self::setOption($guard, $options, 'blog_public', '0');
+        // Leitplanke 4: ein absoluter Upload-Ordner von Live gälte sonst auch für die Kopie (Riegel: upload_dir).
+        self::setOption($guard, $options, 'upload_path', '');
+        self::setOption($guard, $options, 'upload_url_path', '');
         self::setOption($guard, $options, 'active_plugins', serialize(self::activePlugins(self::arrayOption($guard, $options, 'active_plugins') ?? [], $scope)));
         foreach (self::gatewayIds(self::arrayOption($guard, $options, 'woocommerce_gateway_order') ?? []) as $id) {
             $name     = 'woocommerce_' . $id . '_settings';
