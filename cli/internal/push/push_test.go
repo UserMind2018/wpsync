@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -26,6 +27,10 @@ const (
 	// testStaging is the folder of the staging copy on the fake site.
 	testStaging = "/wpsync-staging-0123456789ab"
 )
+
+var stubPath = regexp.MustCompile(`^/wpsync-rescue-[a-f0-9]{32}\.php$`)
+
+func isRescue(p string) bool { return p == "/rescue.php" || stubPath.MatchString(p) }
 
 // fakeSite plays agent, frontend and rescue.php of one site.
 type fakeSite struct {
@@ -50,6 +55,11 @@ type fakeSite struct {
 	rescueErr string   // error of rescue.php when rescue != 200; empty: "restore failed"
 	rbCode    string   // error code of /push/rollback when rollback != 200; empty: wpsync_push_state
 	health    []string // extra pages the agent names for the health check
+	stub      string   // path of the rescue stub the agent names when asked; empty: /rescue.php
+	realStub  string   // path only the real begin names (the stub of the dry run was tidied away)
+	blocked   bool     // /rescue.php (the plugin folder) answers 403, as with iThemes Security
+	hardening []string // rescue.hardening
+	pings     []string // paths of every rescue ping that reached the script
 
 	committed  bool
 	rolledBack bool
@@ -96,7 +106,7 @@ func newFakeSite(t *testing.T) *fakeSite {
 }
 
 func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("rest_route") == "" && r.URL.Path != "/rescue.php" {
+	if r.URL.Query().Get("rest_route") == "" && !isRescue(r.URL.Path) {
 		f.cookies = append(f.cookies, r.URL.Path+" "+r.Header.Get("Cookie"))
 	}
 	if strings.HasPrefix(r.URL.Path, testStaging) { // the staging copy: access cookie or 403
@@ -124,9 +134,15 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("<html>staging</html>"))
 		return
 	}
-	if r.URL.Path == "/rescue.php" {
+	if isRescue(r.URL.Path) {
+		if f.blocked && r.URL.Path == "/rescue.php" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("<html>Forbidden</html>"))
+			return
+		}
 		r.ParseForm()
 		if r.PostForm.Get("action") == "ping" {
+			f.pings = append(f.pings, r.URL.Path)
 			w.Write([]byte(`{"ok":true}`))
 			return
 		}
@@ -191,7 +207,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		res := agentapi.PushBegin{
 			AgentVersion: f.version, WindowOpen: f.window,
 			HealthURLs: append([]string{f.srv.URL + "/", f.srv.URL + "/wp-login.php"}, f.health...),
-			Rescue:     agentapi.PushRescue{URL: f.srv.URL + "/rescue.php"},
+			Rescue:     agentapi.PushRescue{URL: f.srv.URL + f.rescuePath(req), Hardening: f.hardening},
 		}
 		if AtLeast(f.version, "0.5.0") {
 			res.Target = req.Target
@@ -311,6 +327,17 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.t.Errorf("unexpected route %s", route)
 	}
+}
+
+// rescuePath is where the agent answers rescue.php for this begin (Spec Stufe 2, 12).
+func (f *fakeSite) rescuePath(req agentapi.PushBeginRequest) string {
+	switch {
+	case req.RescueStub && !req.Dry && f.realStub != "":
+		return f.realStub
+	case req.RescueStub && f.stub != "":
+		return f.stub
+	}
+	return "/rescue.php"
 }
 
 // restoreCopy puts the units of the last commit back as they were: a rollback renames the
@@ -927,5 +954,96 @@ func TestShowPath(t *testing.T) {
 		if got := showPath(in); got != want {
 			t.Errorf("showPath(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// Spec Stufe 2, 12 (B1): der Probelauf fordert den Stub an; gepingt und ins Journal geschrieben wird er.
+func TestRunUsesTheRescueStubWhenPluginsAreBlocked(t *testing.T) {
+	f := newFakeSite(t)
+	f.blocked = true
+	f.stub = "/wpsync-rescue-" + strings.Repeat("a", 32) + ".php"
+	o, siteDir, out := localSite(t, f)
+	var res Result
+	o.Report = &res
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !f.begins[0].RescueStub || !f.begins[1].RescueStub {
+		t.Errorf("begins must ask for the stub: %+v", f.begins)
+	}
+	if got := strings.Join(f.pings, " "); got != f.stub {
+		t.Errorf("pings = %s", got)
+	}
+	j, err := LoadJournal(siteDir, testID)
+	if err != nil || j.RescueURL != f.srv.URL+f.stub {
+		t.Errorf("journal = %+v, %v", j, err)
+	}
+	if res.RescueURL != f.srv.URL+f.stub {
+		t.Errorf("rescue_url = %s", res.RescueURL)
+	}
+}
+
+// R3: --dry-run legt auf dem Server nichts an, auch keinen Stub.
+func TestRunDryRunDoesNotAskForTheStub(t *testing.T) {
+	f := newFakeSite(t)
+	o, _, _ := localSite(t, f)
+	o.DryRun = true
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	if f.begins[0].RescueStub {
+		t.Error("a dry run must not ask for a stub")
+	}
+}
+
+// AC-137: der echte Begin nennt einen neuen Stub – geprüft vor dem ersten Upload, im Journal.
+func TestRunPingsANewStubOfTheRealBegin(t *testing.T) {
+	f := newFakeSite(t)
+	f.stub = "/wpsync-rescue-" + strings.Repeat("a", 32) + ".php"
+	f.realStub = "/wpsync-rescue-" + strings.Repeat("b", 32) + ".php"
+	o, siteDir, out := localSite(t, f)
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := strings.Join(f.pings, " "); got != f.stub+" "+f.realStub {
+		t.Errorf("pings = %s", got)
+	}
+	if j, err := LoadJournal(siteDir, testID); err != nil || j.RescueURL != f.srv.URL+f.realStub {
+		t.Errorf("journal = %+v, %v", j, err)
+	}
+}
+
+// AC-137: ist der Rückweg des echten Begin gesperrt, geht kein Byte auf die Site.
+func TestRunStopsBeforeTheUploadWhenTheNewRescueIsBlocked(t *testing.T) {
+	f := newFakeSite(t)
+	f.stub = "/wpsync-rescue-" + strings.Repeat("a", 32) + ".php"
+	f.realStub = "/rescue.php"
+	f.blocked = true
+	o, _, _ := localSite(t, f)
+
+	if err := Run(o); !errors.Is(err, ErrRescueUnreachable) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin" {
+		t.Errorf("routes = %s", got)
+	}
+}
+
+// AC-136
+func TestRunNamesHardeningPluginsWhenRescueIsBlocked(t *testing.T) {
+	f := newFakeSite(t)
+	f.blocked = true
+	f.hardening = []string{"better-wp-security"}
+	o, _, _ := localSite(t, f)
+
+	err := Run(o)
+	var blocked *RescueBlockedError
+	if !errors.As(err, &blocked) || !errors.Is(err, ErrRescueUnreachable) || len(blocked.Plugins) != 1 || blocked.Plugins[0] != "better-wp-security" {
+		t.Fatalf("err = %#v", err)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin" {
+		t.Errorf("routes = %s", got)
 	}
 }

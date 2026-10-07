@@ -52,6 +52,53 @@ func RescuePing(hc *http.Client, rescueURL string) error {
 	return nil
 }
 
+// RescueBlockedError: rescue.php did not answer and the agent names active plugins that can block
+// PHP below wp-content (Spec Stufe 2, 12, R7). It still is ErrRescueUnreachable.
+type RescueBlockedError struct {
+	Plugins []string // folder names as the agent reports them
+	Err     error
+}
+
+func (e *RescueBlockedError) Error() string {
+	names := make([]string, len(e.Plugins))
+	for i, p := range e.Plugins {
+		names[i] = agentapi.Printable(p)
+	}
+	return fmt.Sprintf("%v (aktiv: %s)", e.Err, strings.Join(names, ", "))
+}
+
+func (e *RescueBlockedError) Unwrap() error { return e.Err }
+
+// HardeningHint says where an active plugin blocks PHP below wp-content.
+func HardeningHint(plugins []string) string {
+	var out []string
+	for _, p := range plugins {
+		switch p {
+		case "better-wp-security", "ithemes-security-pro":
+			out = append(out, "Solid Security/iThemes Security: Advanced → System Tweaks → „Disable PHP in Plugins“")
+		case "sucuri-scanner":
+			out = append(out, "Sucuri Security: Settings → Hardening (PHP-Ausführung in wp-content)")
+		default:
+			out = append(out, agentapi.Printable(p))
+		}
+	}
+	return strings.Join(out, "; ")
+}
+
+// rescueReady checks the way back before anything is created or swapped (AC-66).
+func rescueReady(o Options, r agentapi.PushRescue) error {
+	if err := RescueAllowed(o.Site.URL, r.URL); err != nil {
+		return err
+	}
+	if err := RescuePing(o.HTTP, r.URL); err != nil {
+		if len(r.Hardening) > 0 {
+			return &RescueBlockedError{Plugins: r.Hardening, Err: err}
+		}
+		return err
+	}
+	return nil
+}
+
 // RescueRollback restores the snapshot of a push, bypassing WordPress.
 func RescueRollback(hc *http.Client, rescueURL, pushID, key string) error {
 	_, err := rescuePost(hc, rescueURL, url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}})

@@ -538,7 +538,7 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		copied, known = o.stagingStamps(siteDir)
 	}
-	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true}
+	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true, RescueStub: !o.DryRun}
 	names := make([]string, len(units))
 	for i := range units {
 		if err := units[i].Hash(docroot); err != nil {
@@ -622,10 +622,7 @@ func Run(o Options) error {
 		}
 	}
 
-	if err := RescueAllowed(o.Site.URL, plan.Rescue.URL); err != nil {
-		return err
-	}
-	if err := RescuePing(o.HTTP, plan.Rescue.URL); err != nil {
+	if err := rescueReady(o, plan.Rescue); err != nil {
 		return err
 	}
 	acc, urls, err := o.healthPages(plan.HealthURLs)
@@ -649,15 +646,24 @@ func Run(o Options) error {
 	if len(begin.Units) != len(units) {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
 	}
-	journal := NewJournal(begin.PushID, plan.Rescue.URL, begin.Rescue.Salt, base, names)
+	expires := func(err error) error {
+		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
+	}
+	// The real begin names the stub of the dry run again – unless it was tidied away meanwhile (a
+	// long confirmation prompt). Then the new way back is checked before the first byte (Spec 12, R4).
+	rescueURL := plan.Rescue.URL
+	if begin.Rescue.URL != "" && begin.Rescue.URL != rescueURL {
+		if err := rescueReady(o, begin.Rescue); err != nil {
+			return expires(err)
+		}
+		rescueURL = begin.Rescue.URL
+	}
+	journal := NewJournal(begin.PushID, rescueURL, begin.Rescue.Salt, base, names)
 	journal.Target = target
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
-	report.PushID, report.RescueURL = begin.PushID, plan.Rescue.URL
-	expires := func(err error) error {
-		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
-	}
+	report.PushID, report.RescueURL = begin.PushID, rescueURL
 	for i := range units {
 		if err := o.interrupted(); err != nil {
 			return expires(err)
