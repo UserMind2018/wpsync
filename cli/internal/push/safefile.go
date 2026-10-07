@@ -93,6 +93,9 @@ func openUnit(docroot, unit string, want fs.FileInfo) (*os.Root, fs.FileInfo, er
 
 // openFile opens a file of the unit without following a symlink and checks that it is still the
 // regular file the scan saw: same inode as a moment ago, same size and mtime as in the scan.
+// testHookBeforeOpen runs, if set, between the Lstat and the open of a file. Only tests set it.
+var testHookBeforeOpen func()
+
 func openFile(root *os.Root, unit, rel string, want LocalFile) (*os.File, error) {
 	changed := fmt.Errorf("%s/%s %w", unit, rel, ErrChanged)
 	name := filepath.FromSlash(rel)
@@ -100,7 +103,10 @@ func openFile(root *os.Root, unit, rel string, want LocalFile) (*os.File, error)
 	if err != nil || !before.Mode().IsRegular() {
 		return nil, changed
 	}
-	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if testHookBeforeOpen != nil {
+		testHookBeforeOpen()
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrPermission) {
 		return nil, &UnreadableError{Path: unreadablePath(unit, rel)}
 	}

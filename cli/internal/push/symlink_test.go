@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/usermind/wpsync/internal/baseline"
 )
@@ -233,5 +235,47 @@ func TestHashRefusesADirectorySwappedForASymlink(t *testing.T) {
 	replaceWithLink(t, filepath.Join(docroot, "wp-content/plugins/x/inc"), filepath.Join(other, "public/wp-content/plugins/x"))
 	if err := units[0].Hash(docroot); err == nil {
 		t.Fatal("hashed a file outside the unit")
+	}
+}
+
+// Security-Audit F-1: wird die Datei zwischen Lstat und open gegen eine FIFO getauscht, blockiert
+// open(2) ohne O_NONBLOCK für immer. openFile meldet ErrChanged und kehrt zurück.
+func TestOpenFileSwappedForFifoDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.php")
+	if err := os.WriteFile(path, []byte("<?php"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	testHookBeforeOpen = func() {
+		os.Remove(path)
+		if err := syscall.Mkfifo(path, 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { testHookBeforeOpen = nil })
+	done := make(chan error, 1)
+	go func() {
+		f, err := openFile(root, "plugins/x", "a.php", LocalFile{Size: info.Size(), MTime: info.ModTime().Unix()})
+		if f != nil {
+			f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrChanged) {
+			t.Fatalf("err = %v, want ErrChanged", err)
+		}
+	case <-time.After(10 * time.Second):
+		if f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			f.Close()
+		}
+		t.Fatal("openFile hangs on a FIFO")
 	}
 }

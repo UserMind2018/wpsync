@@ -14,8 +14,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// ErrNotRegular: the path is not a regular file (a FIFO, a socket, a device) and is not opened.
+var ErrNotRegular = errors.New("keine reguläre Datei")
 
 // ErrSymlink: a folder on the way is a symlink (or no folder); wpsync neither writes nor deletes there.
 var ErrSymlink = errors.New("symbolischer Link (oder Datei statt Ordner) im Pfad – wpsync schreibt, liest und löscht dort nicht")
@@ -203,14 +207,23 @@ func Open(r *os.Root, rel string) (*os.File, error) {
 	if info.Mode()&fs.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s: %w", rel, ErrSymlink)
 	}
-	f, err := r.Open(rel)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", rel, ErrNotRegular)
+	}
+	// O_NONBLOCK: a FIFO swapped in after the Lstat must not block open(2) forever (F-1).
+	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	// Swapped between Lstat and Open: the open file must be the one Lstat saw.
-	if now, err := f.Stat(); err != nil || !os.SameFile(info, now) {
+	// Swapped between Lstat and Open: the open file must be the one Lstat saw, and a regular file.
+	now, err := f.Stat()
+	if err != nil || !os.SameFile(info, now) {
 		f.Close()
 		return nil, fmt.Errorf("%s changed while opening: %w", rel, ErrSymlink)
+	}
+	if !now.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s: %w", rel, ErrNotRegular)
 	}
 	return f, nil
 }
