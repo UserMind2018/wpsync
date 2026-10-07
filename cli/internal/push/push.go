@@ -324,7 +324,9 @@ func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) 
 }
 
 // planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
-func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string]any {
+// skipped are local units new to the baseline that were not named (U14), missing the units of the
+// baseline that are gone locally and stay on the site (Spec Container-Push C7).
+func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string) map[string]any {
 	list := make([]map[string]any, len(units))
 	for i, u := range units {
 		p := plan.Units[i]
@@ -337,7 +339,8 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string
 			"old_version": p.Version, "new_version": u.Version, "conflicts": conflicts, "writable": p.Writable,
 		}
 	}
-	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list}
+	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list,
+		"skipped_new": append([]string{}, skipped...), "missing_locally": append([]string{}, missing...)}
 }
 
 // lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site –
@@ -510,7 +513,7 @@ func Run(o Options) error {
 				"    Bewusst --force, oder die Kopie neu von Live holen: wpsync staging refresh %s --code\n", u.Path, o.Site.Name)
 		}
 	}
-	o.event("plan", planEvent(units, plan, target))
+	o.event("plan", planEvent(units, plan, target, skipped, deleted))
 	if readonly {
 		return ErrNotWritable
 	}
