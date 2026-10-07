@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [0.5.0] – YYYY-MM-DD · Agent 0.5.0
+## [0.5.0] – 2026-10-08 · Agent 0.5.0
 
 **Nur die CLI ändert sich.** Agent 0.5.0 bleibt; Push nach Live braucht weiter Agent ≥ 0.4.0,
 nach Staging ≥ 0.5.0.
@@ -34,12 +34,17 @@ nach Staging ≥ 0.5.0.
   `not_readable` statt „hat sich während des Pushs geändert“; nicht lesbare Ordner anderer
   Einheiten brechen den Scan nicht mehr ab
 - git für das interne Repo nur noch aus absoluten `PATH`-Einträgen
+- `pull --dry-run --json`: `data.pulled` ist `false` und `data.status` ist `"dry_run"` (wie bei
+  `push --dry-run`); bisher stand dort `pulled: true`, sobald die Site schon einmal gezogen war.
+  `status --json` bleibt unverändert, `last_pull` bleibt auch beim Trockenlauf
 
 ### Sicherheit
 - Schnappschuss ohne Arbeitsverzeichnis (Review 3, M-1): wpsync liest `wp-content` selbst, ohne
   Symlinks zu folgen, und schreibt per `git fast-import`. Ein während des Schnappschusses gegen
   einen Symlink getauschter Ordner bringt keine Datei von ausserhalb des Docroot mehr in die
-  Historie. Gilt für Pull und Push; `<site>/.gitignore` und der Index des internen Repos werden
+  Historie. Eine gegen eine FIFO getauschte Datei lässt den Schnappschuss und den Push nicht mehr
+  hängen (Öffnen mit `O_NONBLOCK`, nur reguläre Dateien); nach einem abgebrochenen Import räumt
+  wpsync `fast_import_crash_*` aus dem internen Repo weg. Gilt für Pull und Push; `<site>/.gitignore` und der Index des internen Repos werden
   nicht mehr geschrieben
 
 ## [0.4.0] – 2026-10-07 · Agent 0.5.0

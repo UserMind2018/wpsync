@@ -11,7 +11,9 @@ import (
 
 // StatusResult is what changed on the source since the last pull (wpsync status --json).
 type StatusResult struct {
-	Pulled       bool          `json:"pulled"`
+	Pulled bool `json:"pulled"`
+	// Status is "dry_run" for pull --dry-run, otherwise empty (status --json has no such key).
+	Status       string        `json:"status,omitempty"`
 	LastPull     *time.Time    `json:"last_pull,omitempty"`
 	Source       string        `json:"source"`
 	FilesChanged []string      `json:"files_changed"`
@@ -28,6 +30,12 @@ type TableChange struct {
 	Name         string `json:"name"`
 	Mode         string `json:"mode"`
 	PreviousMode string `json:"previous_mode"`
+}
+
+// MarkDryRun marks the report as the result of pull --dry-run: nothing was pulled, as with
+// push --dry-run the status says so. LastPull stays.
+func (r *StatusResult) MarkDryRun() {
+	r.Pulled, r.Status = false, "dry_run"
 }
 
 // StatusReport compares the source with the last pull, without transferring content (AC-29).

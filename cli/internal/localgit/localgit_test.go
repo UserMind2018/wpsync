@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1242,5 +1243,69 @@ func TestSnapshotOfAnEmptySiteFolder(t *testing.T) {
 	}
 	if got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-tree", "-r", "--name-only", "HEAD")); !reflect.DeepEqual(got, []string{".gitignore"}) {
 		t.Fatalf("tracked = %v", got)
+	}
+}
+
+// Security-Audit F-1: tauscht die Site eine gelistete Datei nach dem Walk gegen eine FIFO, blockiert
+// open(2) ohne O_NONBLOCK für immer. Der Schnappschuss meldet die Datei als fehlend und kehrt zurück.
+func TestFifoSwappedInDoesNotHangTheSnapshot(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "docroot/wp-content/plugins/a/a.php")
+	write(t, siteDir, "docroot/wp-content/plugins/a/z.php")
+	victim := filepath.Join(siteDir, "docroot/wp-content/plugins/a/a.php")
+	testHookBeforeRead = func(rel string) {
+		if rel != "plugins/a/a.php" {
+			return
+		}
+		os.Remove(victim)
+		if err := syscall.Mkfifo(victim, 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { testHookBeforeRead = nil })
+	var out bytes.Buffer
+	gitDir := TreeGitDir(siteDir)
+	done := make(chan error, 1)
+	go func() { done <- CommitTree(gitDir, siteDir, "docroot", "pull 1", &out) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrIncomplete) {
+			t.Fatalf("err = %v, want ErrIncomplete", err)
+		}
+	case <-time.After(10 * time.Second):
+		// free the blocked open so the goroutine ends
+		if f, err := os.OpenFile(victim, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			f.Close()
+		}
+		t.Fatal("CommitTree hangs on a FIFO")
+	}
+	if !strings.Contains(out.String(), "plugins/a/a.php hat sich während des Schnappschusses geändert") {
+		t.Fatalf("no report:\n%s", out.String())
+	}
+	if got := hostGit(t, "--git-dir="+gitDir, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(got, "plugins/a/z.php") || strings.Contains(got, "plugins/a/a.php") {
+		t.Fatalf("tree:\n%s", got)
+	}
+}
+
+// Security-Audit F-3: bricht der Strom ab, weil eine Datei beim Kopieren kürzer wird, hinterlässt
+// git fast-import einen fast_import_crash_* im Repo. CommitTree räumt ihn weg.
+func TestFailedImportLeavesNoCrashReport(t *testing.T) {
+	siteDir := t.TempDir()
+	write(t, siteDir, "docroot/wp-content/plugins/a/a.php")
+	victim := filepath.Join(siteDir, "docroot/wp-content/plugins/a/a.php")
+	os.WriteFile(victim, []byte(strings.Repeat("x", 4096)), 0o644)
+	testHookAfterStat = func(rel string) {
+		if rel == "plugins/a/a.php" {
+			os.Truncate(victim, 10)
+		}
+	}
+	t.Cleanup(func() { testHookAfterStat = nil })
+	gitDir := TreeGitDir(siteDir)
+	err := CommitTree(gitDir, siteDir, "docroot", "pull 1", io.Discard)
+	if err == nil || errors.Is(err, ErrIncomplete) {
+		t.Fatalf("err = %v, want a failure", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(gitDir, "fast_import_crash_*")); len(left) != 0 {
+		t.Fatalf("crash reports left: %v", left)
 	}
 }

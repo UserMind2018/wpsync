@@ -61,6 +61,22 @@ func TestStatusJSONBeforeAndAfterPull(t *testing.T) {
 	}
 }
 
+// B3: pull --dry-run trägt status "dry_run" und pulled=false; status selbst bleibt unverändert.
+func TestPullDryRunJSONIsMarked(t *testing.T) {
+	env(t)
+	ag := newAgent(t)
+	paired(t, "kunde", ag.URL())
+	r := run(t, context.Background(), testSecret+"\n", "pull", "kunde", "--dry-run", "--json", "--secret-stdin")
+	d := requireKeys(t, lastResult(t, r, "pull", 0)["data"], "pulled", "source", "files_changed", "files_deleted", "tables_changed", "requests", "status")
+	if d["pulled"] != false || d["status"] != "dry_run" {
+		t.Errorf("data = %v", d)
+	}
+	r = run(t, context.Background(), testSecret+"\n", "status", "kunde", "--json", "--secret-stdin")
+	if d, _ := lastResult(t, r, "status", 0)["data"].(map[string]any); d["status"] != nil {
+		t.Errorf("status carries status: %v", d)
+	}
+}
+
 // Spec §10: veralteter Agent → Exit 11 mit beiden Versionen im JSON.
 func TestPullJSONAgentOutdated(t *testing.T) {
 	env(t)
