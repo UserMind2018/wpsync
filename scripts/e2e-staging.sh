@@ -309,6 +309,20 @@ jrun staging-status-missing-50 "$WPSYNC" staging status "$TARGET" --json
 eq "6.4 status ohne Kopie: Exit 50" "$RC" 50
 eq "6.4 status ohne Kopie: error.code" "$(last "$JSON/staging-status-missing-50.jsonl" .error.code)" staging_missing
 
+echo "== U44 (Review H2): Staging nur mit offenem Push-Fenster"
+window 0
+for sub in create refresh delete open; do
+  jrun "staging-$sub-window-40" "$WPSYNC" staging "$sub" "$TARGET" --yes --json
+  eq "U44 staging $sub ohne Fenster: Exit 40" "$RC" 40
+  eq "U44 staging $sub ohne Fenster: error.code" "$(last "$JSON/staging-$sub-window-40.jsonl" .error.code)" push_window_closed
+done
+no_staging_left "U44 ohne Fenster"
+eq "U44 manipulierter Client: login ohne Fenster" "$(signed /wpsync/v1/staging/login '{}' -o /dev/null -w '%{http_code}')" 403
+eq "U44 manipulierter Client: begin dry ohne Fenster" "$(signed /wpsync/v1/staging/begin '{"op":"create","dry":true}' -o /dev/null -w '%{http_code}')" 403
+jrun staging-status-no-window "$WPSYNC" staging status "$TARGET" --json
+eq "U44 status ohne Fenster" "$RC" 50
+window "time() + 28800"
+
 echo "== AC-80: staging create lässt Live unverändert"
 T0=$SECONDS
 jrun staging-create "$WPSYNC" staging create "$TARGET" --yes --json
@@ -424,6 +438,7 @@ no "AC-89 Staging-Admin auf Live angelegt" ddev wp user get wpsync --field=ID
 # Abgelaufen: der Link aus --json, 5 Minuten später.
 jrun staging-open "$WPSYNC" staging open "$TARGET" --print --json
 eq "open --json" "$RC" 0
+eq "H2 open --json nennt die Browser-Warnung" "$(last "$JSON/staging-open.jsonl" '.data.warnings | length')" 1
 LINK2="$(last "$E2E/json-raw.tmp" .data.url)"
 no "T1 Token in der gespeicherten JSON-Zeile" grep -qE 'wpsync_login=[0-9a-f]' "$JSON/staging-open.jsonl"
 eq "T1 open --json schreibt nichts auf stderr" "$(wc -c < "$JSON/staging-open.err" | tr -d ' ')" 0
@@ -585,7 +600,7 @@ window 0
 jrun push-staging-window-closed-40 "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 eq "AC-97 ohne Fenster: Exit 40" "$RC" 40
 ok "AC-97 ohne Fenster nichts auf Staging" grep -q 'e2e-marker v1' "$SC/wp-content/themes/e2e-theme/index.php"
-window "time() + 900"
+window "time() + 28800"
 jrun push-staging "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 eq "AC-97 Push nach Staging (erster, ohne --force)" "$RC" 0
 cat "$JSON/push-staging.err"
@@ -638,7 +653,7 @@ ok "AC-100 Riegel unverändert" cmp -s "$ROOT/agent/staging/00-wpsync-staging.ph
 
 echo "== Zusatz 7: wiederholte Pushes nach Staging ohne --force"
 STGTHEME="$SC/wp-content/themes/e2e-theme"
-window "time() + 900"
+window "time() + 28800"
 mark 3
 jrun push-staging-second "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 cat "$JSON/push-staging-second.err"
@@ -791,7 +806,7 @@ eq "Zugang nach refresh" "$(code -b "$JAR" "$STG_URL/")" 200
 "$WPSYNC" staging status "$TARGET" --json > "$E2E/status-refreshed.json"
 eq "Zusatz 7: refresh ohne --code lässt code_copied_at stehen" "$(last "$E2E/status-refreshed.json" .data.code_copied_at)" "$CODE_AT"
 ok "Zusatz 7: refresh ohne --code setzt copied_at neu" test "$(last "$E2E/status-refreshed.json" .data.copied_at)" -gt "$COPIED_AT"
-window "time() + 900"
+window "time() + 28800"
 mark 6
 jrun push-staging-after-refresh "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 cat "$JSON/push-staging-after-refresh.err"
@@ -826,7 +841,7 @@ no "5.8 Arbeitsordner der Pushes in der Kopie" sh -c "find '$SC/wp-content' -max
 # Zusatz 7: nach refresh --code kam der Code neu von Live – die Stempel verfallen, es gilt die Baseline.
 jrun staging-status-recopied "$WPSYNC" staging status "$TARGET" --json
 ok "Zusatz 7: refresh --code setzt code_copied_at neu" test "$(last "$JSON/staging-status-recopied.jsonl" '.data.code_copied_at // 0')" -gt "$CODE_AT"
-window "time() + 900"
+window "time() + 28800"
 run push-staging-after-code.log "$WPSYNC" push "$TARGET" code plugins/e2e-rewrite --to staging --yes
 cat "$E2E/push-staging-after-code.log"
 eq "Zusatz 7: Push nach refresh --code gegen die Baseline ohne --force" "$RC" 0
@@ -934,12 +949,14 @@ echo "== 6.4: Exit 44 während eines Jobs, derselbe Befehl setzt ihn fort"
 rm -f "$JAR"
 [ "$(code -c "$JAR" "$("$WPSYNC" staging open "$TARGET" --print)")" = 302 ] || fail "Zugang zur neuen Kopie"
 eq "Zugang zur neuen Kopie" "$(code -b "$JAR" "$STG_URL/")" 200
-window "time() + 900"
+window "time() + 28800"
 run push-new-copy.log "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes
 eq "erster Push in die neue Kopie ohne --force" "$RC" 0
 ok "Zusatz 7: die Stempel der gelöschten Kopie sind verworfen" hasF "$E2E/push-new-copy.log" "Der Code der Staging-Kopie kam seit dem letzten Push neu von Live"
 eq "Zusatz 7: gemerkt ist nur der Push in die neue Kopie" "$(jq -c '.units | keys' "$STAMPS")" '["themes/e2e-theme"]'
+SQL "UPDATE e2e_wpsync_pairings SET push_until = UNIX_TIMESTAMP() + 900 WHERE key_id = '$KEY'"
 eq "manipulierter Client beginnt delete" "$(signed /wpsync/v1/staging/begin '{"op":"delete"}' -o /dev/null -w '%{http_code}')" 200
+SQL "UPDATE e2e_wpsync_pairings SET push_until = 0 WHERE key_id = '$KEY'"
 locked_out "V7 während delete, gültiges Cookie von vorher" -b "$JAR"
 locked_out "V7 während delete, erfundenes Cookie" -b 'wpsync_stg=x'
 jrun staging-refresh-busy-44 "$WPSYNC" staging refresh "$TARGET" --yes --json
@@ -959,7 +976,7 @@ echo "== AC-103, Zusatz 10: Deaktivieren des Agents löscht die Kopie"
 run create-last.log "$WPSYNC" staging create "$TARGET" --yes "${FAST[@]}"
 [ "$RC" = 0 ] || { cat "$E2E/create-last.log"; fail "create vor dem Deaktivieren"; }
 ok "Kopie vor dem Deaktivieren" sh -c "find '$PUB' -maxdepth 1 -name 'wpsync-staging-*' | grep -q ."
-window "time() + 900"
+window "time() + 28800"
 run push-before-deactivate.log "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes
 eq "Push nach Staging vor dem Deaktivieren" "$RC" 0
 window 0
