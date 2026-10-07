@@ -54,7 +54,9 @@ stg() { (cd "$SRC" && ddev wp --path="/var/www/html/public/$STG_DIR" "$@"); }
 window() { (cd "$SRC" && ddev wp eval "WpSync\\Store::setPushUntil('$KEY_ID', $1);" >/dev/null); }
 mark() { sed -i '' -E "s/e2e-marker v[0-9]+/e2e-marker v$1/" "$THEME/index.php"; MARK="v$1"; } # mark <n>: lokaler Stand des Themes
 git_state() { git --git-dir="$GITDIR" for-each-ref; git --git-dir="$GITDIR" rev-list --all --count; }
-in_git() { git --git-dir="$GITDIR" ls-tree -r --name-only HEAD | grep -q -- "$1"; } # in_git <muster>: Pfad im letzten Schnappschuss
+# in_git <muster>: Pfad im letzten Schnappschuss. Ohne grep -q: das bricht beim ersten Treffer ab,
+# git bekäme SIGPIPE und unter pipefail zählte ein Treffer als Fehlschlag.
+in_git() { git --git-dir="$GITDIR" ls-tree -r --name-only HEAD | grep -- "$1" >/dev/null; }
 stamp_push() { jq -r --arg u "$1" '.units[$u].push_id // "-"' "$STAMPS"; } # stamp_push <einheit>: Push, dessen Stempel gemerkt sind
 conflicts() { jq -c 'select(.event == "plan") | [.data.units[].conflicts[]]' "$1"; }
 state_file() { echo "$PUB/$STG_DIR/wp-content/wpsync-staging.json"; }
