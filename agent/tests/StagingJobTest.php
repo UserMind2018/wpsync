@@ -498,6 +498,58 @@ final class StagingJobTest extends TestCase
         $this->assertStringNotContainsString(StagingConfig::locked(), $this->htaccess());
     }
 
+    /**
+     * code_copied_at nennt, wann der Code der Kopie zuletzt von Live kam: create setzt es, ein reiner
+     * Datenbank-Refresh lässt es stehen, ein Refresh mit Code ändert es – auch der erzwungene nach
+     * code_ok = false, und auch in derselben Sekunde.
+     */
+    public function testCodeCopiedAtFollowsOnlyTheCode(): void
+    {
+        $this->boot();
+        $this->create();
+        $created = $this->record()['code_copied_at'];
+        $this->assertGreaterThan(0, $created);
+        $this->assertSame($this->record()['copied_at'], $created);
+        $this->assertSame($created, Staging::status()->data['code_copied_at']);
+
+        $record = $this->record();
+        $record['copied_at'] = $created - 100; // damit ein Refresh in derselben Sekunde sichtbar wird
+        Store::setState(Staging::STATE, $record);
+        $this->begin('refresh');
+        $this->assertSame(Staging::READY, $this->finish()['status']);
+        $this->assertSame($created, $this->record()['code_copied_at']);
+        $this->assertGreaterThan($created - 100, $this->record()['copied_at']);
+        $this->assertSame($created, Staging::status()->data['code_copied_at']);
+
+        $this->begin('refresh', ['code' => true]);
+        $this->assertSame($created, $this->record()['code_copied_at'], 'erst die fertige Kopie zählt');
+        $this->assertSame(Staging::READY, $this->finish()['status']);
+        $refreshed = $this->record()['code_copied_at'];
+        $this->assertGreaterThan($created, $refreshed);
+
+        $record = $this->record();
+        $record['code_ok'] = false;
+        $record['status']  = Staging::FAILED;
+        Store::setState(Staging::STATE, $record);
+        $this->begin('refresh');
+        $this->assertSame('refresh-code', $this->record()['job']['op']);
+        $this->assertSame(Staging::READY, $this->finish()['status']);
+        $this->assertGreaterThan($refreshed, $this->record()['code_copied_at']);
+        $this->assertSame($this->record()['code_copied_at'], Staging::status()->data['code_copied_at']);
+    }
+
+    /** Ein Datensatz von vor dem Feld meldet 0 – die CLI bindet dann wie bisher an copied_at. */
+    public function testStatusOfAnOlderRecordNamesNoCodeCopy(): void
+    {
+        $this->boot();
+        $this->create();
+        $record = $this->record();
+        unset($record['code_copied_at']);
+        Store::setState(Staging::STATE, $record);
+        $this->assertSame(0, Staging::status()->data['code_copied_at']);
+        $this->assertGreaterThan(0, Staging::status()->data['copied_at']);
+    }
+
     /** Ein refresh, das mitten im Code abbrach, lässt keinen Stand, auf den eine reine Datenbank-Kopie passte. */
     public function testRefreshAfterAnAbortInTheCodeCopiesTheCodeAgain(): void
     {

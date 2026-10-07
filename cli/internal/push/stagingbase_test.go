@@ -135,7 +135,7 @@ func TestStagingStampsLeaveBaselineAndGitAlone(t *testing.T) {
 			t.Errorf("temporary file left: %s", e.Name())
 		}
 	}
-	if s := remembered(t, f, siteDir); s.Copy.URL != f.srv.URL+testStaging || s.Copy.Created != f.copyMade || s.Copy.CopiedAt != f.copyCopied {
+	if s := remembered(t, f, siteDir); s.Copy.URL != f.srv.URL+testStaging || s.Copy.Created != f.copyMade || s.Copy.CopiedAt != f.copyCopied || s.Copy.CodeCopiedAt != 0 {
 		t.Errorf("copy = %+v", s.Copy)
 	}
 
@@ -247,6 +247,61 @@ func TestPushToLiveNeverUsesStagingStamps(t *testing.T) {
 	base, _ = baseline.Load(siteDir)
 	if base.Files["wp-content/plugins/x/main.php"].MTime != 1800000000 {
 		t.Errorf("baseline after the live push = %v", base.Files)
+	}
+}
+
+// A refresh of the database alone leaves the code of the copy: the stamps stay. A refresh with
+// code or a new copy replaces it: they go.
+func TestStampsSurviveADatabaseRefresh(t *testing.T) {
+	site := func() (*fakeSite, Options, string, *bytes.Buffer) {
+		f, o, siteDir, out := copiedSite(t)
+		f.copyCode = f.copyCopied // as after create
+		mustPush(t, o, out)
+		editAgain(t, siteDir)
+		f.ids = []string{secondID}
+		return f, o, siteDir, out
+	}
+	f, o, siteDir, out := site()
+	if s := remembered(t, f, siteDir); s.Copy.CodeCopiedAt != f.copyCode || s.Copy.CopiedAt != 0 {
+		t.Fatalf("copy = %+v, want it bound to code_copied_at", s.Copy)
+	}
+	f.copyCopied += 5000 // staging refresh without --code
+	if err := Run(o); err != nil {
+		t.Fatalf("push after a refresh of the database: %v\n%s", err, out)
+	}
+	if got := f.begins[len(f.begins)-1].Units[0].Base["main.php"].MTime; got != 1800000000 {
+		t.Errorf("base = %d, want the stamps of the first push", got)
+	}
+
+	for name, other := range map[string]func(f *fakeSite){
+		"refresh --code": func(f *fakeSite) { f.copyCopied, f.copyCode = f.copyCopied+5000, f.copyCopied+5000 },
+		"created anew": func(f *fakeSite) {
+			f.copyDir, f.copyMade, f.copyCopied, f.copyCode = "/wpsync-staging-ba9876543210", 1790009000, 1790009100, 1790009100
+		},
+		// The field vanished (agent downgraded): copied_at with the very same number is not the same copy.
+		"field gone": func(f *fakeSite) { f.copyCopied, f.copyCode = f.copyCode, 0 },
+	} {
+		f, o, siteDir, _ := site()
+		other(f)
+		if err := Run(o); !errors.Is(err, ErrConflict) {
+			t.Errorf("%s: err = %v, want the check against the live baseline", name, err)
+		}
+		if _, err := os.Lstat(stampsPath(siteDir)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: stamps of another code copy stayed: %v", name, err)
+		}
+	}
+
+	// An agent before the field: bound to copied_at as before, so every refresh drops the stamps;
+	// once the agent names the field, stamps bound to copied_at are not carried over.
+	f, o, siteDir, out = copiedSite(t)
+	mustPush(t, o, out)
+	if s := remembered(t, f, siteDir); s.Copy.CopiedAt != f.copyCopied || s.Copy.CodeCopiedAt != 0 {
+		t.Fatalf("copy = %+v, want it bound to copied_at", s.Copy)
+	}
+	editAgain(t, siteDir)
+	f.copyCode = f.copyCopied
+	if err := Run(o); !errors.Is(err, ErrConflict) {
+		t.Errorf("agent updated: err = %v, want the check against the live baseline", err)
 	}
 }
 

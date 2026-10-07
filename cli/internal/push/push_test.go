@@ -75,6 +75,7 @@ type fakeSite struct {
 	copyDir    string                                   // folder of the copy; empty: testStaging
 	copyMade   int64                                    // created
 	copyCopied int64                                    // copied_at
+	copyCode   int64                                    // code_copied_at; 0: an agent before the field
 	noStatus   bool                                     // /staging/status fails
 	statuses   int                                      // calls of /staging/status
 	ids        []string                                 // push ids of the next real begins; empty: testID
@@ -163,7 +164,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		if dir == "" {
 			dir = testStaging
 		}
-		json.NewEncoder(w).Encode(agentapi.StagingStatus{Exists: true, Status: "ready", URL: f.srv.URL + dir, Created: f.copyMade, CopiedAt: f.copyCopied})
+		json.NewEncoder(w).Encode(agentapi.StagingStatus{Exists: true, Status: "ready", URL: f.srv.URL + dir, Created: f.copyMade, CopiedAt: f.copyCopied, CodeCopiedAt: f.copyCode})
 		return
 	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))

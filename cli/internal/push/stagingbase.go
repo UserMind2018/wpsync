@@ -37,16 +37,33 @@ const (
 // baseline decides and the file goes.
 var errStagingBase = errors.New("gemerkte Staging-Stempel unbrauchbar")
 
-// copyID names one staging copy as /staging/status describes it. The folder is random per
-// creation; copied_at moves whenever the agent finishes copying from live (create, refresh).
+// copyID names the code of one staging copy as /staging/status describes it. The folder is
+// random per creation; code_copied_at moves whenever the agent has copied the code from live
+// anew (create, refresh --code) and stays for a refresh of the database alone, which leaves the
+// files of the copy as they are. An agent or a copy from before that field names only copied_at,
+// which moves with every refresh: then the stamps are bound to that – stricter, never weaker.
+// Exactly one of the two is set, so a value of one never passes for the other.
 type copyID struct {
-	URL      string `json:"url"`
-	Created  int64  `json:"created"`
-	CopiedAt int64  `json:"copied_at"`
+	URL          string `json:"url"`
+	Created      int64  `json:"created"`
+	CodeCopiedAt int64  `json:"code_copied_at,omitempty"`
+	CopiedAt     int64  `json:"copied_at,omitempty"`
+}
+
+// copyOf reads the identity from the agent's answer; the zero value if it names none.
+func copyOf(st *agentapi.StagingStatus) copyID {
+	id := copyID{URL: st.URL, Created: st.Created}
+	if st.CodeCopiedAt > 0 {
+		id.CodeCopiedAt = st.CodeCopiedAt
+	} else {
+		id.CopiedAt = st.CopiedAt
+	}
+	return id
 }
 
 func (c copyID) valid() bool {
-	return c.URL != "" && len(c.URL) <= 2048 && utf8.ValidString(c.URL) && c.Created > 0 && c.CopiedAt > 0
+	return c.URL != "" && len(c.URL) <= 2048 && utf8.ValidString(c.URL) && c.Created > 0 &&
+		c.CodeCopiedAt >= 0 && c.CopiedAt >= 0 && (c.CodeCopiedAt > 0) != (c.CopiedAt > 0)
 }
 
 // stagingUnit holds every file of a unit in the copy as the agent listed it after the push –
@@ -213,7 +230,7 @@ func (o Options) stagingStamps(siteDir string) (*copyID, *stagingBase) {
 	if err != nil || !st.Exists {
 		return nil, nil // the push itself will say what is wrong with the copy
 	}
-	id := copyID{URL: st.URL, Created: st.Created, CopiedAt: st.CopiedAt}
+	id := copyOf(st)
 	if !id.valid() {
 		return nil, nil
 	}
@@ -224,7 +241,7 @@ func (o Options) stagingStamps(siteDir string) (*copyID, *stagingBase) {
 	case s == nil:
 		return &id, nil
 	case s.Copy != id:
-		fmt.Fprintln(o.Out, "  Die Staging-Kopie wurde seit dem letzten Push neu angelegt oder aufgefrischt – verglichen wird mit dem letzten Pull.")
+		fmt.Fprintln(o.Out, "  Der Code der Staging-Kopie kam seit dem letzten Push neu von Live – verglichen wird mit dem letzten Pull.")
 	default:
 		return &id, s
 	}

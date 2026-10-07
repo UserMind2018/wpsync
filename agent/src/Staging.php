@@ -259,6 +259,9 @@ final class Staging
             'prefix'     => (string) ($record['prefix'] ?? ''),
             'created'    => (int) ($record['created'] ?? 0),
             'copied_at'  => (int) ($record['copied_at'] ?? 0),
+            // Wann der Code der Kopie zuletzt vollständig von Live kam (create, refresh mit Code);
+            // ein reiner Datenbank-Refresh lässt ihn stehen. 0: Datensatz von vor diesem Feld.
+            'code_copied_at' => (int) ($record['code_copied_at'] ?? 0),
             'last_used'  => $lastUsed,
             'anonymized' => (bool) ($record['anonymized'] ?? false),
             'db_bytes'   => $bytes,
@@ -1027,6 +1030,10 @@ final class Staging
                 self::dropPlan();
                 $record['status']     = self::READY;
                 $record['copied_at']  = time();
+                if (in_array($job['op'], ['create', 'refresh-code'], true)) {
+                    // Nie derselbe Wert wie zuvor: wer sich den Stand des Codes gemerkt hat, erkennt jede neue Kopie.
+                    $record['code_copied_at'] = max($record['copied_at'], (int) ($record['code_copied_at'] ?? 0) + 1);
+                }
                 $record['code_ok']    = true;
                 $record['job']        = null;
                 $record['error']      = '';

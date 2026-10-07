@@ -100,18 +100,21 @@ func (s StagingStep) Finished() bool { return s.Phase == "" }
 
 // StagingStatus answers /staging/status; without a copy only Exists is set.
 type StagingStatus struct {
-	Exists     bool         `json:"exists"`
-	Status     string       `json:"status,omitempty"`
-	URL        string       `json:"url,omitempty"`
-	Prefix     string       `json:"prefix,omitempty"`
-	Created    int64        `json:"created,omitempty"`
-	CopiedAt   int64        `json:"copied_at,omitempty"`
-	LastUsed   int64        `json:"last_used,omitempty"`
-	Anonymized bool         `json:"anonymized"`
-	DBBytes    int64        `json:"db_bytes,omitempty"`
-	Job        *StagingStep `json:"job,omitempty"`
-	Error      string       `json:"error,omitempty"`
-	Pushes     []PushRecord `json:"pushes,omitempty"`
+	Exists   bool   `json:"exists"`
+	Status   string `json:"status,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Prefix   string `json:"prefix,omitempty"`
+	Created  int64  `json:"created,omitempty"`
+	CopiedAt int64  `json:"copied_at,omitempty"`
+	// CodeCopiedAt: when the code of the copy last came from live (create, refresh with code); a
+	// refresh of the database alone leaves it. 0 for an agent or a copy from before the field.
+	CodeCopiedAt int64        `json:"code_copied_at,omitempty"`
+	LastUsed     int64        `json:"last_used,omitempty"`
+	Anonymized   bool         `json:"anonymized"`
+	DBBytes      int64        `json:"db_bytes,omitempty"`
+	Job          *StagingStep `json:"job,omitempty"`
+	Error        string       `json:"error,omitempty"`
+	Pushes       []PushRecord `json:"pushes,omitempty"`
 }
 
 // StagingLogin is a one-time link: access cookie plus login as the staging admin (T1). URL
