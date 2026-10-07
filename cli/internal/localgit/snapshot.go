@@ -23,6 +23,10 @@ var excludedDirs = map[string]bool{"uploads": true, "cache": true, "upgrade": tr
 // Only tests set it, to swap a folder for a symlink at the worst moment (Review 3, M-1).
 var testHookBeforeRead func(rel string)
 
+// testHookAfterStat runs, if set, after the size of a file is read and before it is copied. Only
+// tests set it, to change the length of a file while the snapshot copies it (F-3).
+var testHookAfterStat func(rel string)
+
 // ErrIncomplete is returned by CommitTree after a written commit that lacks files of the site: not
 // readable, changed while the snapshot ran, or wp-content/baseline a symlink. Each one is reported on
 // out. The snapshot is saved; callers name it as a warning (snapshot_incomplete), not as a failure.
@@ -193,6 +197,9 @@ func importTree(gitDir, siteDir, message string, entries []entry, out *notes) er
 	}
 	stdin.Close()
 	waitErr := cmd.Wait()
+	if writeErr != nil || waitErr != nil {
+		removeCrashReports(gitDir)
+	}
 	if writeErr != nil {
 		return writeErr
 	}
@@ -247,6 +254,9 @@ func writeFile(w *bufio.Writer, siteDir string, e entry, dir *folder, out *notes
 	if err != nil || !info.Mode().IsRegular() {
 		out.missingf("  ! %s hat sich während des Schnappschusses geändert – fehlt im Schnappschuss.\n", shown)
 		return nil
+	}
+	if testHookAfterStat != nil {
+		testHookAfterStat(e.rel)
 	}
 	fmt.Fprintf(w, "M %s inline %s\ndata %d\n", e.mode, quotePath(e.path), info.Size())
 	n, err := io.Copy(w, io.LimitReader(f, info.Size()))
@@ -351,4 +361,13 @@ func quotePath(p string) string {
 	}
 	b.WriteByte('"')
 	return b.String()
+}
+
+// removeCrashReports deletes the fast_import_crash_* files git leaves in the repo after an aborted
+// import: they hold a dump of the last commands, so file content of the site (F-3).
+func removeCrashReports(gitDir string) {
+	left, _ := filepath.Glob(filepath.Join(gitDir, "fast_import_crash_*"))
+	for _, f := range left {
+		os.Remove(f)
+	}
 }
