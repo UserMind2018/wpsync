@@ -72,6 +72,8 @@ func TestForeignRepoEntriesAreRemoved(t *testing.T) {
 	os.WriteFile(filepath.Join(gitDir, "config.worktree"), []byte("[filter \"x\"]\n\tclean = touch "+marker+"\n"), 0o644)
 	os.WriteFile(filepath.Join(gitDir, "gitdir"), []byte(evil), 0o644)
 	os.WriteFile(filepath.Join(gitDir, "something"), nil, 0o644)
+	os.MkdirAll(filepath.Join(gitDir, "info"), 0o700) // wpsync no longer writes info/exclude itself
+	os.WriteFile(filepath.Join(gitDir, "info", "exclude"), []byte("# kept\n"), 0o600)
 	os.WriteFile(filepath.Join(gitDir, "info", "grafts"), nil, 0o644)
 	os.WriteFile(filepath.Join(gitDir, "objects", "info", "alternates"), []byte(filepath.Join(evil, "objects")+"\n"), 0o644)
 	os.WriteFile(filepath.Join(gitDir, "objects", "info", "http-alternates"), []byte("http://x\n"), 0o644)

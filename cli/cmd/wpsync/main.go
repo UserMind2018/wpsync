@@ -69,10 +69,12 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 
   Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version, staging, push, pushes,
   rollback) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach; --secret-stdin liest
-  das Secret von stdin (scan, pull, status, staging).
+  das Secret von stdin (scan, pull, status, staging, push, pushes, rollback).
   pull/status/list/stop --driver container --container c --docroot d --db-host h --db-name n
   --db-user u --local-url url [--cli-image i]: vorhandener WordPress-Container statt DDEV
-  (DB-Passwort als zweite Zeile von stdin). push, pushes und rollback nur mit DDEV und Keychain.
+  (DB-Passwort als zweite Zeile von stdin).
+  push/pushes/rollback --driver container --docroot d --secret-stdin: Site-Ordner neben dem Docroot
+  statt ~/wpsync-sites, Secret nur von stdin, keine Rückfrage; rollback dort nur mit Push-ID.
 `
 
 // jsonCommands accept --json (Spec Server-Modus §4, Spec 2b T4). trust, list, stop and setup stay
@@ -343,7 +345,7 @@ func (a *app) cmdPair(args []string) error {
 			return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
 		}
 	}
-	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1}); err != nil {
+	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1, Device: *device}); err != nil {
 		return err
 	}
 	data := pairResult{Site: *name, URL: base, KeyID: res.KeyID, AgentVersion: res.AgentVersion,
@@ -758,11 +760,64 @@ func (a *app) status(opts pull.Options, site *sites.Site) error {
 	return nil
 }
 
-// pushOptions loads the site and builds the options shared by push, pushes and rollback. Push
-// stays a Mac command: keychain only, no --secret-stdin, no container driver (V11). With --json
-// the messages go to stderr and nothing asks.
-func (a *app) pushOptions(name string) (push.Options, *sites.Site, error) {
-	site, secret, err := loadSite(name, a.keychainStore())
+// pushMode holds the switches of push, pushes and rollback for the container mode (Spec
+// Container-Push C1): driver, docroot and the secret from stdin – the push needs neither the
+// WordPress container nor the database, so --container, --db-* and --local-url do not exist here.
+type pushMode struct {
+	driver, docroot *string
+	secretStdin     *bool
+}
+
+func addPushMode(fs *flag.FlagSet) *pushMode {
+	return &pushMode{
+		driver:      fs.String("driver", "ddev", "Laufzeit: ddev (Mac) oder container (Server: mit --docroot und --secret-stdin)"),
+		docroot:     fs.String("docroot", "", "Container-Modus: Docroot (Pfad auf dem Host = im OS-Container)"),
+		secretStdin: fs.Bool("secret-stdin", false, "Container-Modus: Kopplungs-Secret als erste Zeile von stdin lesen"),
+	}
+}
+
+func (m *pushMode) container() bool { return *m.driver == "container" }
+
+// dirs checks the combination and returns site folder and docroot ("" on the Mac). The container
+// mode takes the secret from stdin and nothing else; the Mac layout without the keychain is no
+// supported case.
+func (m *pushMode) dirs() (siteDir, docroot string, err error) {
+	switch *m.driver {
+	case "ddev":
+		if *m.secretStdin {
+			return "", "", cliout.Usage(errors.New("--secret-stdin bei push, pushes und rollback nur mit --driver container --docroot <pfad>"))
+		}
+		if *m.docroot != "" {
+			return "", "", cliout.Usage(errors.New("--docroot nur mit --driver container"))
+		}
+		return "", "", nil
+	case "container":
+	default:
+		return "", "", cliout.Usage(fmt.Errorf("unbekannter --driver %q (ddev, container)", *m.driver))
+	}
+	if !*m.secretStdin {
+		return "", "", cliout.Usage(errors.New("--driver container braucht --secret-stdin (das Secret kommt über stdin)"))
+	}
+	if *m.docroot == "" {
+		return "", "", cliout.Usage(errors.New("--driver container braucht --docroot (absoluter Pfad)"))
+	}
+	if err := container.CheckDocroot(*m.docroot); err != nil {
+		return "", "", cliout.Usage(err)
+	}
+	docroot = filepath.Clean(*m.docroot)
+	return filepath.Dir(docroot), docroot, nil
+}
+
+// pushOptions loads the site and builds the options shared by push, pushes and rollback: on the
+// Mac with the keychain and ~/wpsync-sites, in the container mode with the secret from stdin and
+// the site folder next to the docroot. With --json or --secret-stdin nothing asks – stdin carries
+// the secret, a question would read from there (Spec Container-Push C6, S-9).
+func (a *app) pushOptions(name string, mode *pushMode) (push.Options, *sites.Site, error) {
+	siteDir, docroot, err := mode.dirs()
+	if err != nil {
+		return push.Options{}, nil, err
+	}
+	site, secret, err := loadSite(name, a.secretStore(*mode.secretStdin))
 	if err != nil {
 		return push.Options{}, nil, err
 	}
@@ -770,15 +825,15 @@ func (a *app) pushOptions(name string) (push.Options, *sites.Site, error) {
 	if err != nil {
 		return push.Options{}, nil, err
 	}
-	opts := push.Options{Site: *site, Secret: secret, SitesRoot: root, Out: a.out()}
-	if a.interactive() {
+	opts := push.Options{Site: *site, Secret: secret, SitesRoot: root, SiteDir: siteDir, Docroot: docroot, Out: a.out()}
+	if a.interactive() && !*mode.secretStdin {
 		opts.Confirm = a.confirm
 	}
 	return opts, site, nil
 }
 
 func (a *app) cmdPush(args []string) error {
-	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--to staging] [--dry-run] [--force] [--yes] [--json]"
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
@@ -786,6 +841,7 @@ func (a *app) cmdPush(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was gepusht würde")
 	to := fs.String("to", push.TargetLive, "Ziel: live oder staging")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
+	mode := addPushMode(fs)
 	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
 	if err != nil {
 		return err
@@ -798,13 +854,14 @@ func (a *app) cmdPush(args []string) error {
 		// must not end up there.
 		return cliout.Usage(push.ErrTarget)
 	}
-	opts, site, err := a.pushOptions(positional[0])
+	opts, site, err := a.pushOptions(positional[0], mode)
 	if err != nil {
 		return err
 	}
 	if *rps > 0 {
 		opts.Site.RPS = *rps
 	}
+	opts.Ctx = a.ctx // SIGTERM stops the push before the swap (C12)
 	opts.Units = positional[2:]
 	opts.Force, opts.Yes, opts.AllowVersionChange, opts.DryRun = *force, *yes, *allowVersion, *dryRun
 	opts.Target = *to // as typed: the push package refuses what it does not know
@@ -823,11 +880,12 @@ func (a *app) cmdPush(args []string) error {
 func (a *app) cmdPushes(args []string) error {
 	fs := a.flags("pushes")
 	confirmID := fs.String("confirm", "", "einen getauschten, aber nicht bestätigten Push als in Ordnung markieren")
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pushes <site> [--confirm <push-id>] [--json]")
+	mode := addPushMode(fs)
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pushes <site> [--confirm <push-id>] [--json] [--driver container --docroot d --secret-stdin]")
 	if err != nil {
 		return err
 	}
-	opts, site, err := a.pushOptions(positional[0])
+	opts, site, err := a.pushOptions(positional[0], mode)
 	if err != nil {
 		return err
 	}
@@ -846,7 +904,16 @@ func (a *app) cmdPushes(args []string) error {
 		if records == nil {
 			records = []agentapi.PushRecord{}
 		}
-		a.data = map[string]any{"pushes": records}
+		if !mode.container() {
+			a.data = map[string]any{"pushes": records}
+			return nil
+		}
+		// The container mode names the journals of this site folder and their rescue URL (C2).
+		entries, err := push.WithJournals(opts, records)
+		if err != nil {
+			return err
+		}
+		a.data = map[string]any{"pushes": entries}
 		return nil
 	}
 	return pushError(push.Pushes(opts), site)
@@ -855,11 +922,17 @@ func (a *app) cmdPushes(args []string) error {
 func (a *app) cmdRollback(args []string) error {
 	fs := a.flags("rollback")
 	to := fs.String("to", "", "ohne Push-ID: den neuesten Push dieses Ziels (live, staging); Standard: live")
-	positional, err := a.parse(fs, args, func(n int) bool { return n == 1 || n == 2 }, "wpsync rollback <site> [push-id] [--to staging] [--json]")
+	mode := addPushMode(fs)
+	positional, err := a.parse(fs, args, func(n int) bool { return n == 1 || n == 2 }, "wpsync rollback <site> [push-id] [--to staging] [--json] [--driver container --docroot d --secret-stdin]")
 	if err != nil {
 		return err
 	}
-	opts, site, err := a.pushOptions(positional[0])
+	// Without an ID the CLI picks the newest push over every pairing of the site; a caller in the
+	// container mode knows its push_id and must not leave that to a guess (C14).
+	if mode.container() && len(positional) == 1 {
+		return cliout.Usage(errors.New("im Container-Modus nur mit Push-ID: wpsync rollback <site> <push-id> --driver container --docroot d --secret-stdin"))
+	}
+	opts, site, err := a.pushOptions(positional[0], mode)
 	if err != nil {
 		return err
 	}
@@ -879,8 +952,25 @@ func (a *app) cmdRollback(args []string) error {
 	return pushError(err, site)
 }
 
+// adminURL is the wpsync page in the WP admin, where an administrator opens the push window.
+func adminURL(site *sites.Site) string {
+	return strings.TrimRight(site.URL, "/") + "/wp-admin/tools.php?page=wpsync"
+}
+
+// windowInfo adds to an exit 40 the admin page and the device whose window it is, as far as pair
+// stored it (Spec Container-Push C8).
+func windowInfo(err error, site *sites.Site) error {
+	if err == nil || cliout.Classify(err).Exit != cliout.ExitPushWindowClosed {
+		return err
+	}
+	return &cliout.WindowError{Err: err, Device: site.Device, AdminURL: adminURL(site)}
+}
+
 // pushError turns push errors into the next step; the original error stays for the exit code.
-func pushError(err error, site *sites.Site) error {
+func pushError(err error, site *sites.Site) error { return windowInfo(pushHint(err, site), site) }
+
+// pushHint adds the next step to a push error.
+func pushHint(err error, site *sites.Site) error {
 	var pending *push.PendingError
 	var rolled *push.RolledBackError
 	var skipped *push.SkippedNewError
@@ -1081,7 +1171,10 @@ func (a *app) resumeStaging(sub string, opts staging.Options, busy error) (*agen
 }
 
 // stagingError adds the next step to staging errors; the original error stays for the exit code.
-func stagingError(err error, site *sites.Site) error {
+func stagingError(err error, site *sites.Site) error { return windowInfo(stagingHint(err, site), site) }
+
+// stagingHint adds the next step to a staging error.
+func stagingHint(err error, site *sites.Site) error {
 	var apiErr *agentapi.APIError
 	switch {
 	case err == nil:

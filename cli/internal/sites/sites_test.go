@@ -102,3 +102,20 @@ func TestHealthURLsRoundTrip(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
+
+// Alte Site-Dateien ohne device laden weiter; ein gesetztes device übersteht Save/Load.
+func TestDeviceIsOptional(t *testing.T) {
+	t.Setenv("WPSYNC_CONFIG_DIR", t.TempDir())
+	if err := Save(&Site{Name: "alt", URL: "https://alt.example", KeyID: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Load("alt"); err != nil || s.Device != "" {
+		t.Fatalf("site = %+v, %v", s, err)
+	}
+	if err := Save(&Site{Name: "neu", URL: "https://neu.example", KeyID: "k", Device: "agentic-os-dev"}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Load("neu"); err != nil || s.Device != "agentic-os-dev" {
+		t.Fatalf("site = %+v, %v", s, err)
+	}
+}

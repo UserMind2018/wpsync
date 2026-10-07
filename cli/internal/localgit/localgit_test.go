@@ -128,7 +128,7 @@ func TestCommitTracksOnlyCodeAndBaseline(t *testing.T) {
 	if err := Commit(root, "site", "pull 1", io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command("git", "--git-dir="+GitDir(root, "site"), "ls-files").Output()
+	out, err := exec.Command("git", "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "--name-only", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestSiteControlledGitMechanismsDoNotRun(t *testing.T) {
 			if n := snapCount(t, root); n != 2 {
 				t.Fatalf("snapshot commits = %d, want 2", n)
 			}
-			if !strings.Contains(hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-files"), "plugins/a/b.php") {
+			if !strings.Contains(hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "--name-only", "HEAD"), "plugins/a/b.php") {
 				t.Fatal("new file missing in the snapshot")
 			}
 		})
@@ -299,7 +299,7 @@ func TestCommitIgnoresInheritedGitEnvironment(t *testing.T) {
 		if got := hostGit(t, "-C", foreign, "rev-parse", "HEAD"); got != head {
 			t.Fatal("commit landed in the foreign repo")
 		}
-		files := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-files")
+		files := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "--name-only", "HEAD")
 		if !strings.Contains(files, "plugins/a/a.php") || strings.Contains(files, "other.php") {
 			t.Fatalf("snapshot tracks the wrong work tree: %s", files)
 		}
@@ -314,8 +314,8 @@ func TestCommitIgnoresInheritedGitEnvironment(t *testing.T) {
 		if _, err := os.Stat(idx); err == nil {
 			t.Fatal("git wrote the index named by the inherited GIT_INDEX_FILE")
 		}
-		if _, err := os.Stat(filepath.Join(GitDir(root, "site"), "index")); err != nil {
-			t.Fatalf("snapshot repo has no index: %v", err)
+		if _, err := os.Stat(filepath.Join(GitDir(root, "site"), "index")); err == nil {
+			t.Fatal("the snapshot writes no index – git never sees the site folder")
 		}
 	})
 	t.Run("GIT_CONFIG_COUNT", func(t *testing.T) {
@@ -373,7 +373,7 @@ func TestCommitIgnoresInheritedGitEnvironment(t *testing.T) {
 			t.Fatal(err)
 		}
 		os.Unsetenv("XDG_CONFIG_HOME")
-		if files := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-files"); !strings.Contains(files, "plugins/a/a.php") {
+		if files := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(files, "plugins/a/a.php") {
 			t.Fatalf("global ignore file dropped the PHP file: %s", files)
 		}
 		noMarker(t, marker)
@@ -626,27 +626,31 @@ func TestCommitErrors(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	t.Run("git fails with control characters in its output", func(t *testing.T) {
+	t.Run("unreadable file is left out and reported escaped", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads everything")
+		}
 		root, dir := newSite(t)
-		// an unreadable file makes `git add -A` fail and name the path
 		n := filepath.Join(dir, "public/wp-content/plugins/x\x1b[31m")
 		write(t, n, "z.php")
 		os.Chmod(filepath.Join(n, "z.php"), 0)
 		t.Cleanup(func() { os.Chmod(filepath.Join(n, "z.php"), 0o644) })
-		err := Commit(root, "site", "pull 1", io.Discard)
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || !strings.Contains(err.Error(), "add -A") {
-			t.Fatalf("err = %v", err)
+		var out bytes.Buffer
+		if err := Commit(root, "site", "pull 1", &out); !errors.Is(err, ErrIncomplete) {
+			t.Fatalf("an unreadable file is left out, the snapshot is saved: err = %v, want ErrIncomplete", err)
 		}
-		if hasRawControl(err.Error()) {
-			t.Fatalf("raw control characters in %q", err.Error())
+		if !strings.Contains(out.String(), "z.php ist nicht lesbar") || hasRawControl(out.String()) {
+			t.Fatalf("output = %q", out.String())
+		}
+		if strings.Contains(tracked(t, root), "z.php") || !strings.Contains(tracked(t, root), "plugins/a/a.php") {
+			t.Fatalf("tracked:\n%s", tracked(t, root))
 		}
 	})
 }
 
 func tracked(t *testing.T, root string) string {
 	t.Helper()
-	return hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-files", "-s")
+	return hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "HEAD")
 }
 
 // Iteration 1 (1): every kind of nested .git is found, symlinks are not followed, the folder is excluded
@@ -670,11 +674,7 @@ func TestNestedReposAreExcludedAndReported(t *testing.T) {
 	attackerRepo(t, hidden)
 	os.Symlink(hidden, filepath.Join(wpc, "plugins/linked"))
 
-	got, _ := nestedRepos(dir)
 	want := []string{"public/wp-content/plugins/dir", "public/wp-content/plugins/file", "public/wp-content/themes/link"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("nestedRepos = %v, want %v", got, want)
-	}
 
 	var out bytes.Buffer
 	if err := Commit(root, "site", "pull 1", &out); err != nil {
@@ -692,14 +692,7 @@ func TestNestedReposAreExcludedAndReported(t *testing.T) {
 	if !strings.Contains(ls, "public/wp-content/plugins/a/a.php") || !strings.Contains(ls, "120000") {
 		t.Fatalf("regular file or symlink missing:\n%s", ls)
 	}
-	exclude, _ := os.ReadFile(filepath.Join(GitDir(root, "site"), "info/exclude"))
-	for _, rel := range want {
-		if !strings.Contains(string(exclude), "/"+rel+"/\n") {
-			t.Fatalf("info/exclude lacks %s:\n%s", rel, exclude)
-		}
-	}
-
-	// the repos are gone on the next pull: their folders come back, info/exclude has no leftovers
+	// the repos are gone on the next pull: their folders come back
 	for _, p := range []string{"plugins/dir/.git", "plugins/dir/inner/.git", "plugins/file/.git", "themes/link/.git"} {
 		os.RemoveAll(filepath.Join(wpc, p))
 	}
@@ -709,10 +702,6 @@ func TestNestedReposAreExcludedAndReported(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "eigenes .git") {
 		t.Fatalf("stale warning:\n%s", out.String())
-	}
-	exclude, _ = os.ReadFile(filepath.Join(GitDir(root, "site"), "info/exclude"))
-	if strings.Contains(string(exclude), "public/") {
-		t.Fatalf("info/exclude not rewritten:\n%s", exclude)
 	}
 	if ls := tracked(t, root); !strings.Contains(ls, "plugins/dir/inner/i.php") || !strings.Contains(ls, "plugins/file/f.php") {
 		t.Fatalf("folders not back in the snapshot:\n%s", ls)
@@ -802,32 +791,28 @@ func TestNestedRepoWithoutCommitDoesNotFailCommit(t *testing.T) {
 	}
 }
 
-// Iteration 1 (1): folder names with glob characters are excluded literally, look-alikes are not.
-func TestExcludePatternIsLiteral(t *testing.T) {
-	for rel, want := range map[string]string{
-		"public/wp-content/plugins/a":           "/public/wp-content/plugins/a/",
-		`public/wp-content/plugins/a*[b]? \x`:   `/public/wp-content/plugins/a\*\[b]\? \\x/`,
-		"public/wp-content/plugins/!x/#y":       "/public/wp-content/plugins/!x/#y/",
-		"public/wp-content/plugins/n\nl/deeper": "/public/wp-content/plugins/",
-		"top\nlevel":                            "",
-	} {
-		if got := excludePattern(rel); got != want {
-			t.Errorf("excludePattern(%q) = %q, want %q", rel, got, want)
-		}
-	}
-
+// Folder names with glob characters, quotes and line breaks reach the snapshot literally; a nested
+// repo excludes only its own folder, not a look-alike.
+func TestOddNamesAreSnapshottedLiterally(t *testing.T) {
 	root, dir := newSite(t)
 	odd := filepath.Join(dir, `public/wp-content/plugins/a*[b]? \x`)
 	write(t, odd, "q.php")
 	attackerRepo(t, odd)
 	write(t, dir, "public/wp-content/plugins/aZZb/q.php")
 	write(t, dir, `public/wp-content/plugins/a*[b]? \xy/q.php`)
+	write(t, dir, "public/wp-content/plugins/\"quoted\"/q.php")
+	write(t, dir, "public/wp-content/plugins/n\nl/q.php")
 	if err := Commit(root, "site", "pull 1", io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	ls := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-files", "-z") // -z: names unquoted
-	if strings.Contains(ls, `a*[b]? \x/`) || !strings.Contains(ls, "plugins/aZZb/q.php") || !strings.Contains(ls, `a*[b]? \xy/q.php`) {
-		t.Fatalf("tracked:\n%s", ls)
+	ls := hostGit(t, "--git-dir="+GitDir(root, "site"), "ls-tree", "-r", "-z", "--name-only", "HEAD") // -z: names unquoted
+	for _, want := range []string{"plugins/aZZb/q.php", `a*[b]? \xy/q.php`, "plugins/\"quoted\"/q.php", "plugins/n\nl/q.php"} {
+		if !strings.Contains(ls, want) {
+			t.Errorf("%q missing:\n%q", want, ls)
+		}
+	}
+	if strings.Contains(ls, `a*[b]? \x/`) {
+		t.Fatalf("nested repo in the snapshot:\n%q", ls)
 	}
 }
 
@@ -903,34 +888,6 @@ func TestUppercaseNestedRepoDoesNotRunItsFilter(t *testing.T) {
 	}
 }
 
-// Iteration 2 (F2): a gitlink in the index whose folder the scan does not see (created after the scan or
-// hidden during it) is still dropped before add and before commit.
-func TestGitlinkMissedByScanIsDropped(t *testing.T) {
-	root, dir := newSite(t)
-	findNested = func(string) ([]string, []string) { return nil, nil }
-	t.Cleanup(func() { findNested = nestedRepos })
-	if err := Commit(root, "site", "pull 1", io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(t.TempDir(), "marker")
-	n := filterRepo(t, dir, marker, ".git")
-	// state an earlier pull could have left: gitlink committed in the snapshot repo
-	g := []string{"--git-dir=" + GitDir(root, "site"), "--work-tree=" + dir}
-	hostGit(t, append(g, "add", "-f", "public/wp-content/plugins/evil")...)
-	hostGit(t, append(g, "-c", "user.name=x", "-c", "user.email=x@example.example", "commit", "-q", "-m", "old")...)
-	os.Remove(marker)
-	for i := 2; i <= 4; i++ {
-		touchSameSize(t, n, i)
-		if err := Commit(root, "site", fmt.Sprintf("pull %d", i), io.Discard); err != nil {
-			t.Fatalf("pull %d: %v", i, err)
-		}
-		noMarker(t, marker)
-		if ls := tracked(t, root); strings.Contains(ls, "160000") {
-			t.Fatalf("pull %d: gitlink in the snapshot:\n%s", i, ls)
-		}
-	}
-}
-
 // Iteration 2 (4) / SEC-133: a .GIT repo without a commit does not fail the snapshot either.
 func TestUppercaseNestedRepoWithoutCommitDoesNotFailCommit(t *testing.T) {
 	root, dir := newSite(t)
@@ -992,7 +949,7 @@ func TestCommitTreeWithOtherDocroot(t *testing.T) {
 	if err := CommitTree(gitDir, dir, "docroot", "pull 2", io.Discard); err != nil {
 		t.Fatalf("second commit: %v", err)
 	}
-	got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-files"))
+	got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-tree", "-r", "--name-only", "HEAD"))
 	want := []string{".gitignore", ".wpsync/baseline.json", "docroot/wp-content/plugins/a/a.php"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tracked = %v, want %v", got, want)
@@ -1078,24 +1035,34 @@ func TestClearStaleLocks(t *testing.T) {
 	}
 }
 
-// Mac: der Site-Ordner liegt im DDEV-Mount. Ein .gitignore-Symlink der Site lenkt das Schreiben
-// der wpsync-.gitignore nicht auf eine Datei außerhalb.
-func TestCommitTreeReplacesGitignoreSymlink(t *testing.T) {
+// Der Schnappschuss schreibt nichts in den Site-Ordner: keine .gitignore, kein Index, kein .git.
+// Eine .gitignore der Site (auch als Symlink) bleibt, wie sie ist, und steuert nichts.
+func TestCommitTreeWritesNothingIntoTheSiteFolder(t *testing.T) {
 	siteDir, outside := t.TempDir(), t.TempDir()
 	victim := filepath.Join(outside, "victim")
-	os.WriteFile(victim, []byte("keep"), 0o644)
+	os.WriteFile(victim, []byte("*.php\n"), 0o644)
 	write(t, siteDir, "html/wp-content/a.php")
 	if err := os.Symlink(victim, filepath.Join(siteDir, ".gitignore")); err != nil {
 		t.Fatal(err)
 	}
+	before := treeHashes(t, siteDir)
 	if err := CommitTree(TreeGitDir(siteDir), siteDir, "html", "first", io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(victim); string(b) != "keep" {
-		t.Fatalf("CommitTree wrote through the .gitignore symlink: %q", b)
+	after := treeHashes(t, siteDir)
+	for rel := range after {
+		if strings.HasPrefix(rel, ".wpsync") {
+			delete(after, rel) // the snapshot repo itself
+		}
 	}
-	if info, err := os.Lstat(filepath.Join(siteDir, ".gitignore")); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf(".gitignore = %v, %v", info, err)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("site folder changed:\n%v\n->\n%v", before, after)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "*.php\n" {
+		t.Fatalf("victim = %q", b)
+	}
+	if got := hostGit(t, "--git-dir="+TreeGitDir(siteDir), "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(got, "html/wp-content/a.php") {
+		t.Fatalf("the site's .gitignore steered the snapshot: %s", got)
 	}
 }
 
@@ -1159,5 +1126,121 @@ func TestCleanConfigStaysUntouched(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(filepath.Join(gitDir, "config")); string(after) != string(before) {
 		t.Fatalf("config changed:\n%s\n->\n%s", before, after)
+	}
+}
+
+// Review 3, M-1 / AC-131: tauscht die Site während des Schnappschusses einen Ordner gegen einen
+// Symlink auf <slug>/.wpsync/… oder irgendwohin ausserhalb, kommt keine Datei von dort in die Historie.
+func TestSwappedFolderDoesNotLeakIntoTheSnapshot(t *testing.T) {
+	for _, target := range []string{"inside-site", "absolute"} {
+		t.Run(target, func(t *testing.T) {
+			siteDir := t.TempDir()
+			write(t, siteDir, "docroot/wp-content/plugins/a/a.php")
+			write(t, siteDir, "docroot/wp-content/plugins/b/b.php")
+			secretDir := filepath.Join(siteDir, ".wpsync", "db")
+			if target == "absolute" {
+				secretDir = t.TempDir()
+			}
+			os.MkdirAll(secretDir, 0o700)
+			os.WriteFile(filepath.Join(secretDir, "a.php"), []byte("TOP-SECRET-DUMP"), 0o600)
+			plugin := filepath.Join(siteDir, "docroot/wp-content/plugins/a")
+			testHookBeforeRead = func(rel string) {
+				if rel != "plugins/a/a.php" {
+					return
+				}
+				os.Rename(plugin, plugin+"-orig")
+				link := secretDir
+				if target == "inside-site" {
+					link = "../../../.wpsync/db"
+				}
+				if err := os.Symlink(link, plugin); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { testHookBeforeRead = nil })
+			var out bytes.Buffer
+			gitDir := TreeGitDir(siteDir)
+			if err := CommitTree(gitDir, siteDir, "docroot", "pull 1", &out); !errors.Is(err, ErrIncomplete) {
+				t.Fatalf("err = %v, want ErrIncomplete", err)
+			}
+			if got := hostGit(t, "--git-dir="+gitDir, "log", "--all", "-p", "--format=%H"); strings.Contains(got, "TOP-SECRET-DUMP") {
+				t.Fatalf("file from outside the docroot in history.git:\n%s", got)
+			}
+			if !strings.Contains(out.String(), "plugins/a/a.php hat sich während des Schnappschusses geändert") {
+				t.Fatalf("no report:\n%s", out.String())
+			}
+			if got := hostGit(t, "--git-dir="+gitDir, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(got, "docroot/wp-content/plugins/b/b.php") {
+				t.Fatalf("other files missing:\n%s", got)
+			}
+		})
+	}
+}
+
+// Grill 2026-10-07: wpsync öffnet jeden Ordner einmal und liest seine Dateien über diesen Handle.
+// Wird der Ordner danach getauscht – vor seiner zweiten Datei –, liest wpsync weiter aus dem
+// geöffneten Ordner und nie durch den Symlink; dasselbe für einen Tausch des Elternordners.
+func TestFolderSwappedAfterItsFirstFileDoesNotLeak(t *testing.T) {
+	for _, swap := range []string{"plugins/a", "plugins"} {
+		t.Run(swap, func(t *testing.T) {
+			siteDir := t.TempDir()
+			write(t, siteDir, "docroot/wp-content/plugins/a/a.php")
+			write(t, siteDir, "docroot/wp-content/plugins/a/z.php")
+			secretDir := filepath.Join(siteDir, ".wpsync", "db")
+			os.MkdirAll(filepath.Join(secretDir, "a"), 0o700)
+			os.WriteFile(filepath.Join(secretDir, "z.php"), []byte("TOP-SECRET-DUMP"), 0o600)
+			os.WriteFile(filepath.Join(secretDir, "a", "z.php"), []byte("TOP-SECRET-DUMP"), 0o600)
+			folder := filepath.Join(siteDir, "docroot/wp-content", filepath.FromSlash(swap))
+			testHookBeforeRead = func(rel string) {
+				if rel != "plugins/a/z.php" {
+					return
+				}
+				os.Rename(folder, folder+"-orig")
+				if err := os.Symlink(secretDir, folder); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { testHookBeforeRead = nil })
+			gitDir := TreeGitDir(siteDir)
+			if err := CommitTree(gitDir, siteDir, "docroot", "pull 1", io.Discard); err != nil && !errors.Is(err, ErrIncomplete) {
+				t.Fatal(err)
+			}
+			if got := hostGit(t, "--git-dir="+gitDir, "log", "--all", "-p", "--format=%H"); strings.Contains(got, "TOP-SECRET-DUMP") {
+				t.Fatalf("file from outside the docroot in history.git:\n%s", got)
+			}
+		})
+	}
+}
+
+// Spec Container-Push A7: ein relativer PATH-Eintrag vor dem echten git wird übergangen – kein
+// git aus dem aktuellen Ordner, kein exec.ErrDot.
+func TestGitComesOnlyFromAbsolutePathEntries(t *testing.T) {
+	root, _ := newSite(t)
+	marker := filepath.Join(t.TempDir(), "marker")
+	cwd := t.TempDir()
+	os.WriteFile(filepath.Join(cwd, "git"), []byte(fmt.Sprintf("#!/bin/sh\necho \"$@\" >> \"%s\"\nexit 1\n", marker)), 0o755)
+	t.Chdir(cwd)
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", "."+string(os.PathListSeparator)+path)
+	err := Commit(root, "site", "pull 1", io.Discard)
+	os.Setenv("PATH", path) // the test's own git calls below
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	noMarker(t, marker)
+	if n := snapCount(t, root); n != 1 {
+		t.Fatalf("snapshot commits = %d", n)
+	}
+}
+
+// Ein Snapshot ohne wp-content (frischer Docroot) und ohne Baseline enthält nur die .gitignore.
+func TestSnapshotOfAnEmptySiteFolder(t *testing.T) {
+	siteDir := t.TempDir()
+	os.MkdirAll(filepath.Join(siteDir, "docroot"), 0o755)
+	gitDir := TreeGitDir(siteDir)
+	if err := CommitTree(gitDir, siteDir, "docroot", "first", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(hostGit(t, "--git-dir="+gitDir, "ls-tree", "-r", "--name-only", "HEAD")); !reflect.DeepEqual(got, []string{".gitignore"}) {
+		t.Fatalf("tracked = %v", got)
 	}
 }

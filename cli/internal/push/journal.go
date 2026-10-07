@@ -161,6 +161,37 @@ func readJournal(siteDir, pushID string) ([]byte, error) {
 	return safefs.ReadFile(root, pushID+".json")
 }
 
+// Entry is one line of pushes --json in the container mode: the agent's record plus whether this
+// site folder holds the journal of the push and, if so, its rescue URL (Spec Container-Push C2).
+// Salt and rollback key never appear; a rescue URL outside the paired site is left out.
+type Entry struct {
+	agentapi.PushRecord
+	Journal   bool   `json:"journal"`
+	RescueURL string `json:"rescue_url,omitempty"`
+}
+
+// WithJournals pairs the push log with the journals of the site folder.
+func WithJournals(o Options, records []agentapi.PushRecord) ([]Entry, error) {
+	siteDir, _, err := o.dirs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Entry, 0, len(records))
+	for _, r := range records {
+		e := Entry{PushRecord: r}
+		if pushIDRe.MatchString(r.PushID) {
+			if j, err := LoadJournal(siteDir, r.PushID); err == nil {
+				e.Journal = true
+				if onSite(o.Site.URL, j.RescueURL) {
+					e.RescueURL = j.RescueURL
+				}
+			}
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 // LatestJournal returns the id of the newest push made from this machine to the given target
 // (live or staging), "" if there is none. Journals that cannot be read count for no target.
 // Push ids start with the date, so the name order is the time order within a day's precision.

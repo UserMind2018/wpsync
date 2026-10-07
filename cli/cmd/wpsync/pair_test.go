@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/usermind/wpsync/internal/keychain"
+	"github.com/usermind/wpsync/internal/sites"
 )
 
 // Spec §5: pair --json --secret-out gibt das Secret genau einmal auf stdout aus und speichert es nicht.
@@ -89,4 +90,22 @@ func TestPairJSONRefusesHTTP(t *testing.T) {
 	ag := newAgent(t)
 	r := run(t, context.Background(), "", "pair", ag.URL(), "123456", "--json", "--secret-out")
 	lastResult(t, r, "pair", 2)
+}
+
+// Spec Container-Push C8: pair merkt sich den Gerätenamen in der Site-Datei – den genannten oder
+// den Rechnernamen.
+func TestPairStoresTheDevice(t *testing.T) {
+	env(t)
+	ag := newAgent(t)
+	r := run(t, context.Background(), "", "pair", ag.URL(), "123456", "--name", "kunde", "--device", "agentic-os-dev", "--insecure", "--json", "--secret-out")
+	lastResult(t, r, "pair", 0)
+	if s, err := sites.Load("kunde"); err != nil || s.Device != "agentic-os-dev" {
+		t.Fatalf("site = %+v, %v", s, err)
+	}
+	host, _ := os.Hostname()
+	r = run(t, context.Background(), "", "pair", ag.URL(), "123456", "--name", "kunde2", "--insecure", "--json", "--secret-out")
+	lastResult(t, r, "pair", 0)
+	if s, err := sites.Load("kunde2"); err != nil || s.Device != host {
+		t.Fatalf("site = %+v, %v (host %s)", s, err, host)
+	}
 }

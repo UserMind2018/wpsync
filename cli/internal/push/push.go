@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -38,6 +39,12 @@ type Options struct {
 	Site      sites.Site
 	Secret    string
 	SitesRoot string
+	// SiteDir holds baseline, journals and staging stamps; default SitesRoot/<name> with the Mac
+	// lock and the snapshot repo in localgit.GitDir. With SiteDir set (container mode) lock and
+	// snapshot repo lie in <SiteDir>/.wpsync like the container pull (Spec Container-Push C1, C10).
+	SiteDir string
+	// Docroot holds the WordPress files; default SiteDir/public. Must lie directly below SiteDir.
+	Docroot string
 
 	Units              []string // empty: every unit with local changes
 	Force              bool     // overwrite although the server changed since the last pull
@@ -53,6 +60,15 @@ type Options struct {
 
 	Confirm func(string) bool // asks the user; nil without a terminal and with --json
 	Out     io.Writer
+	// Ctx stops a push before the swap (SIGTERM in the server mode); nil = never. From /push/commit
+	// on the push runs to its end – confirmed or rolled back (Spec Container-Push C12) –, but only
+	// for AfterSignal after the signal. Rollback ignores it.
+	Ctx context.Context
+	// AfterSignal bounds what follows a SIGTERM that arrives after the swap began: commit, health
+	// check and confirm or rollback (default 10 min; the studio waits 15 min before SIGKILL).
+	// RollbackReserve of it is kept for a rollback (default 3 min): a health check that has not
+	// passed by then counts as failed.
+	AfterSignal, RollbackReserve time.Duration
 
 	// For tests; zero values are replaced in defaults().
 	HTTP       *http.Client                        // health check and rescue.php
@@ -72,6 +88,27 @@ type Result struct {
 	// back – the site needs attention) or empty (nothing on the site changed).
 	Status string   `json:"status"`
 	Units  []string `json:"units"`
+	// RescueURL is the rescue.php of the push, set together with PushID (push only). The rollback
+	// key never leaves the CLI: the way back is wpsync rollback <id> (Spec Container-Push C2).
+	RescueURL string `json:"rescue_url,omitempty"`
+	// Warnings name what failed without failing the push or rollback; omitted when empty.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// WarningSnapshotFailed: the push (or rollback) is done, baseline and journal are written, only the
+// commit in the internal git failed – as for the pull (Spec Container-Push C3).
+const WarningSnapshotFailed = "snapshot_failed"
+
+// WarningSnapshotIncomplete: the snapshot is saved but lacks files of the site that were not readable
+// or changed while it ran – as for the pull (Spec Container-Push C3).
+const WarningSnapshotIncomplete = "snapshot_incomplete"
+
+// snapshotWarning is the warning for an error of Options.Commit.
+func snapshotWarning(err error) string {
+	if errors.Is(err, localgit.ErrIncomplete) {
+		return WarningSnapshotIncomplete
+	}
+	return WarningSnapshotFailed
 }
 
 var (
@@ -100,6 +137,8 @@ var (
 	// ErrTargetMismatch: the agent answers for another target than the one asked for, or a push
 	// belongs to another target than the one named.
 	ErrTargetMismatch = errors.New("das Ziel stimmt nicht")
+	// ErrInterrupted: SIGTERM before the swap; nothing on the site was swapped (exit code 30).
+	ErrInterrupted = errors.New("abgebrochen (SIGTERM) – auf der Site wurde nichts getauscht")
 )
 
 // TargetError: the push belongs to another target than --to names. A rollback never crosses
@@ -147,21 +186,40 @@ func (o Options) defaults() Options {
 	if o.Client == nil {
 		o.Client = agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
 	}
+	if o.Ctx != nil {
+		o.Client.Ctx = o.Ctx // a running request ends with the signal, before the swap
+	}
 	if o.Sleep == nil {
 		o.Sleep = time.Sleep
+	}
+	if o.AfterSignal == 0 {
+		o.AfterSignal = 10 * time.Minute
+	}
+	if o.RollbackReserve == 0 {
+		o.RollbackReserve = 3 * time.Minute
 	}
 	if o.Commit == nil {
 		out := o.Out
 		if out == nil {
 			out = io.Discard
 		}
-		// The snapshot repo lives next to the site folder (localgit.GitDir), never inside it.
-		// It runs under the site lock (Run, Rollback), so git locks of a killed run are cleared first.
+		// The snapshot repo never lies inside the site folder's reach: on the Mac next to the site
+		// folder (localgit.GitDir), in the container mode in <SiteDir>/.wpsync/history.git, out of
+		// the docroot mount. It runs under the site lock (Run, Rollback), so git locks of a killed
+		// run are cleared first.
+		container, docroot := o.SiteDir != "", o.Docroot
 		o.Commit = func(siteDir, message string) error {
-			if err := localgit.ClearStaleLocks(localgit.GitDir(filepath.Dir(siteDir), filepath.Base(siteDir))); err != nil {
+			if !container {
+				if err := localgit.ClearStaleLocks(localgit.GitDir(filepath.Dir(siteDir), filepath.Base(siteDir))); err != nil {
+					return err
+				}
+				return localgit.Commit(filepath.Dir(siteDir), filepath.Base(siteDir), message, out)
+			}
+			gitDir := localgit.TreeGitDir(siteDir)
+			if err := localgit.ClearStaleLocks(gitDir); err != nil {
 				return err
 			}
-			return localgit.Commit(filepath.Dir(siteDir), filepath.Base(siteDir), message, out)
+			return localgit.CommitTree(gitDir, siteDir, filepath.Base(docroot), message, out)
 		}
 	}
 	if o.ChunkBytes <= 0 {
@@ -171,6 +229,65 @@ func (o Options) defaults() Options {
 		o.Access = staging.Access
 	}
 	return o
+}
+
+// dirs resolves site folder and docroot like pull does: the docroot lies directly below the site
+// folder, which holds .wpsync next to it.
+func (o Options) dirs() (siteDir, docroot string, err error) {
+	siteDir = o.SiteDir
+	if siteDir == "" {
+		siteDir = filepath.Join(o.SitesRoot, o.Site.Name)
+	}
+	docroot = o.Docroot
+	if docroot == "" {
+		docroot = filepath.Join(siteDir, "public")
+	}
+	if filepath.Dir(docroot) != filepath.Clean(siteDir) {
+		return "", "", fmt.Errorf("docroot %s must lie directly below %s", docroot, siteDir)
+	}
+	return siteDir, docroot, nil
+}
+
+// interrupted reports a cancelled Ctx; it wraps context.Canceled for the exit code.
+func (o Options) interrupted() error {
+	if o.Ctx != nil && o.Ctx.Err() != nil {
+		return fmt.Errorf("%w (%w)", ErrInterrupted, o.Ctx.Err())
+	}
+	return nil
+}
+
+// ctx is Ctx, or a context that never ends.
+func (o Options) ctx() context.Context {
+	if o.Ctx == nil {
+		return context.Background()
+	}
+	return o.Ctx
+}
+
+// afterSignal returns the contexts for the part from /push/commit on. Without a SIGTERM neither
+// ends. After one, health ends AfterSignal-RollbackReserve later and done AfterSignal later –
+// running requests included. stop releases the watcher.
+func (o Options) afterSignal() (done, health context.Context, stop func()) {
+	done, cancelDone := context.WithCancel(context.Background())
+	health, cancelHealth := context.WithCancel(done)
+	quit := make(chan struct{})
+	go func() {
+		select {
+		case <-o.ctx().Done():
+		case <-quit:
+			return
+		}
+		h := time.AfterFunc(o.AfterSignal-o.RollbackReserve, cancelHealth)
+		d := time.AfterFunc(o.AfterSignal, cancelDone)
+		<-quit
+		h.Stop()
+		d.Stop()
+	}()
+	return done, health, func() {
+		close(quit)
+		cancelHealth()
+		cancelDone()
+	}
 }
 
 // checkTarget refuses a target that is neither named nor known; a typo must never mean live.
@@ -270,7 +387,9 @@ func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) 
 }
 
 // planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
-func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string]any {
+// skipped are local units new to the baseline that were not named (U14), missing the units of the
+// baseline that are gone locally and stay on the site (Spec Container-Push C7).
+func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string) map[string]any {
 	list := make([]map[string]any, len(units))
 	for i, u := range units {
 		p := plan.Units[i]
@@ -283,12 +402,15 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string) map[string
 			"old_version": p.Version, "new_version": u.Version, "conflicts": conflicts, "writable": p.Writable,
 		}
 	}
-	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list}
+	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list,
+		"skipped_new": append([]string{}, skipped...), "missing_locally": append([]string{}, missing...)}
 }
 
-// lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site.
+// lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site –
+// on the Mac next to the snapshot repo, in the container mode <SiteDir>/.wpsync/lock like the
+// container pull (Spec Container-Push C10).
 func lock(o Options) (func(), error) {
-	l, err := sitelock.Acquire(sitelock.Path(o.SitesRoot, o.Site.Name, ""))
+	l, err := sitelock.Acquire(sitelock.Path(o.SitesRoot, o.Site.Name, o.SiteDir))
 	if err != nil {
 		return nil, localenv.Wrap("lock", err)
 	}
@@ -352,8 +474,10 @@ func Run(o Options) error {
 	if o.Report != nil {
 		defer func() { *o.Report = *report }()
 	}
-	siteDir := filepath.Join(o.SitesRoot, o.Site.Name)
-	docroot := filepath.Join(siteDir, "public")
+	siteDir, docroot, err := o.dirs()
+	if err != nil {
+		return err
+	}
 
 	base, err := baseline.Load(siteDir)
 	if err != nil {
@@ -402,6 +526,13 @@ func Run(o Options) error {
 	// conflict check differs for staging: a unit this machine pushed there before is compared with
 	// the stamps that push left in the copy, every other unit with the baseline – the copy was made
 	// from live. A push to live never reads the staging stamps.
+	// Every file of a unit to push is read before the begin: a folder or file this process may not
+	// read stops the push here, before the site is asked (P-O3, AC-130).
+	for _, u := range units {
+		if len(u.Unreadable) > 0 {
+			return &UnreadableError{Path: unreadablePath(u.Path, u.Unreadable[0])}
+		}
+	}
 	var copied *copyID
 	var known *stagingBase
 	if target == TargetStaging {
@@ -452,7 +583,7 @@ func Run(o Options) error {
 				"    Bewusst --force, oder die Kopie neu von Live holen: wpsync staging refresh %s --code\n", u.Path, o.Site.Name)
 		}
 	}
-	o.event("plan", planEvent(units, plan, target))
+	o.event("plan", planEvent(units, plan, target, skipped, deleted))
 	if readonly {
 		return ErrNotWritable
 	}
@@ -501,7 +632,10 @@ func Run(o Options) error {
 	if err != nil {
 		return err
 	}
-	before := check(o.HTTP, urls, o.pause, acc)
+	before := check(o.ctx(), o.HTTP, urls, o.pause, acc)
+	if err := o.interrupted(); err != nil {
+		return err
+	}
 
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
@@ -520,13 +654,31 @@ func Run(o Options) error {
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
-	report.PushID = begin.PushID
+	report.PushID, report.RescueURL = begin.PushID, plan.Rescue.URL
+	expires := func(err error) error {
+		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
+	}
 	for i := range units {
+		if err := o.interrupted(); err != nil {
+			return expires(err)
+		}
 		if err := upload(o, begin.PushID, i, docroot, &units[i], begin.Units[i].Need); err != nil {
 			return fmt.Errorf("Upload abgebrochen, auf der Site wurde nichts geändert: %w", err)
 		}
 		o.event("upload", map[string]any{"unit": units[i].Path, "files": len(begin.Units[i].Need)})
 	}
+	if err := o.interrupted(); err != nil {
+		return expires(err)
+	}
+	// From the swap on the push runs to its end: confirmed or rolled back, never left swapped and
+	// unchecked because a caller gave up (C12). A SIGTERM from here on only bounds the rest, so
+	// that it ends before the caller's SIGKILL (Grill 2026-10-07).
+	done, health, stop := o.afterSignal()
+	o.Client.Ctx = done
+	defer func() {
+		o.Client.Ctx = nil // the client outlives this push (rollback, pushes): never leave it cancelled
+		stop()
+	}()
 	stamps, err := o.Client.PushCommit(begin.PushID)
 	if err != nil {
 		var apiErr *agentapi.APIError
@@ -534,24 +686,33 @@ func Run(o Options) error {
 			return agentError(target, err) // the agent refused and left the site as it was
 		}
 		report.Status = "committed" // unknown; the worse case
+		if done.Err() != nil {
+			// not context.Canceled: that would be exit 30, "nothing swapped"
+			return fmt.Errorf("Zeit nach SIGTERM abgelaufen, der Tausch ist unklar – prüfen mit: wpsync pushes %s: %w (%v)",
+				o.Site.Name, &PendingError{PushID: begin.PushID, Device: "diesem Gerät"}, err)
+		}
 		return fmt.Errorf("der Tausch wurde nicht bestätigt, der Stand ist unklar – prüfen mit: wpsync pushes %s (%w)", o.Site.Name, err)
 	}
 	report.Status = "committed"
 	o.event("commit", map[string]any{"push_id": begin.PushID})
 	fmt.Fprintln(o.Out, "  getauscht – prüfe die Site …")
 
-	after := check(o.HTTP, urls, o.pause, acc)
-	for attempt := 0; attempt < 2 && len(Worse(before, after)) > 0; attempt++ {
+	after := check(health, o.HTTP, urls, o.pause, acc)
+	for attempt := 0; attempt < 2 && len(Worse(before, after)) > 0 && health.Err() == nil; attempt++ {
 		o.Sleep(2 * time.Second) // caches and opcache may need a moment
-		after = check(o.HTTP, urls, o.pause, acc)
+		after = check(health, o.HTTP, urls, o.pause, acc)
 	}
 	worse := Worse(before, after)
+	if len(worse) > 0 && health.Err() != nil {
+		// unproven is not healthy: what is left of the time goes to the rollback
+		worse = []string{"der Health-Check kam nach SIGTERM nicht rechtzeitig zum Ende – ungeprüft wird nicht bestätigt"}
+	}
 	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
 	if len(worse) > 0 {
-		return rolledBack(report, rollbackNow(o, acc, journal, urls, before, worse))
+		return rolledBack(report, rollbackNow(done, o, acc, journal, urls, before, worse))
 	}
 	if err := o.Client.PushConfirm(begin.PushID); err != nil {
-		rbErr := rollbackNow(o, acc, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
+		rbErr := rollbackNow(done, o, acc, journal, urls, before, []string{"der Agent antwortet nach dem Tausch nicht mehr (" + err.Error() + ")"})
 		if !errors.Is(rbErr, ErrRescueConfirmed) {
 			return rolledBack(report, rbErr)
 		}
@@ -586,8 +747,13 @@ func Run(o Options) error {
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
+	// The push is live and confirmed: a failed snapshot is a warning, never a failed push – a caller
+	// would retry and create a second push (Spec Container-Push C3).
 	if err := o.Commit(siteDir, fmt.Sprintf("push %s to %s", begin.PushID, o.Site.URL)); err != nil {
-		return err
+		if snapshotWarning(err) == WarningSnapshotFailed {
+			fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – der Push ist live, der Stand fehlt in der Historie: %v\n", err)
+		}
+		report.Warnings = append(report.Warnings, snapshotWarning(err))
 	}
 	fmt.Fprintf(o.Out, "\n✓ Push %s ist live – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n",
 		begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID)
@@ -795,7 +961,8 @@ func stagingPages(siteURL, base string, pages []string) []string {
 }
 
 // rollbackNow takes a swapped push back through rescue.php and checks the site again.
-func rollbackNow(o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
+// ctx bounds the check after the rollback; a check cut short by it is left out of the error.
+func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
 		fmt.Fprintf(o.Out, "  ! %s\n", r)
 	}
@@ -809,7 +976,12 @@ func rollbackNow(o Options, acc *copyAccess, j *Journal, urls []string, before [
 			"Sofort: wpsync rollback %s %s, sonst im WP-Admin unter Werkzeuge → wpsync „Zurückrollen“ (%w)",
 			j.PushID, where, strings.Join(reasons, "; "), o.Site.Name, j.PushID, err)
 	}
-	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: Worse(before, check(o.HTTP, urls, o.pause, acc))}
+	still := Worse(before, check(ctx, o.HTTP, urls, o.pause, acc))
+	if ctx.Err() != nil {
+		fmt.Fprintln(o.Out, "  nach SIGTERM nicht mehr nachgeprüft, ob die Site wieder heil ist")
+		still = nil
+	}
+	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still}
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay

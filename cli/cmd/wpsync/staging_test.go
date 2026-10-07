@@ -46,6 +46,7 @@ type stagingFake struct {
 	login   string   // url of the login link; empty: a link into the copy
 	list    string   // answer of /push/list; empty: one confirmed push to staging
 	confirm int      // HTTP status of /push/confirm
+	shut    bool     // /push/begin reports the push window closed
 
 	routes []string
 	begins []map[string]any
@@ -137,8 +138,8 @@ func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 	case "/wpsync/v1/push/begin":
 		var req agentapi.PushBeginRequest
 		json.Unmarshal(body, &req)
-		fmt.Fprintf(w, `{"push_id":"","target":%q,"agent_version":%q,"health_urls":[],"window_open":true,"pending":null,
-"units":[{"path":"plugins/x","exists":true,"version":"1.0","conflicts":[],"need":["x.php"],"writable":true}],"rescue":{"url":"","salt":""}}`, req.Target, f.version)
+		fmt.Fprintf(w, `{"push_id":"","target":%q,"agent_version":%q,"health_urls":[],"window_open":%t,"pending":null,
+"units":[{"path":"plugins/x","exists":true,"version":"1.0","conflicts":[],"need":["x.php"],"writable":true}],"rescue":{"url":"","salt":""}}`, req.Target, f.version, !f.shut)
 	case "/wpsync/v1/push/list":
 		if f.list != "" {
 			w.Write([]byte(f.list))
