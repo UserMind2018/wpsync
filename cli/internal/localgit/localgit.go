@@ -1,6 +1,7 @@
 // Package localgit keeps an internal git history per site: code and baseline, no uploads, no dumps (AC-28).
 // The repo lives next to the site folders, outside every DDEV mount: code in the site can write to the
-// site folder, so a .git there would let it run hooks, filters or fsmonitor on the Mac.
+// site folder, so a .git there would let it run hooks, filters or fsmonitor on the Mac. git never gets a
+// work tree: wpsync reads the files itself and hands them to git fast-import (Review 3, M-1).
 package localgit
 
 import (
@@ -20,6 +21,8 @@ import (
 	"github.com/usermind/wpsync/internal/sites"
 )
 
+// gitignore lies in every snapshot as a record of what is versioned. git never reads it and wpsync
+// no longer writes it into the site folder: snapshot decides what goes in (Review 3, M-1).
 const gitignore = `# Managed by wpsync – only code and baseline are versioned
 /*
 !/.gitignore
@@ -67,7 +70,8 @@ func TreeGitDir(siteDir string) string { return filepath.Join(siteDir, ".wpsync"
 var docrootRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // CommitTree is Commit for an explicit snapshot repo, site folder and docroot folder directly below
-// siteDir (server mode: TreeGitDir(siteDir), <slug>/, docroot).
+// siteDir (server mode: TreeGitDir(siteDir), <slug>/, docroot). It returns ErrIncomplete after a
+// commit that lacks files of the site; they are reported on out.
 func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 	if !docrootRe.MatchString(docroot) || docroot == "." || docroot == ".." {
 		return fmt.Errorf("docroot must be a folder directly below %s, got %q", siteDir, docroot)
@@ -104,61 +108,27 @@ func CommitTree(gitDir, siteDir, docroot, message string, out io.Writer) error {
 		}
 	}
 
-	// Folders with their own .git stay out of the snapshot and are reported. The scan only serves
-	// warning and info/exclude: the site keeps running and can add or hide a .git at any time.
-	nested, unreadable := findNested(siteDir)
-	for _, rel := range nested {
-		fmt.Fprintf(out, "  ! %s hat ein eigenes .git – der Ordner fehlt im Schnappschuss, wpsync führt darin nichts aus.\n",
-			printable(filepath.Join(siteDir, filepath.FromSlash(rel))))
-	}
-	for _, rel := range unreadable {
-		fmt.Fprintf(out, "  ! %s ist nicht lesbar – wpsync konnte darin nicht nach einem eigenen .git suchen.\n",
-			printable(filepath.Join(siteDir, filepath.FromSlash(rel))))
-	}
-	// writeExclude is the first write into the repo that does not go through run.
 	if err := sanitizeRepo(gitDir); err != nil {
 		return err
 	}
-	if err := writeExclude(gitDir, nested); err != nil {
+	notes := &notes{out: out}
+	entries, wpc, err := snapshot(siteDir, docroot, notes)
+	if err != nil {
 		return err
 	}
-	// The boundary: no gitlink is in the index when add -A or commit runs. For a gitlink in the index git
-	// runs a status inside the embedded repo – with its config, filters and hooks. The gitlinks come from
-	// the index itself, not from the scan, and are dropped again after add: a .gitignore written by the
-	// site outranks info/exclude, and the site can create a .git after the scan.
-	if err := dropGitlinks(gitDir, siteDir); err != nil {
-		return err
+	if wpc != nil {
+		defer wpc.Close()
 	}
-	if err := writeGitignore(siteDir, strings.ReplaceAll(gitignore, "/public/", "/"+docroot+"/")); err != nil {
-		return err
-	}
-	if err := git(gitDir, siteDir, "add", "-A"); err != nil {
-		return err
-	}
-	if err := dropGitlinks(gitDir, siteDir); err != nil {
-		return err
-	}
-	if err := git(gitDir, siteDir, "-c", "user.name=wpsync", "-c", "user.email=wpsync@localhost",
-		"commit", "-q", "--allow-empty", "-m", message); err != nil {
+	if err := importTree(gitDir, siteDir, message, entries, notes); err != nil {
 		return err
 	}
 	if err := maintain(gitDir); err != nil {
 		fmt.Fprintf(out, "  ! git-Wartung des Schnappschuss-Repos fehlgeschlagen (Schnappschuss ist gespeichert): %v\n", err)
 	}
-	return nil
-}
-
-// writeGitignore replaces <siteDir>/.gitignore. On the Mac the site folder lies in the DDEV mount:
-// a symlink there is replaced, never followed (SEC-113). The root spans the site folder, but the
-// name has no folder part: O_EXCL and rename never resolve a symlink of the site. In the server
-// mode the site cannot write <slug>/ at all, only the mounted docroot.
-func writeGitignore(siteDir, content string) error {
-	root, err := os.OpenRoot(siteDir)
-	if err != nil {
-		return err
+	if notes.missing > 0 {
+		return fmt.Errorf("%w: %d missing", ErrIncomplete, notes.missing)
 	}
-	defer root.Close()
-	return safefs.WriteFile(root, ".gitignore", strings.NewReader(content), int64(len(content)), time.Time{}, 0o644)
+	return nil
 }
 
 // staleLocks are the lock files git leaves in the git dir when it is killed mid-write.
@@ -216,104 +186,6 @@ func moveAside(siteGit, gitDir string, out io.Writer) error {
 	return nil
 }
 
-// findNested is replaced in tests to simulate a scan that misses a repo.
-var findNested = nestedRepos
-
-// nestedRepos returns the folders below siteDir (slash-separated, relative) that contain a .git of any
-// kind – directory, gitfile or symlink – and the folders it could not read. Like git, it asks the file
-// system for "<dir>/.git", so .GIT on a case-insensitive volume counts too. Symlinks are not followed,
-// <site>/.git itself is handled by Commit, and a found folder is not searched further.
-func nestedRepos(siteDir string) (repos, unreadable []string) {
-	topGit, _ := os.Lstat(filepath.Join(siteDir, ".git"))
-	rel := func(p string) string {
-		r, _ := filepath.Rel(siteDir, p)
-		return filepath.ToSlash(r)
-	}
-	filepath.WalkDir(siteDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if d != nil && d.IsDir() && p != siteDir {
-				unreadable = append(unreadable, rel(p))
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		if p == siteDir {
-			return nil
-		}
-		info, err := os.Lstat(p)
-		if err == nil && topGit != nil && os.SameFile(info, topGit) {
-			return fs.SkipDir
-		}
-		switch _, err := os.Lstat(filepath.Join(p, ".git")); {
-		case err == nil:
-			repos = append(repos, rel(p))
-			return fs.SkipDir
-		case !errors.Is(err, os.ErrNotExist):
-			unreadable = append(unreadable, rel(p))
-			return fs.SkipDir
-		}
-		return nil
-	})
-	return repos, unreadable
-}
-
-// dropGitlinks removes every gitlink (mode 160000) from the index without running git inside it.
-func dropGitlinks(gitDir, siteDir string) error {
-	staged, err := run(gitDir, siteDir, "ls-files", "--stage", "-z")
-	if err != nil {
-		return err
-	}
-	rm := []string{"rm", "--cached", "-f", "-q", "--ignore-unmatch", "--"}
-	for _, rec := range strings.Split(string(staged), "\x00") {
-		meta, path, ok := strings.Cut(rec, "\t")
-		if ok && strings.HasPrefix(meta, "160000 ") {
-			rm = append(rm, ":(literal)"+path)
-		}
-	}
-	if len(rm) == 6 {
-		return nil
-	}
-	return git(gitDir, siteDir, rm...)
-}
-
-// writeExclude rewrites <G>/info/exclude with one anchored, literal pattern per nested repo folder.
-func writeExclude(gitDir string, nested []string) error {
-	var b strings.Builder
-	b.WriteString("# Managed by wpsync – folders with their own .git\n")
-	for _, rel := range nested {
-		if p := excludePattern(rel); p != "" {
-			b.WriteString(p + "\n")
-		}
-	}
-	root, err := os.OpenRoot(gitDir)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	content := b.String()
-	return safefs.WriteFile(root, filepath.Join("info", "exclude"), strings.NewReader(content), int64(len(content)), time.Time{}, 0o600)
-}
-
-// excludePattern escapes glob characters so the pattern matches the folder literally. A line break
-// cannot be expressed in an ignore file; then the nearest ancestor without one is excluded.
-func excludePattern(rel string) string {
-	parts := strings.Split(rel, "/")
-	for i, part := range parts {
-		if strings.ContainsAny(part, "\n\r") {
-			parts = parts[:i]
-			break
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	esc := strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`)
-	return "/" + esc.Replace(strings.Join(parts, "/")) + "/"
-}
-
 func git(gitDir, workTree string, args ...string) error {
 	_, err := run(gitDir, workTree, args...)
 	return err
@@ -322,24 +194,10 @@ func git(gitDir, workTree string, args ...string) error {
 // run runs git on an explicit git dir and work tree, without repo discovery, inherited GIT_* variables,
 // user/system config or the user's global ignore and attributes files, and returns its stdout.
 func run(gitDir, workTree string, args ...string) ([]byte, error) {
-	if err := sanitizeRepo(gitDir); err != nil {
-		return nil, err
+	cmd, err := command(gitDir, workTree, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
-	base := []string{"--git-dir=" + gitDir}
-	if workTree != "" {
-		base = append(base, "--work-tree="+workTree)
-	}
-	base = append(base, "-c", "core.excludesFile="+os.DevNull, "-c", "core.attributesFile="+os.DevNull,
-		// defence in depth, not the boundary: also reaches git's subprocesses in embedded repos, but does
-		// not stop their clean filters – only an index without gitlinks does (see Commit)
-		"-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull,
-		// no auto gc/maintenance inside commit: killed with a short-lived container (or by SIGKILL)
-		// it leaves HEAD.lock behind, which blocked every later commit. Commit runs Maintain itself.
-		"-c", "gc.auto=0", "-c", "maintenance.auto=false",
-		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
-	cmd := exec.Command("git", append(base, args...)...)
-	cmd.Dir = gitDir
-	cmd.Env = gitEnv(gitDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -347,6 +205,50 @@ func run(gitDir, workTree string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, printable(msg))
 	}
 	return stdout.Bytes(), nil
+}
+
+// command prepares a git call for run and importTree: repo sanitized, git from an absolute PATH
+// entry, config and environment pinned.
+func command(gitDir, workTree string, args ...string) (*exec.Cmd, error) {
+	if err := sanitizeRepo(gitDir); err != nil {
+		return nil, err
+	}
+	bin, err := gitPath()
+	if err != nil {
+		return nil, err
+	}
+	base := []string{"--git-dir=" + gitDir}
+	if workTree != "" {
+		base = append(base, "--work-tree="+workTree)
+	}
+	base = append(base, "-c", "core.excludesFile="+os.DevNull, "-c", "core.attributesFile="+os.DevNull,
+		// defence in depth: wpsync runs git without a work tree of the site, but a tampered repo
+		// config must not name hooks or an fsmonitor either
+		"-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull,
+		// no auto gc/maintenance inside a call: killed with a short-lived container (or by SIGKILL)
+		// it leaves HEAD.lock behind, which blocked every later commit. Commit runs maintain itself.
+		"-c", "gc.auto=0", "-c", "maintenance.auto=false",
+		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
+	cmd := exec.Command(bin, append(base, args...)...)
+	cmd.Dir = gitDir
+	cmd.Env = gitEnv(gitDir)
+	return cmd, nil
+}
+
+// gitPath finds git in the absolute entries of PATH only. A relative entry ("." or "bin") would
+// run a git from the current folder; Go refuses that anyway (exec.ErrDot), which broke the
+// snapshot when a caller's PATH held one (Spec Container-Push A7).
+func gitPath() (string, error) {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		p := filepath.Join(dir, "git")
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 
 // emptyTree is git's well-known empty tree; it exists in every SHA-1 repo without being stored.

@@ -79,6 +79,9 @@ type Result struct {
 const (
 	// WarningSnapshotFailed: site, baseline and DB are pulled, but the snapshot commit failed.
 	WarningSnapshotFailed = "snapshot_failed"
+	// WarningSnapshotIncomplete: the snapshot is saved but lacks files of the site that were not
+	// readable or changed while it ran; they are named on stdout (Spec Container-Push C3).
+	WarningSnapshotIncomplete = "snapshot_incomplete"
 	// WarningSymlinkSkipped: files below a symlinked folder of the docroot were not written.
 	WarningSymlinkSkipped = "symlink_skipped"
 )
@@ -446,7 +449,9 @@ func run(o Options) error {
 		return fmt.Errorf("save baseline: %w", err)
 	}
 	// The pull itself is done: a failed snapshot is a warning, not a failed pull (Review M2).
-	if err := o.commit(siteDir, docroot, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); err != nil {
+	if err := o.commit(siteDir, docroot, fmt.Sprintf("pull %s from %s (profile %s)", time.Now().Format(time.RFC3339), o.Site.URL, o.Site.Profile.Preset)); errors.Is(err, localgit.ErrIncomplete) {
+		warnings = append(warnings, WarningSnapshotIncomplete)
+	} else if err != nil {
 		fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – die Site ist gezogen, der Stand fehlt in der Historie: %v\n", err)
 		warnings = append(warnings, WarningSnapshotFailed)
 	}

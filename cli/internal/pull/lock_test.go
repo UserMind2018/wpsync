@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +130,39 @@ func TestSnapshotFailureIsAWarning(t *testing.T) {
 	}
 	if !strings.Contains(o.Out.(*bytes.Buffer).String(), "Schnappschuss") {
 		t.Fatalf("no warning in output:\n%s", o.Out)
+	}
+}
+
+// Q5 (Grill 2026-10-07): fehlt eine nicht lesbare Datei im Schnappschuss, bleibt der Pull erfolgreich –
+// mit snapshot_incomplete statt snapshot_failed, der Schnappschuss ist gespeichert.
+func TestIncompleteSnapshotIsAWarning(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	srv := agentServer(t, nil)
+	defer srv.Close()
+	o := pullOptions(t, srv.URL, newFakeDriver(false))
+	o.SiteDir = t.TempDir()
+	o.Docroot = filepath.Join(o.SiteDir, "html")
+	locked := filepath.Join(o.Docroot, "wp-content", "plugins", "lokal", "z.php")
+	os.MkdirAll(filepath.Dir(locked), 0o755)
+	os.WriteFile(locked, []byte("<?php"), 0o644)
+	os.Chmod(locked, 0)
+	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	var res Result
+	o.Report = &res
+	if err := Run(o); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Warnings) != 1 || res.Warnings[0] != WarningSnapshotIncomplete {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
+	out := o.Out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "z.php ist nicht lesbar") || strings.Contains(out, "Schnappschuss im lokalen Git fehlgeschlagen") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if err := exec.Command("git", "--git-dir="+localgit.TreeGitDir(o.SiteDir), "rev-parse", "--verify", "HEAD").Run(); err != nil {
+		t.Fatalf("no snapshot commit: %v", err)
 	}
 }
 
