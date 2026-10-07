@@ -78,6 +78,9 @@ type Result struct {
 	// back – the site needs attention) or empty (nothing on the site changed).
 	Status string   `json:"status"`
 	Units  []string `json:"units"`
+	// RescueURL is the rescue.php of the push, set together with PushID (push only). The rollback
+	// key never leaves the CLI: the way back is wpsync rollback <id> (Spec Container-Push C2).
+	RescueURL string `json:"rescue_url,omitempty"`
 	// Warnings name what failed without failing the push or rollback; omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -575,7 +578,7 @@ func Run(o Options) error {
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
-	report.PushID = begin.PushID
+	report.PushID, report.RescueURL = begin.PushID, plan.Rescue.URL
 	for i := range units {
 		if err := upload(o, begin.PushID, i, docroot, &units[i], begin.Units[i].Need); err != nil {
 			return fmt.Errorf("Upload abgebrochen, auf der Site wurde nichts geändert: %w", err)
