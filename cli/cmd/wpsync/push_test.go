@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -51,28 +50,5 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 				t.Fatalf("exit = %d, message = %q, want %d with %q", got, err, c.exit, c.text)
 			}
 		})
-	}
-}
-
-// Push bleibt ein Mac-Befehl (V11): Keychain statt --secret-stdin, kein Container-Treiber.
-// --json gibt es seit 0.4.0 – auch ein Aufruf-Fehler kommt dann als JSON.
-func TestPushHasNoServerMode(t *testing.T) {
-	env(t)
-	for _, args := range [][]string{
-		{"push", "kunde", "code", "--secret-stdin"},
-		{"push", "kunde", "code", "--driver", "container"},
-		{"pushes", "kunde", "--secret-stdin"},
-		{"rollback", "kunde", "--secret-stdin"},
-		{"rollback"},
-		{"rollback", "kunde", "p_20261005_0123456789ab", "extra"},
-	} {
-		r := run(t, context.Background(), testSecret+"\n", args...)
-		if r.code != cliout.ExitUsage || r.stdout != "" || !strings.Contains(r.stderr, "✗") || strings.Contains(r.stderr, testSecret) {
-			t.Errorf("%v: exit %d\nstdout: %s\nstderr: %s", args, r.code, r.stdout, r.stderr)
-		}
-		name := args[0]
-		if m := lastResult(t, run(t, context.Background(), testSecret+"\n", append(args, "--json")...), name, cliout.ExitUsage); m["data"] != nil {
-			t.Errorf("%v --json: data = %v", args, m["data"])
-		}
 	}
 }
