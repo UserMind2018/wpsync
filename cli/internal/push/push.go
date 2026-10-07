@@ -78,6 +78,24 @@ type Result struct {
 	// back – the site needs attention) or empty (nothing on the site changed).
 	Status string   `json:"status"`
 	Units  []string `json:"units"`
+	// Warnings name what failed without failing the push or rollback; omitted when empty.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// WarningSnapshotFailed: the push (or rollback) is done, baseline and journal are written, only the
+// commit in the internal git failed – as for the pull (Spec Container-Push C3).
+const WarningSnapshotFailed = "snapshot_failed"
+
+// WarningSnapshotIncomplete: the snapshot is saved but lacks files of the site that were not readable
+// or changed while it ran – as for the pull (Spec Container-Push C3).
+const WarningSnapshotIncomplete = "snapshot_incomplete"
+
+// snapshotWarning is the warning for an error of Options.Commit.
+func snapshotWarning(err error) string {
+	if errors.Is(err, localgit.ErrIncomplete) {
+		return WarningSnapshotIncomplete
+	}
+	return WarningSnapshotFailed
 }
 
 var (
@@ -623,8 +641,13 @@ func Run(o Options) error {
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
+	// The push is live and confirmed: a failed snapshot is a warning, never a failed push – a caller
+	// would retry and create a second push (Spec Container-Push C3).
 	if err := o.Commit(siteDir, fmt.Sprintf("push %s to %s", begin.PushID, o.Site.URL)); err != nil {
-		return err
+		if snapshotWarning(err) == WarningSnapshotFailed {
+			fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – der Push ist live, der Stand fehlt in der Historie: %v\n", err)
+		}
+		report.Warnings = append(report.Warnings, snapshotWarning(err))
 	}
 	fmt.Fprintf(o.Out, "\n✓ Push %s ist live – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n",
 		begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID)

@@ -189,7 +189,15 @@ func Rollback(o Options, pushID string) error {
 	if err := SaveJournal(siteDir, j); err != nil {
 		return err
 	}
-	return o.Commit(siteDir, fmt.Sprintf("rollback %s on %s", pushID, o.Site.URL))
+	if err := o.Commit(siteDir, fmt.Sprintf("rollback %s on %s", pushID, o.Site.URL)); err != nil {
+		if snapshotWarning(err) == WarningSnapshotFailed {
+			fmt.Fprintf(o.Out, "  ! Schnappschuss im lokalen Git fehlgeschlagen – der Rollback ist durch, der Stand fehlt in der Historie: %v\n", err)
+		}
+		if o.Report != nil {
+			o.Report.Warnings = append(o.Report.Warnings, snapshotWarning(err))
+		}
+	}
+	return nil
 }
 
 // recordTarget is the target of a line of the push log: live for an agent that names none, ""
