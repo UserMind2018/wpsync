@@ -40,6 +40,7 @@ type stagingFake struct {
 	version string
 	status  string   // answer of /staging/status
 	busy    bool     // /staging/begin answers 423 wpsync_staging_busy
+	closed  bool     // /staging/begin and /staging/login answer 403 wpsync_push_window (before busy, like the agent)
 	steps   []string // answers of /staging/step in order; empty: one progress line, then ready
 	result  string   // url of the finished copy; empty: the copy on this site
 	login   string   // url of the login link; empty: a link into the copy
@@ -60,6 +61,11 @@ func newStagingFake(t *testing.T) *stagingFake {
 }
 
 func (f *stagingFake) copyURL() string { return f.srv.URL + testCopy }
+
+func (f *stagingFake) windowClosed(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusForbidden)
+	w.Write([]byte(`{"code":"wpsync_push_window","message":"Das Push-Fenster ist geschlossen – im WP-Admin unter Werkzeuge → wpsync öffnen."}`))
+}
 
 func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
@@ -86,6 +92,10 @@ func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		json.Unmarshal(body, &req)
 		f.begins = append(f.begins, req)
+		if f.closed {
+			f.windowClosed(w)
+			return
+		}
 		if f.busy {
 			w.WriteHeader(http.StatusLocked)
 			w.Write([]byte(`{"code":"wpsync_staging_busy","message":"Auf der Staging-Kopie läuft gerade ein Job."}`))
@@ -115,6 +125,10 @@ func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 	case "/wpsync/v1/staging/status":
 		w.Write([]byte(f.status))
 	case "/wpsync/v1/staging/login":
+		if f.closed {
+			f.windowClosed(w)
+			return
+		}
 		url := f.login
 		if url == "" {
 			url = f.copyURL() + "/?wpsync_login=" + testToken
@@ -259,10 +273,53 @@ func TestStagingOpen(t *testing.T) {
 		t.Errorf("exit = %d, opened = %v\n%s\n%s", res.code, res.opened, res.stdout, res.stderr)
 	}
 
+	if !strings.Contains(res.stdout, staging.BrowserWarning) {
+		t.Errorf("no browser warning:\n%s", res.stdout)
+	}
+
 	res = stg(t, "open", "kunde", "--json")
 	m := lastResult(t, res, "staging open", 0)
-	if d := m["data"].(map[string]any); keys(d) != "expires url" || d["url"] != link || d["expires"] != float64(1791158700) || len(res.opened) != 0 || strings.Contains(res.stderr, testToken) {
+	d := m["data"].(map[string]any)
+	if keys(d) != "expires url warnings" || d["url"] != link || d["expires"] != float64(1791158700) || len(res.opened) != 0 || strings.Contains(res.stderr, testToken) {
 		t.Errorf("data = %v, opened = %v\n%s", m["data"], res.opened, res.stderr)
+	}
+	if w, _ := d["warnings"].([]any); len(w) != 1 || w[0] != staging.BrowserWarning {
+		t.Errorf("warnings = %v", d["warnings"])
+	}
+}
+
+// U44 (Review H2): ohne Push-Fenster legt kein Staging-Befehl etwas an und es gibt keinen Link;
+// Exit 40 push_window_closed mit dem Weg zum Fenster. Ein Job wird dabei auch nicht fortgesetzt.
+func TestStagingNeedsThePushWindow(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "kunde", "--yes"}, {"refresh", "kunde", "--yes"}, {"delete", "kunde", "--yes"},
+		{"open", "kunde"}, {"open", "kunde", "--print"},
+	} {
+		f := stagingSite(t)
+		f.closed, f.busy = true, true
+		f.status = fmt.Sprintf(`{"exists":true,"status":"creating","url":%q,"anonymized":true,"job":{"status":"creating","phase":"tables"}}`, f.copyURL())
+		res := stg(t, args...)
+		if res.code != cliout.ExitPushWindowClosed || len(res.opened) != 0 || strings.Contains(res.stdout+res.stderr, testToken) ||
+			!strings.Contains(res.stderr, f.srv.URL+"/wp-admin/tools.php?page=wpsync") {
+			t.Errorf("%v: exit = %d, opened = %v\n%s\n%s", args, res.code, res.opened, res.stdout, res.stderr)
+		}
+		for _, r := range f.routes {
+			if r == "staging/step" {
+				t.Errorf("%v: routes = %v", args, f.routes)
+			}
+		}
+
+		res = stg(t, append(args, "--json")...)
+		m := lastResult(t, res, "staging "+args[0], cliout.ExitPushWindowClosed)
+		if m["error"].(map[string]any)["code"] != "push_window_closed" {
+			t.Errorf("%v: result = %v", args, m)
+		}
+	}
+	// status needs no window
+	f := stagingSite(t)
+	f.closed = true
+	if res := stg(t, "status", "kunde", "--json"); res.code != cliout.ExitStagingMissing {
+		t.Errorf("status: exit = %d\n%s", res.code, res.stderr)
 	}
 }
 
@@ -448,6 +505,8 @@ func TestStagingErrorKeepsExitCode(t *testing.T) {
 		{"exists", fmt.Errorf("%w: %w", staging.ErrExists, api(409, "wpsync_staging_exists", "x")), cliout.ExitStagingExists, "wpsync staging refresh kunde"},
 		{"locked", staging.ErrLocked, cliout.ExitStagingLocked, "wpsync staging open kunde"},
 		{"busy", fmt.Errorf("%w: %w", staging.ErrBusy, api(423, "wpsync_staging_busy", "x")), cliout.ExitBusy, "wpsync staging status kunde"},
+		{"window", fmt.Errorf("%w: %w", staging.ErrWindowClosed, api(403, "wpsync_push_window", "x")), cliout.ExitPushWindowClosed, "https://kunde.example/wp-admin/tools.php?page=wpsync"},
+		{"window_unwrapped", api(403, "wpsync_push_window", "Das Push-Fenster ist geschlossen"), cliout.ExitPushWindowClosed, "Push-Fenster"},
 		{"unsupported", fmt.Errorf("%w: %w", staging.ErrUnsupported, api(422, "wpsync_staging_unsupported", "Multisite wird nicht unterstützt.")), cliout.ExitStagingUnsupported, "Multisite wird nicht unterstützt."},
 		{"pending", api(409, "wpsync_staging_pending", "Ein Push nach Staging ist getauscht, aber nicht bestätigt."), cliout.ExitPushPending, "wpsync pushes kunde"},
 		{"space", api(507, "wpsync_staging_space", "Zu wenig Platz."), cliout.ExitDiskFull, "Zu wenig Platz."},

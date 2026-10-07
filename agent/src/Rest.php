@@ -55,8 +55,9 @@ final class Rest
             'push/confirm'      => 'pushConfirm',
             'push/rollback'     => 'pushRollback',
             'push/list'         => 'pushList',
-            // Staging (Spec 2b 5.2): dieselbe Signaturprüfung, kein Push-Fenster (S6). /staging/login macht
-            // den Aufrufer zum Administrator der Kopie – es gibt dafür keinen anderen Weg als diesen.
+            // Staging (Spec 2b 5.2): dieselbe Signaturprüfung; begin und login zusätzlich nur bei offenem
+            // Push-Fenster (S6, U44). /staging/login macht den Aufrufer zum Administrator der Kopie – es gibt
+            // dafür keinen anderen Weg als diesen. step setzt nur einen Job fort, den begin angelegt hat.
             'staging/begin'     => 'stagingBegin',
             'staging/step'      => 'stagingStep',
             'staging/status'    => 'stagingStatus',
@@ -289,7 +290,7 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function stagingBegin(\WP_REST_Request $request)
     {
-        return Staging::begin(self::json($request));
+        return Staging::begin(self::json($request), self::$keyId);
     }
 
     /** @return \WP_REST_Response|\WP_Error */
@@ -306,7 +307,7 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function stagingLogin()
     {
-        return Staging::login();
+        return Staging::login(self::$keyId);
     }
 
     /**

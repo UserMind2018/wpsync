@@ -106,7 +106,7 @@ final class StagingJobTest extends TestCase
      */
     private function begin(string $op, array $params = []): array
     {
-        $result = Staging::begin(['op' => $op] + $params);
+        $result = Staging::begin(['op' => $op] + $params, Store::KEY);
         $this->assertInstanceOf(\WP_REST_Response::class, $result, $result instanceof \WP_Error ? $result->code . ': ' . $result->message : '');
         return $result->data;
     }
@@ -197,7 +197,7 @@ final class StagingJobTest extends TestCase
         try {
             $this->boot($env, $prefix, $moved ? $elsewhere . '/wp-content' : null);
             foreach ([true, false] as $dry) {
-                $this->assertError('wpsync_staging_unsupported', 422, Staging::begin(['op' => 'create', 'dry' => $dry]));
+                $this->assertError('wpsync_staging_unsupported', 422, Staging::begin(['op' => 'create', 'dry' => $dry], Store::KEY));
                 $this->assertNothingCreated();
             }
         } finally {
@@ -213,7 +213,7 @@ final class StagingJobTest extends TestCase
         try {
             rename(ABSPATH . 'wp-content', $elsewhere);
             symlink($elsewhere, ABSPATH . 'wp-content');
-            $this->assertError('wpsync_staging_unsupported', 422, Staging::begin(['op' => 'create']));
+            $this->assertError('wpsync_staging_unsupported', 422, Staging::begin(['op' => 'create'], Store::KEY));
             $this->assertNothingCreated();
         } finally {
             exec('rm -rf ' . escapeshellarg($elsewhere));
@@ -228,7 +228,7 @@ final class StagingJobTest extends TestCase
         $odd           = 'wp_my-table';
         Store::$tables = ['wp_options', $long, $odd];
         foreach ([true, false] as $dry) {
-            $result = Staging::begin(['op' => 'create', 'dry' => $dry]);
+            $result = Staging::begin(['op' => 'create', 'dry' => $dry], Store::KEY);
             $this->assertError('wpsync_staging_unsupported', 422, $result);
             $this->assertStringContainsString($long, $result->message);
             $this->assertStringContainsString($odd, $result->message);
@@ -263,8 +263,8 @@ final class StagingJobTest extends TestCase
         // Solange nur die Probe liegt, gibt es in der Kopie nichts ausser ihr.
         $this->assertSame(['.htaccess', StagingConfig::PROBE_DENY, StagingConfig::PROBE_TARGET, StagingConfig::PROBE_FILES], array_values(array_diff((array) scandir($this->root()), ['.', '..'])));
         $this->assertError('wpsync_staging_busy', 423, Staging::pushContent());
-        $this->assertError('wpsync_staging_busy', 423, Staging::login());
-        $this->assertError('wpsync_staging_busy', 423, Staging::begin(['op' => 'delete']));
+        $this->assertError('wpsync_staging_busy', 423, Staging::login(Store::KEY));
+        $this->assertError('wpsync_staging_busy', 423, Staging::begin(['op' => 'delete'], Store::KEY));
 
         $seen        = [];
         $root        = $this->root();
@@ -335,7 +335,7 @@ final class StagingJobTest extends TestCase
         $this->assertFalse(Staging::inside((string) realpath(ABSPATH) . '/wp-content/plugins/x'));
         $this->assertSame([$answer['url'] . '/', $answer['url'] . '/wp-login.php', $answer['url'] . '/shop/'], Staging::healthUrls());
         $this->assertSame([$record['prefix']], Staging::hiddenPrefixes());
-        $this->assertError('wpsync_staging_exists', 409, Staging::begin(['op' => 'create']));
+        $this->assertError('wpsync_staging_exists', 409, Staging::begin(['op' => 'create'], Store::KEY));
     }
 
     /** Cursor und Phase stehen nach jedem Schritt in der Datenbank, bevor der nächste beginnt. */
@@ -419,7 +419,7 @@ final class StagingJobTest extends TestCase
         $this->assertNull(Store::getState(Staging::PLAN));
         $this->assertSame('', Staging::contentDir());
         $this->assertError('wpsync_staging_state', 409, Staging::pushContent());
-        $this->assertError('wpsync_staging_state', 409, Staging::login());
+        $this->assertError('wpsync_staging_state', 409, Staging::login(Store::KEY));
         // Ein neues create ist erlaubt – mit neuem Ordner und Präfix.
         $this->begin('create');
         $this->assertNotSame($root, $this->root());
@@ -461,8 +461,8 @@ final class StagingJobTest extends TestCase
         $this->assertTrue((new StagingAccess($root . '/' . StagingAccess::FILE))->read()['locked']);
         $this->assertFileExists($root . '/wp-content/plugins/x/x.php');
         $this->assertError('wpsync_staging_state', 409, Staging::pushContent());
-        $this->assertError('wpsync_staging_state', 409, Staging::login());
-        $result = Staging::begin(['op' => 'create']);
+        $this->assertError('wpsync_staging_state', 409, Staging::login(Store::KEY));
+        $result = Staging::begin(['op' => 'create'], Store::KEY);
         $this->assertError('wpsync_staging_exists', 409, $result);
         $this->assertStringContainsString('staging delete', $result->message);
         $this->assertSame($root, $this->root());
@@ -577,12 +577,12 @@ final class StagingJobTest extends TestCase
         $this->create();
         Push::$pending = ['push_id' => 'p_1', 'device' => 'd', 'created' => 1];
         foreach (['refresh', 'delete'] as $op) {
-            $this->assertError('wpsync_staging_pending', 409, Staging::begin(['op' => $op]));
+            $this->assertError('wpsync_staging_pending', 409, Staging::begin(['op' => $op], Store::KEY));
         }
         Push::$pending = null;
         Push::$running = true;
         foreach (['refresh', 'delete'] as $op) {
-            $this->assertError('wpsync_staging_busy', 423, Staging::begin(['op' => $op]));
+            $this->assertError('wpsync_staging_busy', 423, Staging::begin(['op' => $op], Store::KEY));
         }
         $this->assertSame(Staging::READY, $this->record()['status']);
         $this->assertSame([], Push::$dropped);
@@ -592,7 +592,7 @@ final class StagingJobTest extends TestCase
     public function testDeleteRemovesEverything(): void
     {
         $this->boot();
-        $this->assertError('wpsync_staging_missing', 409, Staging::begin(['op' => 'delete']));
+        $this->assertError('wpsync_staging_missing', 409, Staging::begin(['op' => 'delete'], Store::KEY));
         $this->create();
         $root = $this->root();
         mkdir($root . '/wp-content/' . Store::pushDirName() . '/p_1/old', 0777, true);
@@ -691,12 +691,12 @@ final class StagingJobTest extends TestCase
     public function testLoginExpiryAndUnlock(): void
     {
         $this->boot();
-        $this->assertError('wpsync_staging_missing', 409, Staging::login());
+        $this->assertError('wpsync_staging_missing', 409, Staging::login(Store::KEY));
         $this->create();
         $root   = $this->root();
         $access = new StagingAccess($root . '/' . StagingAccess::FILE);
 
-        $login = Staging::login();
+        $login = Staging::login(Store::KEY);
         $this->assertInstanceOf(\WP_REST_Response::class, $login);
         $this->assertSame(1, preg_match('#^https://example\.test/wpsync-staging-[a-f0-9]{12}/\?wpsync_login=([a-f0-9]{64})\z#', $login->data['url'], $m));
         $this->assertNotNull($access->redeemToken($m[1], time()));
@@ -717,7 +717,7 @@ final class StagingJobTest extends TestCase
         $this->assertSame(Staging::LOCKED, Staging::summary()['status']);
         $this->assertSame($root . '/wp-content', Staging::contentDir()); // bestehende Pushes bleiben auffindbar
 
-        $login = Staging::login();
+        $login = Staging::login(Store::KEY);
         $this->assertInstanceOf(\WP_REST_Response::class, $login);
         $this->assertSame(Staging::READY, $this->record()['status']);
         $this->assertFalse($access->read()['locked']);
@@ -726,7 +726,64 @@ final class StagingJobTest extends TestCase
 
         // Ohne Riegel prüft niemand das Cookie: kein Link.
         unlink($root . '/wp-content/mu-plugins/00-wpsync-staging.php');
-        $this->assertError('wpsync_staging_state', 409, Staging::login());
+        $this->assertError('wpsync_staging_state', 409, Staging::login(Store::KEY));
+    }
+
+    /**
+     * U44 (Review H2): ohne offenes Push-Fenster des Pairings legt begin nichts an – auch dry nicht –
+     * und es wird nicht einmal die Sperre geholt. Ein anderes Pairing zählt nicht.
+     */
+    public function testWithoutAWindowNothingIsCreated(): void
+    {
+        $this->boot();
+        Store::$until = time();
+        foreach ([false, true] as $dry) {
+            $this->assertError('wpsync_push_window', 403, Staging::begin(['op' => 'create', 'dry' => $dry], Store::KEY));
+        }
+        Store::$until = time() + 60;
+        $this->assertError('wpsync_push_window', 403, Staging::begin(['op' => 'create'], 'fedcba9876543210'));
+        $this->assertError('wpsync_push_window', 403, Staging::login('fedcba9876543210'));
+        $this->assertNothingCreated();
+        $this->assertSame([], preg_grep('/GET_LOCK/', $this->db->queries));
+        $this->assertSame(0, Store::$writes);
+    }
+
+    /**
+     * U44: login, refresh und delete brauchen das Fenster, status und step nicht. step setzt nur den
+     * Job fort, den begin mit Fenster angelegt hat; ohne Job ändert es nichts.
+     */
+    public function testLoginAndJobsNeedAWindowStatusAndStepDoNot(): void
+    {
+        $this->boot();
+        $this->create();
+        $record           = $this->record();
+        $record['status'] = Staging::LOCKED;
+        Store::setState(Staging::STATE, $record);
+        $writes  = Store::$writes;
+        $queries = count($this->db->queries);
+
+        Store::$until = 0;
+        $this->assertError('wpsync_push_window', 403, Staging::login(Store::KEY));
+        foreach (['refresh', 'delete'] as $op) {
+            foreach ([false, true] as $dry) {
+                $this->assertError('wpsync_push_window', 403, Staging::begin(['op' => $op, 'dry' => $dry], Store::KEY));
+            }
+        }
+        $this->assertSame($record, $this->record(), 'gesperrt bleibt gesperrt');
+        $this->assertSame([$writes, $queries], [Store::$writes, count($this->db->queries)]);
+        $this->assertTrue(Staging::status()->data['exists']);
+        $this->assertNull(Staging::status()->data['job']);
+        $this->assertSame($writes, Store::$writes);
+        $step = Staging::step(['probe' => 'ok']);
+        $this->assertInstanceOf(\WP_REST_Response::class, $step);
+        $this->assertSame([Staging::LOCKED, ''], [$step->data['status'], $step->data['phase']]);
+        $this->assertSame($record, $this->record(), 'step ohne Job fängt nichts an');
+
+        Store::$until = time() + 60;
+        $this->begin('refresh');
+        Store::$until = 0;
+        $this->assertSame(Staging::READY, $this->finish()['status'], 'ein laufender Job läuft zu Ende');
+        $this->assertError('wpsync_push_window', 403, Staging::login(Store::KEY));
     }
 
     /** Ein Job, dessen CLI verschwunden ist, hält nichts für immer fest: delete geht nach 10 Minuten. */
@@ -739,8 +796,8 @@ final class StagingJobTest extends TestCase
         $record['job']['touched'] = time() - Staging::JOB_TTL - 1;
         Store::setState(Staging::STATE, $record);
 
-        $this->assertError('wpsync_staging_exists', 409, Staging::begin(['op' => 'create']));
-        $this->assertError('wpsync_staging_state', 409, Staging::begin(['op' => 'refresh']));
+        $this->assertError('wpsync_staging_exists', 409, Staging::begin(['op' => 'create'], Store::KEY));
+        $this->assertError('wpsync_staging_state', 409, Staging::begin(['op' => 'refresh'], Store::KEY));
         $this->assertError('wpsync_staging_state', 409, Staging::pushContent());
         $this->begin('delete');
         $this->assertSame('deleted', $this->finish()['status']);

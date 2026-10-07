@@ -37,4 +37,10 @@ final class PushWindow
         }
         return 'offen, noch ' . (int) ceil(self::remaining($until, $now) / 60) . ' Min';
     }
+
+    /** Derselbe Fehler für Push, Rollback und die Staging-Aufrufe, die eins brauchen (Spec 2b S6, U44). */
+    public static function closed(): \WP_Error
+    {
+        return new \WP_Error('wpsync_push_window', 'Das Push-Fenster ist geschlossen – im WP-Admin unter Werkzeuge → wpsync öffnen.', ['status' => 403]);
+    }
 }

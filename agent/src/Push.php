@@ -874,7 +874,7 @@ final class Push
 
     private static function windowClosed(): \WP_Error
     {
-        return self::error('wpsync_push_window', 'Das Push-Fenster ist geschlossen – im WP-Admin unter Werkzeuge → wpsync öffnen.', 403);
+        return PushWindow::closed();
     }
 
     private static function error(string $code, string $message, int $status): \WP_Error

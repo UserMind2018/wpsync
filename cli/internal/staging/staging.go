@@ -42,6 +42,9 @@ var (
 	ErrLocked = errors.New("die Staging-Kopie ist gesperrt")
 	// ErrBusy: a staging job or a push to staging is running; Resume picks up a job left behind.
 	ErrBusy = errors.New("auf der Staging-Kopie wird gerade gearbeitet")
+	// ErrWindowClosed: create, refresh, delete and open need the push window of the pairing, like a
+	// push (U44); status and following a running job do not (push_window_closed).
+	ErrWindowClosed = errors.New("Staging braucht ein offenes Push-Fenster")
 	// ErrNeedsYes: a question without a terminal or with --json (usage).
 	ErrNeedsYes = errors.New("ohne Terminal mit --yes bestätigen")
 	// ErrAborted: the user declined.
@@ -86,6 +89,10 @@ func (o Options) ask(question string) error {
 	}
 	return nil
 }
+
+// BrowserWarning goes with every login link (Review H2): the copy lives on the origin of the live
+// site, so a script in the copy acts with a live admin session of the same browser profile.
+const BrowserWarning = "die Kopie läuft auf derselben Adresse (Origin) wie Live: nicht in einem Browser(-profil) öffnen, in dem jemand bei Live im WP-Admin angemeldet ist – privates Fenster oder eigenes Profil nehmen"
 
 const plainQuestion = "--no-anonymize legt echte Kundendaten auf eine Kopie mit eigener URL. Trotzdem?"
 
@@ -462,6 +469,8 @@ func agentError(err error) error {
 		return fmt.Errorf("%w: %w", ErrLocked, err)
 	case "wpsync_staging_busy":
 		return fmt.Errorf("%w: %w", ErrBusy, err)
+	case "wpsync_push_window":
+		return fmt.Errorf("%w: %w", ErrWindowClosed, err)
 	}
 	return err
 }

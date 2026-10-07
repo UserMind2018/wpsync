@@ -197,13 +197,18 @@ final class Staging
     }
 
     /**
-     * Prüft alles, bevor etwas angelegt wird; mit dry nur Auskunft (V1).
+     * Prüft alles, bevor etwas angelegt wird; mit dry nur Auskunft (V1). Auch dry nur bei offenem
+     * Push-Fenster des Pairings (U44): ohne Fenster erfährt der Aufrufer nichts und es ändert sich nichts.
      *
      * @param array<string, mixed> $params op, dry, code, scope
      * @return \WP_REST_Response|\WP_Error
      */
-    public static function begin(array $params)
+    public static function begin(array $params, string $keyId)
     {
+        $closed = self::windowClosed($keyId);
+        if ($closed !== null) {
+            return $closed;
+        }
         $op = $params['op'] ?? '';
         if (!is_string($op) || !in_array($op, ['create', 'refresh', 'delete'], true)) {
             return self::error('wpsync_staging_op', 'Unbekannte Staging-Operation.', 400);
@@ -214,7 +219,12 @@ final class Staging
         });
     }
 
-    /** @return \WP_REST_Response|\WP_Error */
+    /**
+     * Setzt nur einen Job fort, den begin (mit Fenster) angelegt hat – ohne Job ändert step nichts.
+     * Deshalb ohne Fenster: ein Job, der mitten im Kopieren hängen bliebe, hielte die Kopie gesperrt.
+     *
+     * @return \WP_REST_Response|\WP_Error
+     */
     public static function step(array $params)
     {
         return self::locked(static function () use ($params) {
@@ -273,12 +283,17 @@ final class Staging
 
     /**
      * Einmal-Link (T1); hebt die Sperre nach dem Verfall auf. Nur für den signierten Aufruf der
-     * CLI – wer hier einen Link bekommt, ist Administrator der Kopie.
+     * CLI bei offenem Push-Fenster (U44) – wer hier einen Link bekommt, ist Administrator der Kopie,
+     * auf demselben Origin wie Live.
      *
      * @return \WP_REST_Response|\WP_Error
      */
-    public static function login()
+    public static function login(string $keyId)
     {
+        $closed = self::windowClosed($keyId);
+        if ($closed !== null) {
+            return $closed;
+        }
         return self::locked(static function () {
             $record = self::record();
             if ($record === null) {
@@ -498,6 +513,12 @@ final class Staging
         } finally {
             $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
         }
+    }
+
+    /** Das Push-Fenster als zweiter Faktor (Spec 2b S6): ohne Fenster nur Status und Fortsetzen. */
+    private static function windowClosed(string $keyId): ?\WP_Error
+    {
+        return PushWindow::open(Store::pushUntil($keyId), time()) ? null : PushWindow::closed();
     }
 
     /** Was Staging auf diesem Server verhindert, oder null (Spec 3). Schreibt nichts. */

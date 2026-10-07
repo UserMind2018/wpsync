@@ -64,6 +64,7 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync staging refresh <site>        Datenbank neu von Live (--code: auch den Code)
   wpsync staging status <site>         Zustand, Alter, letzte Nutzung, Pushes nach Staging
   wpsync staging delete <site>         Kopie löschen (Tabellen und Ordner)
+                                       (alle ausser status brauchen ein offenes Push-Fenster)
   wpsync version
 
   Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version, staging, push, pushes,
@@ -1021,12 +1022,17 @@ func (a *app) cmdStaging(args []string) error {
 		}
 		// The link carries the token: it goes to the browser, to stdout on request, or into the
 		// JSON result – into no other message.
-		a.data = l
+		a.data = struct {
+			*agentapi.StagingLogin
+			Warnings []string `json:"warnings"`
+		}{l, []string{staging.BrowserWarning}}
 		switch {
 		case a.json:
 		case *printOnly:
+			fmt.Fprintf(a.stderr, "! %s\n", staging.BrowserWarning) // stdout carries the link alone
 			fmt.Fprintln(a.stdout, l.URL)
 		default:
+			fmt.Fprintf(a.stdout, "! %s\n  (nur den Link: wpsync staging open %s --print)\n", staging.BrowserWarning, site.Name)
 			if err := a.openURL(l.URL); err != nil {
 				fmt.Fprintf(a.stdout, "Browser nicht geöffnet (%v) – Link (5 Minuten, einmal gültig):\n%s\n", err, l.URL)
 				return nil
@@ -1094,6 +1100,8 @@ func stagingError(err error, site *sites.Site) error {
 		return cliout.Hint(err, fmt.Sprintf("die Staging-Kopie ist nach 14 Tagen ohne Nutzung gesperrt – entsperren mit wpsync staging open %s", site.Name))
 	case errors.Is(err, staging.ErrBusy):
 		return cliout.Hint(err, fmt.Sprintf("auf der Staging-Kopie wird gerade gearbeitet (Job oder Push) – später erneut versuchen; Stand: wpsync staging status %s", site.Name))
+	case errors.Is(err, staging.ErrWindowClosed):
+		return cliout.Hint(err, fmt.Sprintf("das Push-Fenster ist geschlossen – Staging anlegen, auffrischen, öffnen und löschen geht nur bei offenem Fenster; ein Administrator öffnet es unter %s/wp-admin/tools.php?page=wpsync (wpsync staging status geht immer)", site.URL))
 	case errors.As(err, &apiErr) && apiErr.Code == "wpsync_staging_pending":
 		return cliout.Hint(err, fmt.Sprintf("%s Protokoll: wpsync pushes %s", agentText(apiErr.Message), site.Name))
 	case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_staging_"):

@@ -177,7 +177,7 @@ func classify(err error) int {
 	case errors.As(err, &local):
 		// Includes the local site lock (reason site_locked): busy is the server's lock only.
 		return ExitLocalEnv
-	case errors.Is(err, push.ErrWindowClosed), errors.Is(err, push.ErrRollbackWindow):
+	case errors.Is(err, push.ErrWindowClosed), errors.Is(err, push.ErrRollbackWindow), errors.Is(err, staging.ErrWindowClosed):
 		return ExitPushWindowClosed
 	case errors.Is(err, push.ErrConflict):
 		return ExitPushConflict

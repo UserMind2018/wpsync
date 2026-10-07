@@ -53,6 +53,13 @@ Scan und Push nach Live laufen weiter mit älteren Agents.
   eines Unterordners mit Rewrite-Direktiven (sie nähme dem Ordner die Zugangssperre) – auch nicht
   über einen Push nach Staging
 - Ein Agent, der in einer Kopie geladen wird, beantwortet keinen Aufruf
+- `staging create`, `refresh`, `delete` und `open` brauchen ein offenes Push-Fenster wie ein
+  Push (sonst Exit 40, auf dem Server ändert sich nichts) – auch die Probeläufe. Administrator
+  der Kopie zu sein, heisst PHP im selben Server-Benutzer wie Live auszuführen; ein entwendetes
+  Pairing-Secret allein reicht dafür nicht mehr. `staging status` und das Fortsetzen eines
+  laufenden Jobs gehen ohne Fenster
+- `staging open` warnt, die Kopie nicht im selben Browserprofil zu öffnen, in dem man bei Live
+  angemeldet ist: sie liegt auf demselben Origin wie Live (`--json`: `data.warnings`)
 - Bekannte Grenzen der Kopie stehen im README unter „Staging auf dem Server“
 
 ## [0.3.1] – 2026-10-06 · Agent 0.4.1

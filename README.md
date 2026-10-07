@@ -138,8 +138,8 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync push <site> code [einheit…] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
 | `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
-| `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Details: [Staging auf dem Server](#staging-auf-dem-server). |
-| `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. |
+| `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
+| `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. Nicht im selben Browserprofil öffnen, in dem man bei Live angemeldet ist (siehe [Zugang](#staging-auf-dem-server)). |
 | `wpsync staging refresh <site> [--code] [--yes] [--no-anonymize]` | Datenbank der Kopie neu von Live, mit `--code` auch den Code. Fragt nach, weil Daten der Kopie verloren gehen. |
 | `wpsync staging status <site>` | Zustand, Adresse, Alter, letzte Nutzung, laufender Job und Pushes nach Staging. |
 | `wpsync staging delete <site> [--yes]` | Löscht die Kopie: ihre Tabellen und ihren Ordner. |
@@ -362,6 +362,9 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
 Eine Kopie der Live-Site auf dem Server des Kunden – mit dessen PHP, Datenbank und Plugins –,
 um gepushten Code zu testen, bevor er nach Live geht. Agent 0.5.0 oder neuer.
 
+Alle Staging-Befehle ausser `status` brauchen ein offenes Push-Fenster (WP-Admin → Werkzeuge →
+wpsync), genau wie ein Push.
+
 ```sh
 wpsync staging create kunde            # Kopie anlegen (anonymisiert, nach Pull-Profil)
 wpsync staging open kunde              # Einmal-Link: Zugang + Anmeldung als Admin wpsync
@@ -398,6 +401,21 @@ anmeldet. Einlösen lässt er sich nur am Einstieg der Kopie (`/wpsync-staging-<
 keiner anderen Adresse. Es gibt kein Passwort; einem Kunden zeigt man Staging per Bildschirm.
 Während ein Job läuft (`create`, `refresh`, `delete`), nach einem gescheiterten `refresh` oder
 `delete` und nach dem Verfall liefert die Kopie für alles 403 – auch mit Cookie.
+
+**Push-Fenster.** `staging create`, `refresh`, `delete` und `open` gehen nur, solange ein
+Administrator das Push-Fenster des Geräts geöffnet hat; sonst Exit 40 und auf dem Server ändert
+sich nichts. Grund: Wer Administrator der Kopie ist, kann dort PHP ausführen (etwa über ein
+Snippet-Plugin, das mitkopiert wurde) – im selben Server-Benutzer und mit den
+Datenbank-Zugangsdaten von Live. Ohne Fenster reicht ein entwendetes Pairing-Secret dafür nicht.
+`staging status` und das Fortsetzen eines laufenden Jobs brauchen kein Fenster; ein neuer Job
+startet ohne Fenster nie.
+
+**Eigenes Browserprofil.** Die Kopie liegt unter derselben Adresse (Origin) wie Live. Ein Skript
+in der Kopie – eingeschleust oder ungetesteter gepushter Code – kann im Browser deshalb alles,
+was die Live-Sitzung desselben Browsers darf; getrennte Cookie-Pfade schützen davor nicht.
+Die Kopie nie in einem Browser(-profil) öffnen, in dem jemand bei Live im WP-Admin angemeldet
+ist: privates Fenster oder eigenes Profil, den Link dafür mit `wpsync staging open <site> --print`.
+`staging open` erinnert jedes Mal daran.
 
 **Riegel.** Mails gehen an `blocked@mailguard.invalid` (auch mit SMTP-Plugin). Anfragen an
 Mail-, Zahlungs- und Newsletter-Dienste und an Live selbst werden abgelehnt, auch als Ziel einer
@@ -468,9 +486,8 @@ abbilden lässt, sofern das Profil sie kopiert.
 - **Was als Live gilt:** nur die Domain der Site mit und ohne `www.` auf demselben Port. Andere
   Subdomains von Live und eine Umlaut-Domain in der jeweils anderen Schreibweise (Punycode) sind
   für den Riegel fremde Hosts und nicht gesperrt.
-- **Kein Push-Fenster für Staging-Befehle:** Jedes gekoppelte Gerät kann eine Kopie anlegen,
-  auffrischen, löschen und sich dort als Administrator anmelden. Nur der Push nach Staging
-  braucht das Fenster.
+- **Gleicher Origin wie Live:** Die Kopie ist ein Unterordner der Live-Domain, keine eigene
+  Subdomain; siehe „Eigenes Browserprofil“ oben.
 - **Abbruch mitten im Schritt:** Stirbt PHP genau zwischen einem Datenbank-Schritt und dem
   Speichern des Fortschritts, wiederholt der nächste Aufruf diesen Schritt. Tabellen ohne
   Primärschlüssel ab 50 000 Zeilen können danach doppelte Zeilen enthalten.
@@ -521,6 +538,8 @@ abbilden lässt, sofern das Profil sie kopiert.
   `wpsync_*`-Tabellen und -Optionen. Code schreibt er ausschliesslich über `wpsync push`, pro
   Gerät und nur solange ein Administrator das Push-Fenster geöffnet hat (höchstens 8 Stunden).
   Ein Push ist Code-Ausführung auf dem Server – das Fenster nur öffnen, wenn gepusht wird.
+  Dasselbe Fenster brauchen `staging create`, `refresh`, `delete` und `open`: Administrator der
+  Kopie zu sein, ist ebenfalls Code-Ausführung auf dem Server.
 - **Push-Schutz im Agent, nicht in der CLI:** erlaubte Einheiten, verbotene Dateinamen,
   Hash-Prüfung vor dem Tausch und die Sperre „ein Push gleichzeitig" prüft der Server selbst.
 - **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
@@ -732,8 +751,11 @@ Terminal) fragt kein Befehl nach: `refresh`, `delete`, `create --no-anonymize` u
   zuletzt von Live kam: `create`, `refresh --code`), `last_used`, `anonymized`, `db_bytes`, `job`,
   `error`, `pushes`. Leere Felder fehlen – ausser `exists` und `anonymized` ist jedes Feld
   optional. Exit 0 mit Kopie, 50 ohne, 53 gesperrt; `data` ist in allen drei Fällen gesetzt.
-- `open`: `data.url` (der Einmal-Link, nicht protokollieren) und `data.expires`; es startet kein
-  Browser.
+- `open`: `data.url` (der Einmal-Link, nicht protokollieren), `data.expires` und
+  `data.warnings` (Liste von Hinweisen für den Menschen, derzeit: die Kopie nicht im selben
+  Browserprofil wie eine Live-Anmeldung öffnen); es startet kein Browser.
+- `create`, `refresh`, `delete`, `open` ohne offenes Push-Fenster: Exit 40 `push_window_closed`,
+  auf dem Server ist nichts angelegt oder geändert. `status` braucht kein Fenster.
 - `delete`: `data` = `{"site":…,"status":"deleted"}`.
 - Ein leeres `url` in `create`, `refresh` oder `status` heisst: der Agent nannte eine Adresse
   ausserhalb der gekoppelten Site; die CLI gibt sie nicht weiter (Warnung auf stderr).
@@ -776,7 +798,7 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | 21 | disk_full | lokal kein Platz – oder der Server meldet keinen (HTTP 507, bei `push` und `staging`) |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
-| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs |
+| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open` |
 | 41 | push_conflict | Einheit auf dem Server geändert |
 | 42 | push_pending | ein unbestätigter Push blockiert – auch `staging refresh`/`delete` bei unbestätigtem Push nach Staging |
 | 43 | push_rolled_back | Health-Check schlechter als vorher, zurückgerollt |

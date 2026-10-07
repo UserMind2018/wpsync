@@ -113,6 +113,10 @@ namespace WpSync {
         public static $failNext = false;
         /** @var int */
         public static $writes = 0;
+        /** Das eine Pairing der Tests; jedes andere hat kein Fenster. */
+        public const KEY = '0123456789abcdef';
+        /** @var int Push-Fenster dieses Pairings offen bis (Unix-Zeit); 0: geschlossen */
+        public static $until = PHP_INT_MAX;
 
         public static function install(): void
         {
@@ -148,6 +152,11 @@ namespace WpSync {
         public static function lockName(string $purpose): string
         {
             return 'wpsync_test_' . $purpose;
+        }
+
+        public static function pushUntil(string $keyId): int
+        {
+            return $keyId === self::KEY ? self::$until : 0;
         }
 
         public static function pushDirName(): string
