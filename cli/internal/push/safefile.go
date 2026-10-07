@@ -16,7 +16,25 @@ var (
 	ErrSymlink = errors.New("ist ein symbolischer Link – wpsync pusht nur aus echten Verzeichnissen der Site")
 	// ErrChanged: a file or directory is no longer the one the scan saw.
 	ErrChanged = errors.New("hat sich während des Pushs geändert")
+	// ErrNotReadable: a file or folder of a unit to push cannot be read by this process, e.g. one the
+	// site container created with 0600 (Spec Container-Push P-O3).
+	ErrNotReadable = errors.New("ist für wpsync nicht lesbar – Push abgebrochen, Rechte im Docroot prüfen")
 )
+
+// UnreadableError names the path that cannot be read, relative to the docroot (error.path).
+type UnreadableError struct{ Path string }
+
+func (e *UnreadableError) Error() string { return showPath(e.Path) + " " + ErrNotReadable.Error() }
+
+func (e *UnreadableError) Unwrap() error { return ErrNotReadable }
+
+// unreadablePath is the docroot-relative path of a file or folder of a unit ("." = the unit).
+func unreadablePath(unit, rel string) string {
+	if rel == "." {
+		return "wp-content/" + unit
+	}
+	return "wp-content/" + unit + "/" + rel
+}
 
 // unitSteps lists the directories from docroot down to the unit, relative to docroot.
 func unitSteps(unit string) []string {
@@ -83,6 +101,9 @@ func openFile(root *os.Root, unit, rel string, want LocalFile) (*os.File, error)
 		return nil, changed
 	}
 	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, fs.ErrPermission) {
+		return nil, &UnreadableError{Path: unreadablePath(unit, rel)}
+	}
 	if err != nil {
 		return nil, changed
 	}

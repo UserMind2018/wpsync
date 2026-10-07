@@ -463,6 +463,13 @@ func Run(o Options) error {
 	// conflict check differs for staging: a unit this machine pushed there before is compared with
 	// the stamps that push left in the copy, every other unit with the baseline – the copy was made
 	// from live. A push to live never reads the staging stamps.
+	// Every file of a unit to push is read before the begin: a folder or file this process may not
+	// read stops the push here, before the site is asked (P-O3, AC-130).
+	for _, u := range units {
+		if len(u.Unreadable) > 0 {
+			return &UnreadableError{Path: unreadablePath(u.Path, u.Unreadable[0])}
+		}
+	}
 	var copied *copyID
 	var known *stagingBase
 	if target == TargetStaging {

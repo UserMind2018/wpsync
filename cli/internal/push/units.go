@@ -4,6 +4,7 @@ package push
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -42,6 +43,9 @@ type Unit struct {
 	Changed []string                      // new, modified or locally deleted files
 	New     bool                          // unknown to the baseline
 	Version string
+	// Unreadable lists the folders of the unit the scan could not list, relative to the unit ("."
+	// for the unit itself). A push of the unit stops on them (Spec Container-Push P-O3).
+	Unreadable []string
 
 	dir fs.FileInfo // the unit directory as the scan saw it
 }
@@ -194,29 +198,47 @@ func scanUnit(docroot, unit string, base map[string]baseline.FileStamp) (Unit, e
 		return Unit{}, err
 	}
 	defer root.Close()
-	files, err := localFiles(root, unit)
+	files, unreadable, err := localFiles(root, unit)
 	if err != nil {
 		return Unit{}, err
 	}
-	u := Unit{Path: unit, Files: files, Base: base, New: len(base) == 0, Version: versionIn(root, unit), dir: dir}
+	u := Unit{Path: unit, Files: files, Base: base, New: len(base) == 0, Version: versionIn(root, unit), Unreadable: unreadable, dir: dir}
 	for rel, f := range files {
 		if b, ok := u.Base[rel]; !ok || b.Size != f.Size || b.MTime != f.MTime {
 			u.Changed = append(u.Changed, rel)
 		}
 	}
 	for rel, b := range u.Base {
-		if _, ok := files[rel]; !ok && !Ignored(unit, rel, b.Size) {
+		// A file below a folder the scan could not list is unknown, not deleted.
+		if _, ok := files[rel]; !ok && !Ignored(unit, rel, b.Size) && !below(unreadable, rel) {
 			u.Changed = append(u.Changed, rel)
 		}
 	}
 	return u, nil
 }
 
-// localFiles lists the pushable files of a unit: no symlinks, nothing ignored.
-func localFiles(root *os.Root, unit string) (map[string]LocalFile, error) {
+// below reports whether rel lies in one of the folders (relative to the unit, "." = all).
+func below(dirs []string, rel string) bool {
+	for _, d := range dirs {
+		if d == "." || strings.HasPrefix(rel, d+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// localFiles lists the pushable files of a unit: no symlinks, nothing ignored. It needs only stat
+// for files; folders it may not list are returned apart instead of failing the scan, so a folder
+// of the site container that this process cannot read stops only a push of its own unit (P-O3).
+func localFiles(root *os.Root, unit string) (map[string]LocalFile, []string, error) {
 	files := map[string]LocalFile{}
+	var unreadable []string
 	err := fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, fs.ErrPermission) && (d == nil || d.IsDir()) {
+				unreadable = append(unreadable, rel)
+				return fs.SkipDir
+			}
 			return err
 		}
 		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
@@ -232,7 +254,7 @@ func localFiles(root *os.Root, unit string) (map[string]LocalFile, error) {
 		files[rel] = LocalFile{Size: info.Size(), MTime: info.ModTime().Unix()}
 		return nil
 	})
-	return files, err
+	return files, unreadable, err
 }
 
 // Hash fills in the sha256 of every file; the agent decides with it what must be uploaded.
