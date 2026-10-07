@@ -326,6 +326,7 @@ eq "AC-121 pushes: eigener Push mit Journal" \
   "true"$'\t'"$SOURCE_URL/wp-content/plugins/wpsync-agent/rescue.php"
 STG_ID="$(last push-staging-second '.data.push_id')"
 mv "$SITE/.wpsync/pushes/$STG_ID.json" "$E2E/stg-journal.json" # wie ein Push von einem anderen Gerät
+sleep 5 # Bind-Mount-Cache (OrbStack): der Container soll das verschobene Journal nicht mehr sehen
 jrun pushes-foreign s1 pushes "$SLUG" "${C[@]}" --json
 eq "AC-121 pushes: fremder Push ohne Journal und ohne URL" \
   "$(last pushes-foreign ".data.pushes[] | select(.push_id == \"$STG_ID\") | [.journal, has(\"rescue_url\")] | @tsv")" \

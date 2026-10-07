@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [0.5.0] – YYYY-MM-DD · Agent 0.5.0
+## [0.5.0] – 2026-10-08 · Agent 0.5.0
 
 **Nur die CLI ändert sich.** Agent 0.5.0 bleibt; Push nach Live braucht weiter Agent ≥ 0.4.0,
 nach Staging ≥ 0.5.0.
