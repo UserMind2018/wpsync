@@ -74,9 +74,26 @@ type Failure struct {
 	Installed string `json:"installed,omitempty"`
 	Required  string `json:"required,omitempty"`
 	// Reason names a case within Code for callers that must not parse Message ("site_locked",
-	// and the staging cases without an exit code of their own, see reason).
+	// and the staging and push cases without an exit code of their own, see reason).
 	Reason string `json:"reason,omitempty"`
+	// Path: with reason not_readable the file or folder, relative to the docroot.
+	Path string `json:"path,omitempty"`
+	// Device and AdminURL: with exit 40 whose push window it is (as far as pair stored it) and
+	// where an administrator opens it (Spec Container-Push C8).
+	Device   string `json:"device,omitempty"`
+	AdminURL string `json:"admin_url,omitempty"`
 }
+
+// WindowError adds to an exit 40 the device and the admin page of the push window. Message and
+// exit code stay those of Err.
+type WindowError struct {
+	Err      error
+	Device   string
+	AdminURL string
+}
+
+func (e *WindowError) Error() string { return e.Err.Error() }
+func (e *WindowError) Unwrap() error { return e.Err }
 
 // UsageError: wrong call – unknown flag, missing argument, unsupported combination.
 type UsageError struct{ Err error }
@@ -116,12 +133,21 @@ func Classify(err error) Failure {
 		f.Installed, f.Required = outdated.Installed, outdated.Required
 	}
 	f.Reason = reason(err, f.Exit)
+	var unreadable *push.UnreadableError
+	if f.Reason == "not_readable" && errors.As(err, &unreadable) {
+		f.Path = unreadable.Path
+	}
+	var window *WindowError
+	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
+		f.Device, f.AdminURL = window.Device, window.AdminURL
+	}
 	return f
 }
 
 // reason: the local site lock, and what stays unknown although a caller can tell it apart – a
 // staging job that stopped, a copy in a status that does not allow the call, a request that
-// reached the copy instead of the live site, an address of the agent outside the paired site.
+// reached the copy instead of the live site, an address of the agent outside the paired site,
+// and the push cases of Spec Container-Push C11 and P-O3.
 func reason(err error, exit int) string {
 	if errors.Is(err, pull.ErrPullRunning) {
 		return "site_locked"
@@ -143,6 +169,18 @@ func reason(err error, exit int) string {
 		return "staging_state"
 	case code == "wpsync_staging_copy":
 		return "staging_copy"
+	case errors.Is(err, push.ErrNothing):
+		return "nothing_to_push"
+	case errors.Is(err, push.ErrNotWritable):
+		return "not_writable"
+	case errors.Is(err, push.ErrRescueUnreachable):
+		return "rescue_unreachable"
+	case errors.Is(err, push.ErrNotReadable):
+		return "not_readable"
+	case errors.Is(err, push.ErrChanged), errors.Is(err, push.ErrSymlink):
+		return "local_changed"
+	case errors.Is(err, push.ErrTargetMismatch):
+		return "target_mismatch"
 	}
 	return ""
 }
