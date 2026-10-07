@@ -2,6 +2,7 @@ package push
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -105,14 +106,14 @@ func hasDots(path string) bool {
 // Check requests every URL once, with pause between two requests. A redirect is followed only on
 // the host of the page itself; any other answers as the 3xx it is.
 func Check(hc *http.Client, urls []string, pause func()) []Probe {
-	return check(hc, urls, pause, nil)
+	return check(context.Background(), hc, urls, pause, nil)
 }
 
 // check is Check; with acc it checks a staging copy: every request carries the access cookie and
 // nothing else, uses no cookie jar (the copy also starts an admin session – V20), and neither a
 // page nor a redirect outside the copy is requested, so the cookie never reaches live or another
-// host.
-func check(hc *http.Client, urls []string, pause func(), acc *copyAccess) []Probe {
+// host. A request still running when ctx ends counts as no answer.
+func check(ctx context.Context, hc *http.Client, urls []string, pause func(), acc *copyAccess) []Probe {
 	client := *hc
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -138,12 +139,12 @@ func check(hc *http.Client, urls []string, pause func(), acc *copyAccess) []Prob
 			probes[i] = Probe{URL: u, Empty: true} // never requested
 			continue
 		}
-		probes[i] = probe(&client, u, acc)
+		probes[i] = probe(ctx, &client, u, acc)
 	}
 	return probes
 }
 
-func probe(hc *http.Client, rawURL string, acc *copyAccess) Probe {
+func probe(ctx context.Context, hc *http.Client, rawURL string, acc *copyAccess) Probe {
 	p := Probe{URL: rawURL, Empty: true}
 	nonce := make([]byte, 4)
 	_, _ = rand.Read(nonce)
@@ -152,7 +153,7 @@ func probe(hc *http.Client, rawURL string, acc *copyAccess) Probe {
 		sep = "&"
 	}
 	// The parameter keeps page caches from answering with a copy from before the push.
-	req, err := http.NewRequest(http.MethodGet, rawURL+sep+"wpsync_hc="+hex.EncodeToString(nonce), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL+sep+"wpsync_hc="+hex.EncodeToString(nonce), nil)
 	if err != nil {
 		return p
 	}

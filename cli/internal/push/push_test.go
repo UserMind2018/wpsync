@@ -79,6 +79,9 @@ type fakeSite struct {
 	noStatus   bool                                     // /staging/status fails
 	statuses   int                                      // calls of /staging/status
 	ids        []string                                 // push ids of the next real begins; empty: testID
+	onUpload   func()                                   // runs when an upload request arrives (SIGTERM tests)
+	onCommit   func(r *http.Request)                    // runs when /push/commit arrives, before it is applied
+	stall      bool                                     // frontend pages after the swap answer only when the request ends
 	pushID     string                                   // id of the last real begin
 	forStaging bool                                     // the last real begin went to staging
 }
@@ -145,6 +148,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	route := r.URL.Query().Get("rest_route")
 	if route == "" { // frontend page for the health check
+		if f.stall && f.committed && !f.rolledBack {
+			<-r.Context().Done()
+			return
+		}
 		if f.broken && f.committed && !f.rolledBack {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte("Fatal error"))
@@ -232,6 +239,9 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(res)
 	case "/wpsync/v1/push/upload":
+		if f.onUpload != nil {
+			f.onUpload()
+		}
 		var req struct {
 			PushID string               `json:"push_id"`
 			Unit   int                  `json:"unit"`
@@ -254,6 +264,9 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Write([]byte(`{"received":1}`))
 	case "/wpsync/v1/push/commit":
+		if f.onCommit != nil {
+			f.onCommit(r)
+		}
 		f.committed = true
 		stamps := map[string]map[string]agentapi.PushStamp{}
 		for _, u := range f.begins[len(f.begins)-1].Units {

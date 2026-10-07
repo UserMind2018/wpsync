@@ -97,6 +97,7 @@ func Rollback(o Options, pushID string) error {
 		return err
 	}
 	defer unlock()
+	o.Ctx = nil // a rollback always runs to its end (Spec Container-Push C12)
 	o = o.defaults()
 	siteDir, _, err := o.dirs()
 	if err != nil {
