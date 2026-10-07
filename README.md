@@ -304,7 +304,9 @@ bricht jeder Push ab.
 
 1. Probelauf: Der Agent meldet pro Einheit, welche Dateien er braucht, ob sich die Einheit auf
    der Site seit deinem letzten Pull geändert hat und welche Version dort liegt.
-2. Die CLI prüft, ob `rescue.php` erreichbar ist, und ruft Startseite, Login und – bei
+2. Die CLI prüft, ob `rescue.php` erreichbar ist – ab Agent 0.5.1 über einen kurzlebigen Stub
+   `wpsync-rescue-<zufall>.php` im Webroot, damit ein gesperrter Plugin-Ordner nicht stört –,
+   und ruft Startseite, Login und – bei
    WooCommerce – Shop, Warenkorb und Kasse auf. Weitere Seiten: `health_urls` in der
    Site-Konfiguration.
 3. Upload in einen Arbeitsordner, Prüfung jeder Datei gegen ihren Hash.
@@ -324,7 +326,8 @@ Erst `wpsync pull`, lokal zusammenführen, dann erneut pushen. `--force` übersc
 solange das Push-Fenster des Geräts offen ist; sonst öffnet ein Administrator das Fenster oder
 rollt im WP-Admin unter Werkzeuge → wpsync → Pushes selbst zurück (dort ohne Fenster). Ein
 unbestätigter Push (getauscht, Health-Check noch nicht bestanden) lässt sich immer zurückrollen.
-Legt er WordPress lahm, geht die CLI über `wp-content/plugins/wpsync-agent/rescue.php`: Das
+Legt er WordPress lahm, geht die CLI über `rescue.php` (direkt im Plugin-Ordner oder über den
+Stub im Webroot, der bis etwa 10 Minuten nach der Bestätigung liegen bleibt): Das
 Skript lädt kein WordPress, prüft einen Schlüssel, den nur dein Mac aus dem Pairing-Secret
 ableiten kann, und rollt nur unbestätigte Pushes zurück. Ein Push lässt sich nur zurückrollen,
 solange kein späterer Push dieselbe Einheit getauscht hat.
@@ -344,8 +347,12 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
   Aufruf seine Tabellen umbauen. Ein Rollback nimmt nur Dateien zurück. Die CLI zeigt den
   Versionswechsel und verlangt eine eigene Bestätigung (`--yes` allein genügt nicht, zusätzlich
   `--allow-version-change`). Vorher ein Backup der Datenbank anlegen.
-- **Kein Rückweg, kein Push:** Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe
-  unter `wp-content/plugins/`, ist `rescue.php` nicht erreichbar und die CLI pusht nicht.
+- **Kein Rückweg, kein Push:** Ist `rescue.php` nicht erreichbar, pusht die CLI nicht. Sperrt ein
+  Sicherheits-Plugin (z. B. Solid/iThemes Security „Disable PHP in Plugins“) PHP unter
+  `wp-content/plugins/`, legt der Agent ab 0.5.1 für die Dauer des Pushs einen Stub im Webroot
+  an. Darf der Webserver dort nicht schreiben oder liegt `wp-content` nicht direkt im Webroot,
+  bleibt nur die Ausnahme für `wpsync-agent/rescue.php`; die CLI nennt dann erkannte
+  Sicherheits-Plugins.
 - **Unterbrochener Push:** Bricht die CLI nach dem Tausch ab (Absturz, SIGKILL), bleibt der neue
   Stand unbestätigt live und blockiert weitere Pushes (Exit 42). Der nächste Aufruf nennt die
   Auswege: `wpsync pushes <site> --confirm <id>` oder `wpsync rollback <site> <id>`. SIGTERM
@@ -562,6 +569,10 @@ abbilden lässt, sofern das Profil sie kopiert.
   10 Minuten. Der Schlüssel ist pro Push
   aus dem Pairing-Secret abgeleitet und geht als POST-Formularfeld an das Skript, nie in der
   URL; auf dem Server liegt nur sein Hash.
+- **Rescue-Stub:** `wpsync-rescue-<32 hex>.php` im Webroot enthält nur ein `require` auf
+  `rescue.php` mit relativem Pfad. Er entsteht nur, wenn die CLI pushen will, liegt solange ein
+  Push läuft oder unbestätigt ist und höchstens etwa 10 Minuten darüber hinaus; Deaktivieren des
+  Plugins löscht ihn. Der Schlüsselschutz ist derselbe wie bei `rescue.php`.
 - **Snapshots:** liegen in `wp-content/wpsync-push-<zufall>/` mit `.htaccess`-Sperre. Auf
   Servern ohne `.htaccess`-Auswertung schützt nur der zufällige Name.
 - **Datenminimierung:** Personenbezogene Daten verlassen den Server pseudonymisiert –
@@ -716,7 +727,8 @@ Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per
 | Bilder fehlen lokal | Jahr liegt vor `uploads.since`; der Proxy lädt beim ersten Aufruf nach. Dauerhaft: `since` im Profil anpassen und erneut ziehen |
 | „das Push-Fenster ist geschlossen“ | Im WP-Admin unter Werkzeuge → wpsync beim eigenen Gerät öffnen |
 | „die Site hat sich seit dem letzten Pull geändert“ | `wpsync pull <site>`, lokal zusammenführen, erneut pushen – oder bewusst `--force` |
-| „rescue.php ist nicht erreichbar“ | Server oder Sicherheits-Plugin sperrt direkte PHP-Aufrufe unter `wp-content/plugins/` → dort eine Ausnahme für `wpsync-agent/rescue.php` einrichten |
+| „rescue.php ist nicht erreichbar“ | Agent auf 0.5.1 bringen (Stub im Webroot). Hilft das nicht: Webroot für den Webserver nicht beschreibbar und PHP unter `wp-content/plugins/` gesperrt → Ausnahme für `wpsync-agent/rescue.php` einrichten; die Meldung nennt erkannte Sicherheits-Plugins und ihre Einstellung |
+| „der Notfallweg über rescue.php besteht nur bis kurz nach der Bestätigung …“ | Der Push ist bestätigt und der Stub aufgeräumt → im WP-Admin unter Werkzeuge → wpsync zurückrollen |
 | „Push … ist getauscht, aber nicht bestätigt“ | Site ansehen, dann `wpsync pushes <site> --confirm <id>` oder `wpsync rollback <site> <id>` |
 | „der Webserver darf das Verzeichnis nicht ersetzen“ | Das Verzeichnis gehört einem anderen Benutzer als PHP (typisch nach FTP-Upload) → Besitzer oder Rechte auf dem Server anpassen |
 | Push wurde automatisch zurückgerollt | Die Meldung nennt die Seite, die schlechter wurde. Lokal reparieren und erneut pushen; auf der Site ist der alte Stand live |
