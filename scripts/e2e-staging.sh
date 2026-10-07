@@ -18,6 +18,9 @@ WPSYNC="$E2E/bin/wpsync" # eigener Build – nie eine installierte wpsync
 SRC="$E2E/source"
 PUB="$SRC/public"
 LOCAL="$WPSYNC_SITES_DIR/$TARGET"
+THEME="$LOCAL/public/wp-content/themes/e2e-theme"
+STAMPS="$LOCAL/.wpsync/staging-base.json" # gemerkte Stempel der Pushes nach Staging
+GITDIR="$WPSYNC_SITES_DIR/.wpsync-git/$TARGET.git" # internes Git der lokalen Site
 JSON="$E2E/json"
 KEY=00000000000000e2
 SECRET="$(printf 'ab%.0s' $(seq 32))"
@@ -29,7 +32,7 @@ DEACTIVATED='^option:recently_activated[[:space:]]'
 
 CHECKS=0
 FAILED=0
-KNOWN=""
+MARK=v1
 NGINX=no
 KEY_ID=""
 RC=0
@@ -37,7 +40,6 @@ RC=0
 pass() { CHECKS=$((CHECKS + 1)); }
 bad() { CHECKS=$((CHECKS + 1)); FAILED=$((FAILED + 1)); echo "FAIL: $*"; }
 fail() { echo "FAIL: $*"; exit 1; }
-known() { KNOWN="$KNOWN"$'\n'"OFFEN: $*"; echo "OFFEN: $*"; }
 eq() { if [ "$2" = "$3" ]; then pass; else bad "$1 (ist: $2, soll: $3)"; fi; } # eq <was> <ist> <soll>
 ok() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then pass; else bad "$what"; fi; }
 no() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$what"; else pass; fi; }
@@ -50,6 +52,11 @@ http_url() { ddev describe -j | jq -r '.raw.httpurl'; }
 last() { tail -n 1 "$1" | jq -r "$2"; } # last <datei> <jq-Ausdruck> über der Ergebniszeile
 stg() { (cd "$SRC" && ddev wp --path="/var/www/html/public/$STG_DIR" "$@"); }
 window() { (cd "$SRC" && ddev wp eval "WpSync\\Store::setPushUntil('$KEY_ID', $1);" >/dev/null); }
+mark() { sed -i '' -E "s/e2e-marker v[0-9]+/e2e-marker v$1/" "$THEME/index.php"; MARK="v$1"; } # mark <n>: lokaler Stand des Themes
+git_state() { git --git-dir="$GITDIR" for-each-ref; git --git-dir="$GITDIR" rev-list --all --count; }
+in_git() { git --git-dir="$GITDIR" ls-tree -r --name-only HEAD | grep -q -- "$1"; } # in_git <muster>: Pfad im letzten Schnappschuss
+stamp_push() { jq -r --arg u "$1" '.units[$u].push_id // "-"' "$STAMPS"; } # stamp_push <einheit>: Push, dessen Stempel gemerkt sind
+conflicts() { jq -c 'select(.event == "plan") | [.data.units[].conflicts[]]' "$1"; }
 state_file() { echo "$PUB/$STG_DIR/wp-content/wpsync-staging.json"; }
 edit_state() { # edit_state <jq-Filter>: Zustandsdatei der Kopie ändern, Rechte bleiben
   local file tmp
@@ -158,22 +165,15 @@ finish() {
   fi
   rm -f "$E2E/json-raw.tmp"
   echo
-  [ -z "$KNOWN" ] || printf '%s\n' "${KNOWN#$'\n'}"
-  local open=0
-  [ -z "$KNOWN" ] || open="$(printf '%s\n' "${KNOWN#$'\n'}" | wc -l | tr -d ' ')"
   if [ "$rc" != 0 ]; then
     echo "E2E Staging ABGEBROCHEN (Exit $rc) – $CHECKS Prüfungen bis dahin, $FAILED FAIL"
     exit "$rc"
   fi
   if [ "$FAILED" != 0 ]; then
-    echo "E2E Staging: $CHECKS Prüfungen, $FAILED FAIL, $open OFFEN"
+    echo "E2E Staging: $CHECKS Prüfungen, $FAILED FAIL"
     exit 1
   fi
-  if [ "$open" != 0 ]; then
-    echo "E2E Staging: $CHECKS Prüfungen grün, 0 FAIL, $open OFFEN (Entscheidung Owner)"
-  else
-    echo "E2E Staging OK – $CHECKS Prüfungen"
-  fi
+  echo "E2E Staging OK – $CHECKS Prüfungen grün, 0 FAIL"
 }
 trap finish EXIT
 
@@ -285,6 +285,7 @@ if find "$PUB" -maxdepth 1 -name 'wpsync-staging-*' | grep -q . || [ -n "$(SQL "
 fi
 CODE="$(ddev wp wpsync pair-code | tail -1)"
 "$WPSYNC" unpair "$TARGET" >/dev/null 2>&1 || true
+rm -f "$STAMPS" # Stempel einer Kopie aus einem früheren Lauf
 "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "$TARGET" --insecure
 KEY_ID="$(awk '/^key_id:/ { print $2 }' "$WPSYNC_CONFIG_DIR/sites/$TARGET.yaml")"
 "$WPSYNC" scan "$TARGET" --refresh --preset vollstaendig --exclude-plugin e2e-excluded
@@ -559,11 +560,14 @@ jrun staging-status "$WPSYNC" staging status "$TARGET" --json
 eq "status mit Kopie: Exit 0" "$RC" 0
 eq "status: bereit" "$(last "$JSON/staging-status.jsonl" .data.status)" ready
 DB_BYTES="$(last "$JSON/staging-status.jsonl" '.data.db_bytes // 0')"
+CODE_AT="$(last "$JSON/staging-status.jsonl" '.data.code_copied_at // 0')"
+COPIED_AT="$(last "$JSON/staging-status.jsonl" '.data.copied_at // 0')"
+ok "status nennt code_copied_at" test "$CODE_AT" -gt 0
 
 echo "== AC-97: Push nach Staging nur mit Fenster, Live unverändert"
-THEME="$LOCAL/public/wp-content/themes/e2e-theme"
 cp "$LOCAL/.wpsync/baseline.json" "$E2E/baseline.before"
-sed -i '' 's/e2e-marker v1/e2e-marker v2/' "$THEME/index.php"
+git_state > "$E2E/git.before"
+mark 2
 window 0
 jrun push-staging-window-closed-40 "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 eq "AC-97 ohne Fenster: Exit 40" "$RC" 40
@@ -583,6 +587,7 @@ ok "AC-105 Änderung auf Staging sichtbar" sh -c "curl -s -b '$JAR' '$STG_URL/' 
 ok "AC-105 Live zeigt den alten Stand" sh -c "curl -s '$SOURCE_URL/' | grep -q 'e2e-marker v1'"
 ok "6.2 Hinweis auf den Live-Push" hasF "$JSON/push-staging.err" "wpsync push $TARGET code themes/e2e-theme"
 ok "V8 Arbeitsordner des Pushs liegt in der Kopie" sh -c "find '$SC/wp-content' -maxdepth 1 -name 'wpsync-push-*' | grep -q ."
+eq "Zusatz 7: der erste Push nach Staging merkt sich die Stempel der Einheit" "$(stamp_push themes/e2e-theme)" "$PUSH_STG"
 
 echo "== AC-98: Baseline unverändert, Live-Push schlägt dieselbe Einheit vor"
 ok "AC-98 Baseline unverändert" cmp -s "$E2E/baseline.before" "$LOCAL/.wpsync/baseline.json"
@@ -594,6 +599,7 @@ echo "== AC-99: Syntaxfehler auf Staging wird zurückgerollt"
 HEALTH="$LOCAL/public/wp-content/plugins/e2e-health/e2e-health.php"
 cp -p "$HEALTH" "$E2E/e2e-health.good"
 printf '\nthis is not php(\n' >> "$HEALTH"
+cp "$STAMPS" "$E2E/stamps.before"
 jrun push-staging-rolled-back-43 "$WPSYNC" push "$TARGET" code plugins/e2e-health --to staging --yes --json
 eq "AC-99 zurückgerollt: Exit 43" "$RC" 43
 cat "$JSON/push-staging-rolled-back-43.err"
@@ -601,6 +607,7 @@ no "AC-99 kaputter Code noch auf Staging" grep -q "this is not php" "$SC/wp-cont
 eq "AC-99 Kopie wieder erreichbar" "$(code -b "$JAR" "$STG_URL/")" 200
 eq "AC-99 Live erreichbar" "$(code "$SOURCE_URL/")" 200
 no "AC-99 kaputter Code auf Live" grep -q "this is not php" "$WPC/plugins/e2e-health/e2e-health.php"
+ok "Zusatz 7: ein zurückgerollter Push lässt die gemerkten Stempel byte-gleich" cmp -s "$E2E/stamps.before" "$STAMPS"
 cp -p "$E2E/e2e-health.good" "$HEALTH"
 
 echo "== AC-100: Riegel und Pfade ausserhalb der Kopie nicht pushbar (manipulierter Client)"
@@ -616,64 +623,111 @@ for unit in 'mu-plugins|00-wpsync-staging.php' 'mu-plugins|wpsync-staging/Stagin
 done
 ok "AC-100 Riegel unverändert" cmp -s "$ROOT/agent/staging/00-wpsync-staging.php" "$SC/wp-content/mu-plugins/00-wpsync-staging.php"
 
-echo "== Zusatz 7: zweiter Push nach Staging ohne --force"
-sed -i '' 's/e2e-marker v2/e2e-marker v3/' "$THEME/index.php"
+echo "== Zusatz 7: wiederholte Pushes nach Staging ohne --force"
+STGTHEME="$SC/wp-content/themes/e2e-theme"
+window "time() + 900"
+mark 3
 jrun push-staging-second "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
 cat "$JSON/push-staging-second.err"
-STG_MARK=v2
-case "$RC" in
-  0)
-    echo "INFO: zweiter Push nach Staging ohne --force lief konfliktfrei (Exit 0)"
-    STG_MARK=v3
-    ;;
-  41)
-    # OFFEN: Entscheidung Owner – die CLI schickt als base die Baseline von Live; nach dem ersten
-    # Push tragen die Dateien der Kopie neue Stempel, also meldet der Agent jede davon als Konflikt.
-    known "Zusatz 7: zweiter Push nach Staging ohne --force endet mit Exit 41, Konflikte: $(jq -c 'select(.event == "plan") | [.data.units[].conflicts[]]' "$JSON/push-staging-second.jsonl")"
-    ;;
-  *) bad "Zusatz 7: zweiter Push nach Staging endet mit Exit $RC (weder 0 noch 41)" ;;
-esac
-ok "Zusatz 7: Kopie hat danach den Stand $STG_MARK" grep -q "e2e-marker $STG_MARK" "$SC/wp-content/themes/e2e-theme/index.php"
-ok "AC-98 Baseline auch nach dem zweiten Push unverändert" cmp -s "$E2E/baseline.before" "$LOCAL/.wpsync/baseline.json"
+eq "Zusatz 7: zweiter Push nach Staging ohne --force" "$RC" 0
+PUSH_STG2="$(last "$JSON/push-staging-second.jsonl" .data.push_id)"
+eq "Zusatz 7: zweiter Push ohne Konflikt im Plan" "$(conflicts "$JSON/push-staging-second.jsonl")" '[]'
+ok "Zusatz 7: Kopie hat den Stand des zweiten Pushs ($MARK)" cmp -s "$THEME/index.php" "$STGTHEME/index.php"
+ok "Zusatz 7: Live unverändert" grep -q 'e2e-marker v1' "$WPC/themes/e2e-theme/index.php"
+ok "AC-98 Baseline auch nach dem zweiten Push byte-gleich" cmp -s "$E2E/baseline.before" "$LOCAL/.wpsync/baseline.json"
+git_state > "$E2E/git.after"
+same "AC-98 internes Git nach zwei Pushes nach Staging unverändert" "$E2E/git.before" "$E2E/git.after"
+ok "Zusatz 7: .wpsync/staging-base.json liegt neben der Baseline" test -f "$STAMPS" -a ! -L "$STAMPS"
+eq "Zusatz 7: gemerkt sind die Stempel des zweiten Pushs" "$(stamp_push themes/e2e-theme)" "$PUSH_STG2"
+
+# Eine Datei der gepushten Einheit wird direkt in der Kopie geändert: der nächste Push meldet das.
+printf '\n// direkt in der Kopie geändert\n' >> "$STGTHEME/functions.php"
+mark 4
+cp "$STAMPS" "$E2E/stamps.before"
+jrun push-staging-conflict-41 "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
+cat "$JSON/push-staging-conflict-41.err"
+eq "Zusatz 7: in der Kopie geänderte Datei: Exit 41" "$RC" 41
+eq "Zusatz 7: Konflikt nennt genau die in der Kopie geänderte Datei" "$(conflicts "$JSON/push-staging-conflict-41.jsonl")" '["functions.php"]'
+ok "Zusatz 7: Hinweis, dass ein Pull den Konflikt nicht löst" hasF "$JSON/push-staging-conflict-41.err" "in der Kopie geändert seit dem letzten Push nach Staging"
+ok "Zusatz 7: abgelehnter Push ändert die Kopie nicht (index.php)" grep -q 'e2e-marker v3' "$STGTHEME/index.php"
+ok "Zusatz 7: abgelehnter Push ändert die Kopie nicht (functions.php)" grep -q 'direkt in der Kopie geändert' "$STGTHEME/functions.php"
+ok "Zusatz 7: abgelehnter Push lässt die gemerkten Stempel byte-gleich" cmp -s "$E2E/stamps.before" "$STAMPS"
+jrun push-staging-force "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --force --json
+eq "Zusatz 7: derselbe Push mit --force" "$RC" 0
+PUSH_FORCE="$(last "$JSON/push-staging-force.jsonl" .data.push_id)"
+ok "Zusatz 7: --force bringt den lokalen Stand ($MARK)" cmp -s "$THEME/index.php" "$STGTHEME/index.php"
+ok "Zusatz 7: --force überschreibt die Änderung in der Kopie" cmp -s "$THEME/functions.php" "$STGTHEME/functions.php"
+# Danach geht es wieder ohne --force weiter.
+mark 5
+jrun push-staging-after-force "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
+eq "Zusatz 7: Push nach dem --force wieder ohne --force" "$RC" 0
+PUSH_STG3="$(last "$JSON/push-staging-after-force.jsonl" .data.push_id)"
+ok "Zusatz 7: Kopie hat den Stand $MARK" cmp -s "$THEME/index.php" "$STGTHEME/index.php"
+
+# Rollback eines Pushs nach Staging: die Stempel gehen auf den Stand davor zurück.
+jrun rollback-staging-id "$WPSYNC" rollback "$TARGET" "$PUSH_STG3" --json
+eq "Zusatz 7: rollback <staging-id>" "$RC" 0
+eq "Zusatz 7: rollback <staging-id>: Ziel im Ergebnis" "$(last "$JSON/rollback-staging-id.jsonl" '.data.push_id + " " + .data.target + " " + .data.status')" "$PUSH_STG3 staging rolled_back"
+ok "Zusatz 7: Kopie nach dem Rollback auf dem Stand davor (v4)" grep -q 'e2e-marker v4' "$STGTHEME/index.php"
+eq "Zusatz 7: gemerkt sind wieder die Stempel des Pushs davor" "$(stamp_push themes/e2e-theme)" "$PUSH_FORCE"
+jrun push-staging-after-rollback "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
+cat "$JSON/push-staging-after-rollback.err"
+eq "Zusatz 7: Push nach Staging nach dem Rollback ohne --force" "$RC" 0
+PUSH_STG4="$(last "$JSON/push-staging-after-rollback.jsonl" .data.push_id)"
+ok "Zusatz 7: Kopie hat wieder den Stand $MARK" cmp -s "$THEME/index.php" "$STGTHEME/index.php"
+ok "AC-98 Baseline nach allen Pushes nach Staging byte-gleich" cmp -s "$E2E/baseline.before" "$LOCAL/.wpsync/baseline.json"
+git_state > "$E2E/git.after"
+same "AC-98 internes Git nach allen Pushes nach Staging unverändert" "$E2E/git.before" "$E2E/git.after"
+ok "Zusatz 7: Live nach allen Pushes nach Staging unverändert" grep -q 'e2e-marker v1' "$WPC/themes/e2e-theme/index.php"
 
 echo "== Zusatz 8: derselbe Stand nach Live, rollback pro Ziel (V10)"
+# Live wird gegen die Baseline geprüft, nie gegen die Staging-Stempel: mit denen (Stand $MARK der
+# Kopie) meldete der Agent jede Datei von Live als geändert.
+cp "$STAMPS" "$E2E/stamps.before"
 jrun push-live "$WPSYNC" push "$TARGET" code themes/e2e-theme --yes --json
-eq "Zusatz 8: Push nach Live" "$RC" 0
+eq "Zusatz 8: Push nach Live ohne --force" "$RC" 0
 PUSH_LIVE="$(last "$JSON/push-live.jsonl" .data.push_id)"
 eq "Zusatz 8: Ziel im Ergebnis" "$(last "$JSON/push-live.jsonl" '.data.target + " " + .data.status')" "live confirmed"
+eq "Zusatz 8: Plan gegen die Baseline: kein Konflikt, eine Datei zu übertragen" \
+  "$(jq -c 'select(.event == "plan") | [.data.units[] | [.path, .conflicts, .upload]]' "$JSON/push-live.jsonl")" '[["themes/e2e-theme",[],1]]'
 ok "Zusatz 8: Live hat den lokalen Stand" cmp -s "$THEME/index.php" "$WPC/themes/e2e-theme/index.php"
-ok "Zusatz 8: Kopie bleibt bei $STG_MARK" grep -q "e2e-marker $STG_MARK" "$SC/wp-content/themes/e2e-theme/index.php"
+ok "Zusatz 8: Kopie bleibt bei $MARK" grep -q "e2e-marker $MARK" "$STGTHEME/index.php"
 no "Zusatz 8: Baseline nach dem Live-Push unverändert" cmp -s "$E2E/baseline.before" "$LOCAL/.wpsync/baseline.json"
+ok "Zusatz 8: der Live-Push lässt die Staging-Stempel byte-gleich" cmp -s "$E2E/stamps.before" "$STAMPS"
+git_state > "$E2E/git.live"
+no "Zusatz 8: internes Git nach dem Live-Push unverändert" cmp -s "$E2E/git.before" "$E2E/git.live"
+ok "Zusatz 8: der Schnappschuss des Live-Pushs enthält die Baseline" in_git '^\.wpsync/baseline\.json$'
+no "Zusatz 7: staging-base.json im internen Git" in_git 'staging-base'
+no "Zusatz 7: staging-base.json in der Historie des internen Gits" sh -c "git --git-dir='$GITDIR' log --all --name-only --format= | grep -q 'staging-base'"
 jrun pushes "$WPSYNC" pushes "$TARGET" --json
 eq "pushes --json" "$RC" 0
 eq "pushes: Ziel je Push" "$(last "$JSON/pushes.jsonl" "[.data.pushes[] | select(.push_id == \"$PUSH_STG\" or .push_id == \"$PUSH_LIVE\") | .target] | sort | join(\",\")")" "live,staging"
-run rollback-wrong-target.log "$WPSYNC" rollback "$TARGET" "$PUSH_STG" --to live
+# Erwartete Ablehnung: die ID gehört einem Push nach Staging, --to nennt Live.
+run rollback-wrong-target.log "$WPSYNC" rollback "$TARGET" "$PUSH_STG4" --to live
 eq "Zusatz 8: rollback <staging-id> --to live abgelehnt" "$RC" 1
 cat "$E2E/rollback-wrong-target.log"
-ok "Zusatz 8: danach Live unverändert" grep -q 'e2e-marker v3' "$WPC/themes/e2e-theme/index.php"
-ok "Zusatz 8: danach Kopie unverändert" grep -q "e2e-marker $STG_MARK" "$SC/wp-content/themes/e2e-theme/index.php"
+ok "Zusatz 8: die Ablehnung nennt das Ziel des Pushs" hasF "$E2E/rollback-wrong-target.log" "ging nach Staging, nicht nach Live"
+ok "Zusatz 8: danach Live unverändert" grep -q "e2e-marker $MARK" "$WPC/themes/e2e-theme/index.php"
+ok "Zusatz 8: danach Kopie unverändert" grep -q "e2e-marker $MARK" "$STGTHEME/index.php"
+ok "Zusatz 8: danach Staging-Stempel unverändert" cmp -s "$E2E/stamps.before" "$STAMPS"
 jrun rollback "$WPSYNC" rollback "$TARGET" --json
 eq "Zusatz 8: rollback ohne ID" "$RC" 0
 eq "V10 rollback ohne ID nimmt den Live-Push" "$(last "$JSON/rollback.jsonl" '.data.push_id + " " + .data.target + " " + .data.status')" "$PUSH_LIVE live rolled_back"
 ok "Zusatz 8: Live wieder auf dem alten Stand" grep -q 'e2e-marker v1' "$WPC/themes/e2e-theme/index.php"
-ok "Zusatz 8: Kopie vom Live-Rollback unberührt" grep -q "e2e-marker $STG_MARK" "$SC/wp-content/themes/e2e-theme/index.php"
-ok "Zusatz 8: lokal nichts verändert" grep -q 'e2e-marker v3' "$THEME/index.php"
-# Der neueste Staging-Push zurück, danach ist ein Push nach Staging wieder ein erster.
+ok "Zusatz 8: Kopie vom Live-Rollback unberührt" grep -q "e2e-marker $MARK" "$STGTHEME/index.php"
+ok "Zusatz 8: lokal nichts verändert" grep -q "e2e-marker $MARK" "$THEME/index.php"
+ok "Zusatz 8: der Live-Rollback lässt die Staging-Stempel byte-gleich" cmp -s "$E2E/stamps.before" "$STAMPS"
+# Der neueste Staging-Push zurück – obwohl der Live-Push jünger war –, danach wieder ohne --force.
 jrun rollback-staging "$WPSYNC" rollback "$TARGET" --to staging --json
 eq "rollback --to staging" "$RC" 0
-eq "rollback --to staging: Ziel im Ergebnis" "$(last "$JSON/rollback-staging.jsonl" '.data.target + " " + .data.status')" "staging rolled_back"
-BACK=v1
-[ "$STG_MARK" = v2 ] || BACK=v2
-ok "rollback --to staging: Kopie auf dem Stand davor ($BACK)" grep -q "e2e-marker $BACK" "$SC/wp-content/themes/e2e-theme/index.php"
+eq "rollback --to staging nimmt den neuesten Push nach Staging" "$(last "$JSON/rollback-staging.jsonl" '.data.push_id + " " + .data.target + " " + .data.status')" "$PUSH_STG4 staging rolled_back"
+ok "rollback --to staging: Kopie auf dem Stand davor (v4)" grep -q 'e2e-marker v4' "$STGTHEME/index.php"
 ok "rollback --to staging: Live unberührt" grep -q 'e2e-marker v1' "$WPC/themes/e2e-theme/index.php"
+eq "rollback --to staging: gemerkt sind wieder die Stempel des Pushs davor" "$(stamp_push themes/e2e-theme)" "$PUSH_FORCE"
 run push-staging-3.log "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes
 cat "$E2E/push-staging-3.log"
-if [ "$BACK" = v1 ]; then
-  eq "Push nach Staging nach dem Rollback (Kopie wieder wie Live): konfliktfrei" "$RC" 0
-elif [ "$RC" != 0 ]; then
-  "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --force >/dev/null
-fi
-ok "Kopie hat den lokalen Stand v3" grep -q 'e2e-marker v3' "$SC/wp-content/themes/e2e-theme/index.php"
+eq "Push nach Staging nach rollback --to staging ohne --force" "$RC" 0
+ok "Kopie hat den lokalen Stand $MARK" cmp -s "$THEME/index.php" "$STGTHEME/index.php"
 
 echo "== Zusatz 2: eine gepushte .htaccess mit Rewrite-Direktiven öffnet den Unterordner nicht"
 REWRITE="$LOCAL/public/wp-content/plugins/e2e-rewrite"
@@ -713,13 +767,25 @@ SQL "DELETE FROM e2e_wpsync_pushes WHERE push_id = 'p_20261006_aaaaaaaaaaaa'"
 jrun staging-refresh "$WPSYNC" staging refresh "$TARGET" --yes --json "${FAST[@]}"
 eq "AC-101 refresh" "$RC" 0
 no "AC-101 Datenbank nicht aufgefrischt" test "$(SQL "SELECT option_value FROM ${STG}options WHERE option_name = 'blogdescription'")" = staging-only
-ok "AC-101 gepushter Code bleibt" grep -q 'e2e-marker v3' "$SC/wp-content/themes/e2e-theme/index.php"
+ok "AC-101 gepushter Code bleibt" grep -q "e2e-marker $MARK" "$SC/wp-content/themes/e2e-theme/index.php"
 eq "AC-90 abgewählte Tabelle existiert leer" "$(SQL "SELECT COUNT(*) FROM ${STG}wc_orders")" 0
 ok "AC-90 Live behält die Bestellungen" test "$(SQL "SELECT COUNT(*) FROM e2e_wc_orders")" -gt 0
 eq "5.4 nach refresh gilt das alte Cookie nicht mehr" "$(code -b "$JAR" "$STG_URL/")" 403
 rm -f "$JAR"
 [ "$(code -c "$JAR" "$("$WPSYNC" staging open "$TARGET" --print)")" = 302 ] || fail "Zugang nach refresh"
 eq "Zugang nach refresh" "$(code -b "$JAR" "$STG_URL/")" 200
+# Zusatz 7: ein refresh nur der Daten lässt den Code der Kopie stehen – die Stempel gelten weiter.
+"$WPSYNC" staging status "$TARGET" --json > "$E2E/status-refreshed.json"
+eq "Zusatz 7: refresh ohne --code lässt code_copied_at stehen" "$(last "$E2E/status-refreshed.json" .data.code_copied_at)" "$CODE_AT"
+ok "Zusatz 7: refresh ohne --code setzt copied_at neu" test "$(last "$E2E/status-refreshed.json" .data.copied_at)" -gt "$COPIED_AT"
+window "time() + 900"
+mark 6
+jrun push-staging-after-refresh "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes --json
+cat "$JSON/push-staging-after-refresh.err"
+eq "Zusatz 7: Push nach Staging nach refresh (ohne --code) ohne --force" "$RC" 0
+no "Zusatz 7: refresh ohne --code verwirft die Stempel" hasF "$JSON/push-staging-after-refresh.err" "neu von Live"
+ok "Zusatz 7: Kopie hat den Stand $MARK" cmp -s "$THEME/index.php" "$SC/wp-content/themes/e2e-theme/index.php"
+eq "Zusatz 7: Stempel der anderen Einheit bleiben über den refresh" "$(jq -c '.units | keys' "$STAMPS")" '["plugins/e2e-rewrite","themes/e2e-theme"]'
 # Abgebrochener refresh (V12): Tabellen weg, Kopie gesperrt, create bleibt verwehrt.
 ddev wp config set WPSYNC_TEST_FAIL_PHASE tables --type=constant >/dev/null
 run refresh-failed.log "$WPSYNC" staging refresh "$TARGET" --yes "${FAST[@]}"
@@ -744,6 +810,17 @@ ok "AC-101 --code ersetzt auch das gepushte Plugin" cmp -s "$WPC/plugins/e2e-rew
 eq "5.8 refresh --code verwirft die Pushes nach Staging" "$("$WPSYNC" pushes "$TARGET" --json | jq '[.data.pushes[] | select(.target == "staging" and (.pruned | not))] | length')" 0
 no "5.8 Arbeitsordner der Pushes in der Kopie" sh -c "find '$SC/wp-content' -maxdepth 1 -name 'wpsync-push-*' | grep -q ."
 "$WPSYNC" scan "$TARGET" --preset vollstaendig --exclude-plugin e2e-excluded >/dev/null
+# Zusatz 7: nach refresh --code kam der Code neu von Live – die Stempel verfallen, es gilt die Baseline.
+jrun staging-status-recopied "$WPSYNC" staging status "$TARGET" --json
+ok "Zusatz 7: refresh --code setzt code_copied_at neu" test "$(last "$JSON/staging-status-recopied.jsonl" '.data.code_copied_at // 0')" -gt "$CODE_AT"
+window "time() + 900"
+run push-staging-after-code.log "$WPSYNC" push "$TARGET" code plugins/e2e-rewrite --to staging --yes
+cat "$E2E/push-staging-after-code.log"
+eq "Zusatz 7: Push nach refresh --code gegen die Baseline ohne --force" "$RC" 0
+ok "Zusatz 7: Hinweis, dass die Stempel verworfen sind" hasF "$E2E/push-staging-after-code.log" "Der Code der Staging-Kopie kam seit dem letzten Push neu von Live"
+eq "Zusatz 7: gemerkt ist nur noch die eben gepushte Einheit" "$(jq -c '.units | keys' "$STAMPS")" '["plugins/e2e-rewrite"]'
+ok "Zusatz 7: Push nach refresh --code kam an" cmp -s "$REWRITE/e2e-rewrite.php" "$SC/wp-content/plugins/e2e-rewrite/e2e-rewrite.php"
+ok "Zusatz 7: das Theme der Kopie bleibt auf dem Stand von Live" grep -q 'e2e-marker v1' "$SC/wp-content/themes/e2e-theme/index.php"
 
 echo "== AC-102: Verfall nach 14 Tagen"
 rm -f "$JAR"
@@ -847,6 +924,8 @@ eq "Zugang zur neuen Kopie" "$(code -b "$JAR" "$STG_URL/")" 200
 window "time() + 900"
 run push-new-copy.log "$WPSYNC" push "$TARGET" code themes/e2e-theme --to staging --yes
 eq "erster Push in die neue Kopie ohne --force" "$RC" 0
+ok "Zusatz 7: die Stempel der gelöschten Kopie sind verworfen" hasF "$E2E/push-new-copy.log" "Der Code der Staging-Kopie kam seit dem letzten Push neu von Live"
+eq "Zusatz 7: gemerkt ist nur der Push in die neue Kopie" "$(jq -c '.units | keys' "$STAMPS")" '["themes/e2e-theme"]'
 eq "manipulierter Client beginnt delete" "$(signed /wpsync/v1/staging/begin '{"op":"delete"}' -o /dev/null -w '%{http_code}')" 200
 locked_out "V7 während delete, gültiges Cookie von vorher" -b "$JAR"
 locked_out "V7 während delete, erfundenes Cookie" -b 'wpsync_stg=x'
