@@ -3,6 +3,45 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.5.0] – YYYY-MM-DD · Agent 0.5.0
+
+**Nur die CLI ändert sich.** Agent 0.5.0 bleibt; Push nach Live braucht weiter Agent ≥ 0.4.0,
+nach Staging ≥ 0.5.0.
+
+### Neu
+- `push`, `pushes`, `rollback` im Container-Modus: `--driver container --docroot <abs>
+  --secret-stdin` – Secret aus Zeile 1 von stdin, Baseline, Journale, Staging-Stempel, Sperre und
+  `history.git` im Site-Ordner neben dem Docroot, keine Rückfragen, kein docker/ddev/WP-CLI.
+  `rollback` dort nur mit Push-ID
+- `--json` additiv: `plan.skipped_new`, `plan.missing_locally`; `rescue_url` im Ergebnis von
+  `push`; `warnings` bei `push` und `rollback`; neue Warnung `snapshot_incomplete` bei `pull`,
+  `push` und `rollback`; in `pushes` (Container-Modus) `journal` und
+  `rescue_url`; bei Exit 40 `error.admin_url` und `error.device`; `error.reason` bei Exit 1:
+  `nothing_to_push`, `not_writable`, `rescue_unreachable`, `local_changed`, `target_mismatch`,
+  `not_readable` (mit `error.path`)
+- `pair` merkt sich den Gerätenamen (`--device` bzw. Rechnername) in der Site-Datei
+
+### Geändert
+- Scheitert nach einem bestätigten Push oder Rollback nur der Schnappschuss im internen Git,
+  endet der Befehl mit Exit 0 und `warnings: ["snapshot_failed"]` statt Exit 1 – auch auf dem Mac
+- SIGTERM bricht `push` vor dem Tausch ab (Exit 30); ab dem Tausch läuft er zu Ende, höchstens
+  10 Minuten nach dem Signal (sonst Rollback, Exit 43, bzw. Exit 42). Bisher wirkte SIGTERM bei
+  `push` nicht
+- Der Schnappschuss liest den Code von `wp-content` bei jedem Lauf ganz (kein git-Index mehr):
+  Folgeläufe dauern bei grossen Sites einige Sekunden statt unter einer, der erste Lauf ist
+  schneller
+- Eine nicht lesbare Datei einer zu pushenden Einheit beendet den Push vor dem Begin mit
+  `not_readable` statt „hat sich während des Pushs geändert“; nicht lesbare Ordner anderer
+  Einheiten brechen den Scan nicht mehr ab
+- git für das interne Repo nur noch aus absoluten `PATH`-Einträgen
+
+### Sicherheit
+- Schnappschuss ohne Arbeitsverzeichnis (Review 3, M-1): wpsync liest `wp-content` selbst, ohne
+  Symlinks zu folgen, und schreibt per `git fast-import`. Ein während des Schnappschusses gegen
+  einen Symlink getauschter Ordner bringt keine Datei von ausserhalb des Docroot mehr in die
+  Historie. Gilt für Pull und Push; `<site>/.gitignore` und der Index des internen Repos werden
+  nicht mehr geschrieben
+
 ## [0.4.0] – 2026-10-07 · Agent 0.5.0
 
 **CLI und Agent ändern sich.** `staging` und `push --to staging` brauchen Agent 0.5.0; Pull,

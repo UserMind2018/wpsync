@@ -346,9 +346,18 @@ solange kein späterer Push dieselbe Einheit getauscht hat.
   `--allow-version-change`). Vorher ein Backup der Datenbank anlegen.
 - **Kein Rückweg, kein Push:** Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe
   unter `wp-content/plugins/`, ist `rescue.php` nicht erreichbar und die CLI pusht nicht.
-- **Unterbrochener Push:** Bricht die CLI nach dem Tausch ab, bleibt der neue Stand unbestätigt
-  live und blockiert weitere Pushes. Der nächste Aufruf nennt die Auswege:
-  `wpsync pushes <site> --confirm <id>` oder `wpsync rollback <site> <id>`.
+- **Unterbrochener Push:** Bricht die CLI nach dem Tausch ab (Absturz, SIGKILL), bleibt der neue
+  Stand unbestätigt live und blockiert weitere Pushes (Exit 42). Der nächste Aufruf nennt die
+  Auswege: `wpsync pushes <site> --confirm <id>` oder `wpsync rollback <site> <id>`. SIGTERM
+  bricht nur vor dem Tausch ab (Exit 30, nichts getauscht); ab dem Tausch läuft der Push bis zur
+  Bestätigung oder zum Rollback weiter, höchstens 10 Minuten nach dem Signal: ein Health-Check,
+  der nach 7 Minuten nicht sauber durch ist, führt zum Rollback (Exit 43); hängt noch der Tausch
+  selbst, endet der Push nach 10 Minuten mit Exit 42.
+- **Schnappschuss gescheitert:** Scheitert nach einem bestätigten Push oder einem Rollback nur der
+  Commit im internen Git, endet der Befehl trotzdem erfolgreich mit einer Meldung (`--json`:
+  `warnings: ["snapshot_failed"]`). Bis CLI 0.4.0 war das Exit 1. Fehlen im gespeicherten
+  Schnappschuss nur einzelne Dateien (nicht lesbar), heisst die Warnung `snapshot_incomplete` –
+  auch beim Pull.
 - **Der Tausch ist nicht atomar:** Zwischen den beiden `rename` fehlt das Verzeichnis für einen
   Moment. WordPress überspringt ein fehlendes aktives Plugin für diesen einen Request.
 - **Dateibesitzer:** Gepushte Dateien gehören dem Benutzer, unter dem PHP läuft. Auf Hostern mit
@@ -640,7 +649,7 @@ welche Datei genutzt wird.
 │   ├── baseline.json                Stand des letzten Pulls
 │   ├── pushes/<push-id>.json        Journal je Push: vorheriger Baseline-Stand, Rescue-URL
 │   └── db/pull.sql                  letzter Dump (wird beim nächsten Pull ersetzt)
-└── .gitignore                       Umfang des Schnappschusses (von wpsync geschrieben)
+└── .gitignore                       bis CLI 0.4.0 von wpsync geschrieben, seither ohne Wirkung
 ~/wpsync-sites/.wpsync-git/
 ├── <site>.git/                      internes Repo, Auto-Commit nach jedem Pull, Push und Rollback (nur für dich lesbar)
 └── <site>.alt-<datum>.git/          früheres .git aus dem Site-Ordner, beim Update verschoben
@@ -648,9 +657,13 @@ welche Datei genutzt wird.
 
 Das interne Git versioniert `public/wp-content` ohne Uploads, Cache und Upgrade-Ordner, dazu
 die Baseline – keine DB-Dumps. Es liegt bewusst nicht im Site-Ordner (siehe
-[Sicherheit](#sicherheit)). Ordner mit einem eigenen `.git` (etwa ein Plugin, das jemand als
-Git-Checkout abgelegt hat) fehlen im Schnappschuss: git würde darin mit deren Config und Hooks
-arbeiten. Historie ansehen:
+[Sicherheit](#sicherheit)). wpsync liest die Dateien selbst, ohne einem Symlink zu folgen, und
+übergibt sie git per `fast-import`; git bekommt den Site-Ordner nie als Arbeitsverzeichnis und
+hat keinen Index. Ordner mit einem eigenen `.git` (etwa ein Plugin, das jemand als Git-Checkout
+abgelegt hat) und Dateien, die wpsync nicht lesen darf, fehlen im Schnappschuss; die CLI nennt
+sie, für nicht lesbare Dateien mit `--json` als `warnings: ["snapshot_incomplete"]`. Weil git
+keinen Index mehr hat, liest jeder Schnappschuss den ganzen Code von `wp-content` – bei grossen
+Sites einige Sekunden. Historie ansehen:
 
 ```bash
 git --git-dir ~/wpsync-sites/.wpsync-git/<site>.git log --stat
@@ -722,15 +735,15 @@ als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_
 | Schalter | Befehle | Wirkung |
 |---|---|---|
 | `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version`, `staging`, `push`, `pushes`, `rollback` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
-| `--secret-stdin` | `scan`, `pull`, `status`, `staging` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
+| `--secret-stdin` | `scan`, `pull`, `status`, `staging`, `push`, `pushes`, `rollback` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus des Pulls DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
 | `--secret-out` | `pair --json` | Secret einmal im Ergebnis-JSON (`data.secret`), nichts in der Keychain |
-| `--driver container` | `pull`, `status`, `list`, `stop` | Vorhandener WordPress-Container statt DDEV, siehe unten |
+| `--driver container` | `pull`, `status`, `list`, `stop`; `push`, `pushes`, `rollback` mit `--docroot` und `--secret-stdin` | Vorhandener WordPress-Container bzw. Site-Ordner neben dem Docroot statt DDEV, siehe unten |
 | `--server` | `doctor` | Nur Version, Mail-Riegel, Docker-CLI, `WPSYNC_CONFIG_DIR` |
 
-`push`, `pushes` und `rollback` kennen `--json` (ab CLI 0.4.0), bleiben aber Mac-Befehle: Secret
-aus der Keychain, DDEV-Layout, kein `--secret-stdin`, kein `--driver` (beides Exit 2). `trust`
-hat kein `--json`. Die `staging`-Befehle brauchen keine lokalen Dateien und laufen mit
-`--secret-stdin` auch im Container.
+`push`, `pushes` und `rollback` kennen `--json` (ab CLI 0.4.0) und laufen ab CLI 0.5.0 auch im
+Container-Modus (siehe [Push im Container-Modus](#push-im-container-modus)). `trust` hat kein
+`--json`. Die `staging`-Befehle brauchen keine lokalen Dateien und laufen mit `--secret-stdin`
+auch im Container.
 
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
@@ -775,6 +788,13 @@ Einheit), `commit` und `health` als `{"event":…,"data":{…}}` und endet mit `
 `rolled_back`, `committed` (getauscht, aber weder bestätigt noch zurückgerollt – die Site braucht
 Aufmerksamkeit) oder leer (auf der Site wurde nichts geändert). `pushes` liefert `data.pushes`,
 neueste zuerst, `pushes --confirm` `push_id` und `status`; `rollback` dieselben Felder wie `push`.
+Ab CLI 0.5.0 zusätzlich: im `plan` `skipped_new` (lokal neue, nicht genannte Einheiten) und
+`missing_locally` (lokal fehlende Einheiten, die auf der Site bleiben), beide `[]` wenn leer; im
+Ergebnis von `push` `rescue_url`, sobald es eine `push_id` gibt; bei `push` und `rollback`
+`warnings` (`snapshot_failed`), wenn nur der Schnappschuss im internen Git scheiterte, oder
+(`snapshot_incomplete`, auch bei `pull`), wenn ihm nicht lesbare Dateien fehlen. Den
+Rollback-Schlüssel nennt die CLI nie – der Rückweg ist `wpsync rollback <site> <push-id>`, das bei
+stummem WordPress selbst über `rescue.php` geht.
 `push` braucht mit `--json` `--yes`, bei geänderter Version zusätzlich `--allow-version-change`.
 `--to` kennt nur `live` und `staging`, genau so geschrieben; alles andere ist Exit 2.
 
@@ -803,8 +823,8 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits (`error.reason: "site_locked"`) |
 | 21 | disk_full | lokal kein Platz – oder der Server meldet keinen (HTTP 507, bei `push` und `staging`) |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
-| 30 | interrupted | SIGTERM; der nächste Pull setzt fort |
-| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open` |
+| 30 | interrupted | SIGTERM; der nächste Pull setzt fort. `push`: nur vor dem Tausch, danach läuft er zu Ende |
+| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open`; ab CLI 0.5.0 mit `error.admin_url` und – wenn `pair` es kannte – `error.device` |
 | 41 | push_conflict | Einheit auf dem Server geändert |
 | 42 | push_pending | ein unbestätigter Push blockiert – auch `staging refresh`/`delete` bei unbestätigtem Push nach Staging |
 | 43 | push_rolled_back | Health-Check schlechter als vorher, zurückgerollt |
@@ -826,6 +846,12 @@ Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11.
 | `staging_state` | Der Zustand der Kopie lässt den Aufruf nicht zu, z. B. `refresh`, `open` oder ein Push bei `failed` |
 | `staging_copy` | Die Anfrage hat einen Agent in einer Staging-Kopie erreicht statt den der Live-Site |
 | `foreign_url` | Der Agent nannte eine Adresse ausserhalb der gekoppelten Site (Probe, Login-Link) |
+| `nothing_to_push` | `push`: lokal ist nichts geändert, oder nur neue Einheiten, die nicht genannt wurden |
+| `not_writable` | `push`: der Webserver darf ein Verzeichnis nicht ersetzen |
+| `rescue_unreachable` | `push`: `rescue.php` antwortet nicht – ohne Rückweg kein Push |
+| `local_changed` | `push`: eine lokale Datei oder ein Verzeichnis änderte sich während des Pushs oder ist ein Symlink |
+| `target_mismatch` | `push`/`rollback`: der Agent antwortet für ein anderes Ziel, oder der Push ging an das andere Ziel |
+| `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
 
 **Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
 Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
@@ -865,18 +891,22 @@ nichts davon im Docroot:
 <slug>/
 ├── <docroot>/              WordPress (einziger Mount in den WP-Container)
 └── .wpsync/
-    ├── baseline.json       Stand des letzten Pulls
+    ├── baseline.json       Stand des letzten Pulls bzw. bestätigten Live-Pushs
+    ├── pushes/<id>.json    Journal je Push (0600): Baseline vorher, Rescue-URL, Salt
+    ├── staging-base.json   Stempel der Pushes nach Staging (versiegelt)
+    ├── lock                Site-Sperre für pull, push, rollback
     ├── db/                 DB-Zwischenablage (Tabellen-Dumps des Pulls)
-    └── history.git/        internes Git, Auto-Commit nach jedem Pull
+    └── history.git/        internes Git, Auto-Commit nach Pull, Live-Push und Rollback
 ```
 
 Historie ansehen: `git --git-dir <slug>/.wpsync/history.git log`.
 
-**Bekannte Einschränkung (0.3.0):** `history.git` ist intern. Tauscht die Site während des
-Auto-Commits einen Ordner gegen einen Symlink, kann `git add` Dateien ausserhalb des Docroot in
-die Historie lesen (kein Schreiben, keine Ausführung). Der Aufrufer zeigt `history.git` deshalb
-nie an, liefert es nicht aus und spielt daraus nichts in den Docroot zurück. Behoben wird das in
-0.3.1 (Schnappschuss ohne Work-Tree).
+**`history.git`** schreibt wpsync ab CLI 0.5.0 ohne Arbeitsverzeichnis: Es liest die Dateien
+über einen auf `wp-content` begrenzten Zugriff, folgt keinem Symlink und übergibt sie git per
+`fast-import`. Tauscht die Site während des Schnappschusses einen Ordner gegen einen Symlink,
+fehlen die betroffenen Dateien im Schnappschuss (Meldung auf stderr) – nichts von ausserhalb des
+Docroot gelangt hinein. Bis CLI 0.4.0 konnte `git add` in diesem Fall Dateien ausserhalb des
+Docroot lesen (Review 3, M-1).
 
 Im Docroot schreibt wpsync nur unter `wp-content/` und – als einzige Datei ausserhalb davon –
 `<docroot>/.htaccess`: Fehlt sie, legt wpsync bei Setup und jedem Folge-Pull den
@@ -891,6 +921,58 @@ printf '%s\n%s\n' "$SECRET" "$DB_PASSWORD" | wpsync pull vorlage --json --yes --
   --db-host wp-mariadb --db-name ws_dev_vorlage --db-user ws_dev_vorlage \
   --local-url https://vorlage.dev.example
 ```
+
+### Push im Container-Modus
+
+Ab CLI 0.5.0, Agent ≥ 0.4.0 (nach Staging ≥ 0.5.0). Es gelten Push-Fenster, Konfliktprüfung,
+Snapshot, Health-Check und `rescue.php` wie auf dem Mac; neu ist nur, wo die CLI ihre Dateien
+findet und woher das Secret kommt.
+
+    printf '%s\n' "$SECRET" | wpsync push kunde code themes/kunde-child \
+        --driver container --docroot /srv/ws/dev/kunde/docroot --secret-stdin --to staging --json --yes
+    printf '%s\n' "$SECRET" | wpsync push kunde code themes/kunde-child \
+        --driver container --docroot /srv/ws/dev/kunde/docroot --secret-stdin --json --yes
+    printf '%s\n' "$SECRET" | wpsync pushes kunde --driver container --docroot /srv/ws/dev/kunde/docroot --secret-stdin --json
+    printf '%s\n' "$SECRET" | wpsync rollback kunde p_20261007_… --driver container --docroot /srv/ws/dev/kunde/docroot --secret-stdin --json
+
+- **Schalter.** `--driver container`, `--docroot <abs>` und `--secret-stdin` gehören zusammen; jede
+  andere Kombination ist Exit 2. `--container`, `--db-*`, `--local-url`, `--cli-image` gibt es bei
+  diesen Befehlen nicht – der Push braucht weder WordPress-Container noch Datenbank und startet
+  weder `docker` noch `ddev` noch WP-CLI. Gelesen wird nur Zeile 1 von stdin.
+- **Ablage.** Site-Ordner ist der Elternordner von `--docroot`; Baseline, Journale,
+  Staging-Stempel, Sperre und `history.git` liegen dort unter `.wpsync/` (siehe oben), die
+  Site-Datei unter `WPSYNC_CONFIG_DIR`. Unter `WPSYNC_SITES_DIR` entsteht nichts. Pull und Push
+  derselben Site schliessen sich über `<slug>/.wpsync/lock` aus (Exit 20, `site_locked`).
+- **Keine Rückfragen.** Mit `--secret-stdin` fragt die CLI nie, auch nicht auf einem Terminal. Ohne
+  `--yes` ist ein Push Exit 2, bei geänderter Plugin- oder Theme-Version zusätzlich ohne
+  `--allow-version-change`; neue Einheiten gehen nur, wenn sie genannt werden.
+- **`pushes`** nennt je Push zusätzlich `journal` (ob dieser Site-Ordner ein Journal dazu hat) und
+  dessen `rescue_url`.
+- **`rollback`** braucht im Container-Modus die Push-ID (ohne: Exit 2) – ohne ID wählte die CLI
+  den neuesten Push über alle Kopplungen der Site.
+- **Push-Fenster.** Exit 40 nennt `error.admin_url` (`…/wp-admin/tools.php?page=wpsync`) und das
+  Gerät aus `pair --device` (`error.device`, fehlt bei Kopplungen vor CLI 0.5.0). Das Fenster
+  öffnet immer ein Administrator im WP-Admin, nie der Aufrufer.
+- **Abbruch.** SIGTERM vor dem Tausch: Exit 30, auf der Site ist nichts getauscht; ein schon
+  angelegter Push verfällt dort nach höchstens 10 Minuten (bis dahin Exit 44 für den nächsten
+  Push). Ab dem Tausch läuft der Push trotz SIGTERM bis zur Bestätigung oder zum Rollback weiter,
+  höchstens 10 Minuten nach dem Signal: der Health-Check (bis zu 30 s je Seite, zwei
+  Wiederholungen) endet nach 7 Minuten, ist er bis dahin nicht sauber, wird zurückgerollt
+  (Exit 43); hängt der Tausch selbst noch, Exit 42. **Zwischen SIGTERM und SIGKILL 15 Minuten Zeit
+  lassen.** Ein SIGKILL nach dem Tausch hinterlässt einen unbestätigten Push
+  (Exit 42 beim nächsten Push; auflösen mit `rollback <id>` oder im WP-Admin). `rollback` läuft
+  immer zu Ende.
+- **Nicht lesbare Dateien.** Der Scan braucht nur `stat`. Ist in einer zu pushenden Einheit eine
+  Datei oder ein Ordner nicht lesbar (etwa 0600 vom Site-Container), bricht der Push vor dem
+  Begin ab: Exit 1, `error.reason: "not_readable"`, `error.path` relativ zum Docroot. Nicht
+  lesbare Dateien anderer Einheiten stören nicht.
+- **mtimes der Arbeitskopie.** wpsync erkennt Änderungen an Grösse und mtime gegen die Baseline.
+  mtimes aus `baseline.json` nur setzen, wenn der wiederhergestellte Stand der eines Pulls oder
+  Pushs ist; nach `wpsync rollback` die Arbeitskopie selbst auf den Stand vor dem Push
+  zurücksetzen – die CLI ändert lokale Dateien nie.
+- **Mail-Riegel.** Vom Push ausgenommen ist nur `mu-plugins/00-local-mailguard.php` (und alles,
+  was in `mu-plugins` mit `wpsync` beginnt). Ein Riegel unter anderem Namen im Docroot ginge mit
+  einem Push von `mu-plugins` nach Live.
 
 ---
 
