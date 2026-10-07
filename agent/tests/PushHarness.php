@@ -84,6 +84,41 @@ namespace {
         return 'https://example.test/wp-content/plugins/wpsync-agent/' . $file;
     }
 
+    function content_url(): string
+    {
+        return $GLOBALS['wpsync_test_content_url'] ?? 'https://example.test/wp-content';
+    }
+
+    /**
+     * @param mixed $default
+     * @return mixed
+     */
+    function get_option(string $name, $default = false)
+    {
+        return $name === 'active_plugins' ? ($GLOBALS['wpsync_test_active_plugins'] ?? []) : $default;
+    }
+
+    function is_multisite(): bool
+    {
+        return false;
+    }
+
+    /**
+     * @param mixed $default
+     * @return mixed
+     */
+    function get_site_option(string $name, $default = false)
+    {
+        return $default;
+    }
+
+    /** @param array<int, mixed> $args */
+    function wp_schedule_single_event(int $timestamp, string $hook, array $args = []): bool
+    {
+        $GLOBALS['wpsync_test_single_events'][] = [$timestamp, $hook];
+        return true;
+    }
+
     /** @param mixed ...$args */
     function add_action(...$args): void
     {
