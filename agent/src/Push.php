@@ -576,7 +576,39 @@ final class Push
                 }
             }
         }
+        self::pruneOrphans($now);
         self::tidyStub($now);
+    }
+
+    /**
+     * Arbeitsordner ohne aktive Zeile in wpsync_pushes (abgebrochener Push, gelöschte Zeile) nach
+     * UPLOAD_TTL – ausser rescue.json steht auf committed: dort liegt der einzige Snapshot eines
+     * getauschten Pushs (Spec Stufe 2, 12, R10). Live und Kopie getrennt.
+     */
+    private static function pruneOrphans(int $now): void
+    {
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            if ($content === '') {
+                continue;
+            }
+            $work = $content . '/' . Store::pushDirName();
+            foreach ((array) @scandir($work) as $name) {
+                if (!is_string($name) || preg_match(PushRescue::ID, $name) !== 1) {
+                    continue;
+                }
+                $dir = $work . '/' . $name;
+                $row = Store::getPush($name);
+                if (is_link($dir) || !is_dir($dir) || ($row !== null && !$row['pruned']) || $now - (int) @filemtime($dir) < self::UPLOAD_TTL) {
+                    continue;
+                }
+                $record = PushRescue::read($work, $name);
+                if ($record !== null && $record['status'] === PushRescue::COMMITTED) {
+                    continue;
+                }
+                PushSwap::remove($dir);
+            }
+        }
     }
 
     /**

@@ -212,4 +212,55 @@ final class PushRescueStubFlowTest extends TestCase
         $this->assertInstanceOf(\WP_REST_Response::class, $begin);
         $this->assertSame(['ithemes-security-pro'], $begin->data['rescue']['hardening']);
     }
+
+    /**
+     * Legt <work>/<id> an, optional mit rescue.json, und datiert ihn zurück.
+     */
+    private function workDir(string $content, string $id, ?string $status, int $mtime): string
+    {
+        $work = $content . '/' . Store::pushDirName();
+        mkdir($work . '/' . $id . '/stage', 0777, true);
+        if ($status !== null) {
+            PushRescue::write($work, $id, str_repeat('0', 64), [], $status);
+        }
+        touch($work . '/' . $id, $mtime);
+        return $work . '/' . $id;
+    }
+
+    /** AC-138, R10 */
+    public function testOrphanedWorkDirsArePruned(): void
+    {
+        $old       = time() - Push::UPLOAD_TTL - 60;
+        $orphan    = $this->workDir($this->live, 'p_20261001_aaaaaaaaaaaa', null, $old);
+        $rolled    = $this->workDir($this->live, 'p_20261001_bbbbbbbbbbbb', PushRescue::ROLLED_BACK, $old);
+        $committed = $this->workDir($this->live, 'p_20261001_cccccccccccc', PushRescue::COMMITTED, $old);
+        $young     = $this->workDir($this->live, 'p_20261001_dddddddddddd', null, time());
+        $owned     = $this->workDir($this->live, 'p_20261001_eeeeeeeeeeee', null, $old);
+        Store::addPush(['push_id' => 'p_20261001_eeeeeeeeeeee', 'key_id' => self::KEY, 'device' => 'd', 'target' => 'live',
+            'status' => Push::UPLOADING, 'forced' => 0, 'units' => '[]', 'created' => time()]);
+        $other = $this->live . '/' . Store::pushDirName() . '/not-a-push';
+        mkdir($other);
+        touch($other, $old);
+
+        Push::prune(time());
+
+        $this->assertDirectoryDoesNotExist($orphan);
+        $this->assertDirectoryDoesNotExist($rolled);
+        $this->assertDirectoryExists($committed, 'the only snapshot of a swapped push');
+        $this->assertDirectoryExists($young, 'a begin may still be writing its row');
+        $this->assertDirectoryExists($owned);
+        $this->assertDirectoryExists($other);
+    }
+
+    /** AC-138: auch im Arbeitsordner der Staging-Kopie. */
+    public function testOrphanedWorkDirsOfTheCopyArePruned(): void
+    {
+        $copy = $this->root . '/' . Staging::DIR . '/wp-content';
+        mkdir($copy . '/plugins', 0777, true);
+        $orphan = $this->workDir($copy, 'p_20261001_ffffffffffff', null, time() - Push::UPLOAD_TTL - 60);
+
+        Push::prune(time());
+
+        $this->assertDirectoryDoesNotExist($orphan);
+    }
 }
