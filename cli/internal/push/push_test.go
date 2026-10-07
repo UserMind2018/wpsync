@@ -814,7 +814,7 @@ func TestAtLeast(t *testing.T) {
 }
 
 func TestErrorsAreDistinct(t *testing.T) {
-	all := []error{ErrNoBaseline, ErrNothing, ErrAborted, ErrConflict, ErrWindowClosed, ErrNotWritable, ErrAgentTooOld, ErrVersionChange}
+	all := []error{ErrNoBaseline, ErrNothing, ErrAborted, ErrConflict, ErrWindowClosed, ErrNotWritable, ErrAgentTooOld, ErrVersionChange, ErrRescueGone}
 	for i, a := range all {
 		for j, b := range all {
 			if i != j && errors.Is(a, b) {

@@ -979,6 +979,7 @@ func pushHint(err error, site *sites.Site) error {
 	var rolled *push.RolledBackError
 	var skipped *push.SkippedNewError
 	var apiErr *agentapi.APIError
+	var blocked *push.RescueBlockedError
 	switch {
 	case err == nil:
 		return nil
@@ -1002,8 +1003,10 @@ func pushHint(err error, site *sites.Site) error {
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
 	case errors.Is(err, push.ErrVersionChange):
 		return cliout.Hint(cliout.Usage(err), "die Versionsnummer ändert sich (mögliche Datenbank-Migration) – im Terminal bestätigen oder --yes --allow-version-change angeben")
+	case errors.As(err, &blocked):
+		return cliout.Hint(err, fmt.Sprintf("%v – ohne Rückweg wird nicht gepusht. Wahrscheinliche Ursache: %s. Dort PHP unter wp-content/plugins erlauben – oder dem Webserver Schreibrechte im Webroot geben, dann legt der Agent einen Stub dort an", err, push.HardeningHint(blocked.Plugins)))
 	case errors.Is(err, push.ErrRescueUnreachable):
-		return cliout.Hint(err, fmt.Sprintf("%v – ohne Rückweg wird nicht gepusht. Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe unter wp-content/plugins/?", err))
+		return cliout.Hint(err, fmt.Sprintf("%v – ohne Rückweg wird nicht gepusht. Sperrt ein Sicherheits-Plugin oder der Server direkte PHP-Aufrufe unter wp-content/plugins/, und darf der Webserver nicht in den Webroot schreiben (Agent ab 0.5.1 legt dort sonst einen Stub an)?", err))
 	case errors.As(err, &pending):
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, push.ShowID(pending.PushID), site.Name, push.ShowID(pending.PushID)))
 	case errors.As(err, &rolled):

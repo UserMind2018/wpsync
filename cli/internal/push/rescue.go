@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -21,7 +23,12 @@ var (
 	// ErrRescueConfirmed: rescue.php takes back only a push that was swapped in but not yet
 	// confirmed; a confirmed one goes through the agent or the WP admin (U18).
 	ErrRescueConfirmed = errors.New("rescue.php rollt nur unbestätigte Pushes zurück – dieser ist bestätigt; im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
+	// ErrRescueGone: the stub in the webroot lives only while a push is open (Spec Stufe 2, 12, R8).
+	ErrRescueGone = errors.New("der Notfallweg über rescue.php besteht nur bis kurz nach der Bestätigung eines Pushs und ist nicht mehr da – im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
 )
+
+// stubName matches the rescue stub the agent puts into the webroot.
+var stubName = regexp.MustCompile(`^wpsync-rescue-[a-f0-9]{32}\.php$`)
 
 // RescueKey derives the per-push rollback key from the pairing secret. The agent stores only its
 // sha256, so rescue.php needs neither the database nor the secret.
@@ -123,6 +130,9 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4000))
 	var body map[string]any
 	if json.Unmarshal(raw, &body) != nil {
+		if resp.StatusCode == http.StatusNotFound && stubName.MatchString(path.Base(req.URL.Path)) {
+			return nil, ErrRescueGone
+		}
 		return nil, fmt.Errorf("HTTP %d, keine Antwort von rescue.php", resp.StatusCode)
 	}
 	if ok, _ := body["ok"].(bool); resp.StatusCode != http.StatusOK || !ok {
