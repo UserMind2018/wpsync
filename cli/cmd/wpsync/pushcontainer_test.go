@@ -124,6 +124,39 @@ func TestPushContainerDryRunJSON(t *testing.T) {
 	}
 }
 
+// Spec Content-Push §10: --uploads gilt auch im Container-Modus. Der Fake ist ein Agent 0.5.0 –
+// die Einheit geht mit, die CLI bricht mit Exit 11 und required 0.6.0 ab. Eine fehlende oder
+// kaputte Liste ist Exit 2, ohne Anfrage an die Site.
+func TestPushContainerUploads(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	dir := filepath.Join(docroot, "wp-content", "uploads", "2026", "10")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "neu.png"), []byte("neu"), 0o644)
+	list := filepath.Join(t.TempDir(), "uploads.txt")
+	os.WriteFile(list, []byte("2026/10/neu.png\n"), 0o644)
+	bad := filepath.Join(t.TempDir(), "kaputt.txt")
+	os.WriteFile(bad, []byte("../wp-config.php\n"), 0o644)
+
+	for _, file := range []string{filepath.Join(t.TempDir(), "fehlt.txt"), bad} {
+		res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "plugins/x", "--uploads", file, "--dry-run", "--json")...)
+		lastResult(t, res, "push", cliout.ExitUsage)
+	}
+	if len(f.routes) != 0 {
+		t.Fatalf("a bad list reached the site: %v", f.routes)
+	}
+
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "plugins/x", "--uploads", list, "--dry-run", "--json")...)
+	m := lastResult(t, res, "push", cliout.ExitAgentOutdated)
+	if e, _ := m["error"].(map[string]any); e == nil || e["required"] != "0.6.0" {
+		t.Errorf("error = %v", m["error"])
+	}
+	if !strings.Contains(f.seen.String(), `"path":"uploads"`) {
+		t.Errorf("the unit uploads did not go out:\n%s", f.seen.String())
+	}
+}
+
 // AC-114, S-3: der Push im Container-Modus ruft weder docker noch ddev noch WP-CLI auf.
 func TestPushContainerRunsNoContainerTools(t *testing.T) {
 	_, docroot := containerPushSite(t)

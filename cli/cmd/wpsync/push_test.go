@@ -42,6 +42,13 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"staging_busy", fmt.Errorf("%w: %w", staging.ErrBusy, &agentapi.APIError{Status: 423, Code: "wpsync_staging_busy"}), cliout.ExitBusy, "wpsync staging status kunde"},
 		{"staging_state", &agentapi.APIError{Status: 409, Code: "wpsync_staging_state", Message: "Die Staging-Kopie ist im Status failed."}, cliout.ExitUnknown, "im Status failed"},
 		{"other_target", &push.TargetError{PushID: "p_20261005_0123456789ab", Is: "staging", Want: "live"}, cliout.ExitUnknown, "ging nach Staging, nicht nach Live"},
+		{"no_uploads", fmt.Errorf("%w: %w", push.ErrAgentNoUploads, &agentapi.APIError{Status: 400, Code: "wpsync_push_unit"}), cliout.ExitAgentOutdated, "kennt noch keine Uploads – Agent 0.6.0 installieren"},
+		{"upload_exists", &push.UploadExistsError{Paths: []string{"2026/10/a.png"}}, cliout.ExitUnknown, "ersetzt nie eine Datei unter uploads"},
+		{"upload_type", &push.UploadTypeError{Path: "2026/10/x.php"}, cliout.ExitUnknown, "gehen nie als Upload auf die Site"},
+		{"upload_type_agent", fmt.Errorf("%w: %w", push.ErrUploadTypeBlocked, &agentapi.APIError{Status: 400, Code: "wpsync_upload_type_blocked", Message: "Inhalt passt nicht zum Dateityp: \"2026/10/a.png\""}), cliout.ExitUnknown, "Inhalt passt nicht zum Dateityp"},
+		{"upload_missing", fmt.Errorf("wp-content/uploads/2026/10/a.png %w", push.ErrUploadMissing), cliout.ExitUsage, "relativ zu wp-content/uploads/"},
+		{"uploads_there", push.ErrUploadsThere, cliout.ExitUnknown, "liegen schon auf der Site"},
+		{"upload_layout", &agentapi.APIError{Status: 409, Code: "wpsync_upload_layout", Message: "wp-content/uploads ist ein symbolischer Link"}, cliout.ExitUnknown, "symbolischer Link"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
