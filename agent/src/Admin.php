@@ -59,12 +59,11 @@ final class Admin
                 self::notice('success', 'Pairing widerrufen.');
             } elseif ($action === 'open_window' && $keyId !== '') {
                 $seconds = isset($_POST['seconds']) ? (int) wp_unslash($_POST['seconds']) : 0;
-                if (isset(PushWindow::DURATIONS[$seconds])) {
-                    Store::setPushUntil($keyId, PushWindow::until($seconds, time()));
+                if (self::openWindow($keyId, $seconds, get_current_user_id())) {
                     self::notice('success', 'Push-Fenster geöffnet für ' . PushWindow::DURATIONS[$seconds] . '.');
                 }
             } elseif ($action === 'close_window' && $keyId !== '') {
-                Store::setPushUntil($keyId, 0);
+                self::closeWindow($keyId);
                 self::notice('success', 'Push-Fenster geschlossen.');
             } elseif ($action === 'rollback' && isset($_POST['push_id'])) {
                 $result = Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST['push_id'])));
@@ -151,13 +150,14 @@ final class Admin
                 <p>Noch kein Push.</p>
             <?php else : ?>
                 <table class="widefat striped">
-                    <thead><tr><th>Zeit</th><th>Ziel</th><th>Gerät</th><th>Einheiten</th><th>Status</th><th></th></tr></thead>
+                    <thead><tr><th>Zeit</th><th>Ziel</th><th>Gerät</th><th>Fenster von</th><th>Einheiten</th><th>Status</th><th></th></tr></thead>
                     <tbody>
                     <?php foreach ($pushes as $push) : ?>
                         <tr>
                             <td><?php echo esc_html(wp_date('d.m.Y H:i', $push['created'])); ?><br><code><?php echo esc_html($push['push_id']); ?></code></td>
                             <td><?php echo esc_html($push['target'] === 'staging' ? 'Staging' : 'Live'); ?></td>
                             <td><?php echo esc_html($push['device']); ?></td>
+                            <td><?php echo esc_html(self::opener($push['opened_by'] ?? null)); ?></td>
                             <td>
                                 <?php foreach ($push['units'] as $unit) : ?>
                                     <?php echo esc_html(self::unitLine($unit)); ?><br>
@@ -184,6 +184,38 @@ final class Admin
             <?php self::staging(); ?>
         </div>
         <?php
+    }
+
+    /**
+     * Öffnet das Push-Fenster eines Pairings für eine der festen Dauern und merkt sich, wer es
+     * geöffnet hat (Spec Content-Push §9: Autor neuer Beiträge in P2).
+     */
+    public static function openWindow(string $keyId, int $seconds, int $userId): bool
+    {
+        if (!isset(PushWindow::DURATIONS[$seconds])) {
+            return false;
+        }
+        Store::setPushUntil($keyId, PushWindow::until($seconds, time()), $userId > 0 ? $userId : null);
+        return true;
+    }
+
+    public static function closeWindow(string $keyId): void
+    {
+        Store::setPushUntil($keyId, 0);
+    }
+
+    /**
+     * Login des Benutzers, der beim Begin das Push-Fenster offen hatte; „–“ ohne (WP-CLI, Agent vor 0.6.0).
+     *
+     * @param mixed $id
+     */
+    private static function opener($id): string
+    {
+        if (!is_int($id) || $id <= 0) {
+            return '–';
+        }
+        $user = get_userdata($id);
+        return $user ? (string) $user->user_login : '#' . $id;
     }
 
     /**

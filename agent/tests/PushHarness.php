@@ -134,6 +134,8 @@ namespace WpSync {
         public static $pushes = [];
         /** @var int */
         public static $until = 0;
+        /** @var int|null wer das Push-Fenster geöffnet hat */
+        public static $opener = null;
         /** @var bool Datenbank antwortet nicht: Lesezugriffe liefern null/[], dbOk() false */
         public static $dbError = false;
 
@@ -170,6 +172,11 @@ namespace WpSync {
         public static function pushUntil(string $keyId): int
         {
             return self::$until;
+        }
+
+        public static function pushOpener(string $keyId): ?int
+        {
+            return self::$opener;
         }
 
         public static function secretFor(string $keyId): ?string
@@ -240,6 +247,7 @@ namespace WpSync {
                 'created'   => (int) $row['created'],
                 'committed' => $row['committed'] === null ? null : (int) $row['committed'],
                 'finished'  => $row['finished'] === null ? null : (int) $row['finished'],
+                'opened_by' => isset($row['opened_by']) ? (int) $row['opened_by'] : null,
             ];
         }
     }

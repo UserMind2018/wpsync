@@ -239,6 +239,7 @@ final class Push
                 'forced'  => empty($params['force']) ? 0 : 1,
                 'units'   => (string) wp_json_encode($summary),
                 'created' => $now,
+                'opened_by' => Store::pushOpener($keyId),
             ]);
         if (!$stored) {
             PushSwap::remove($work . '/' . $pushId);
