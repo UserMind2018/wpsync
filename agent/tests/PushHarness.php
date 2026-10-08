@@ -119,6 +119,50 @@ namespace {
         return true;
     }
 
+    /** @return array<string, string> wie WordPress für einen Request ohne unfiltered_html */
+    function get_allowed_mime_types(): array
+    {
+        return ['jpg|jpeg|jpe' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'pdf' => 'application/pdf', 'txt' => 'text/plain'];
+    }
+
+    /**
+     * @param array<string, string>|null $mimes
+     * @return array{ext: string|false, type: string|false}
+     */
+    function wp_check_filetype(string $filename, ?array $mimes = null): array
+    {
+        foreach ($mimes ?? get_allowed_mime_types() as $exts => $type) {
+            if (preg_match('!\.(' . $exts . ')$!i', $filename, $m) === 1) {
+                return ['ext' => $m[1], 'type' => $type];
+            }
+        }
+        return ['ext' => false, 'type' => false];
+    }
+
+    /**
+     * Wie WordPress im Kern: ein Bild muss sich als Bild lesen lassen.
+     *
+     * @param array<string, string>|null $mimes
+     * @return array{ext: string|false, type: string|false, proper_filename: string|false}
+     */
+    function wp_check_filetype_and_ext(string $file, string $filename, ?array $mimes = null): array
+    {
+        $check = wp_check_filetype($filename, $mimes);
+        if (is_string($check['type']) && strpos($check['type'], 'image/') === 0 && @getimagesize($file) === false) {
+            return ['ext' => false, 'type' => false, 'proper_filename' => false];
+        }
+        return $check + ['proper_filename' => false];
+    }
+
+    /**
+     * @param mixed $time
+     * @return array{basedir: string}
+     */
+    function wp_upload_dir($time = null, bool $create = true): array
+    {
+        return ['basedir' => $GLOBALS['wpsync_test_upload_basedir'] ?? WP_CONTENT_DIR . '/uploads'];
+    }
+
     /** @param mixed ...$args */
     function add_action(...$args): void
     {
