@@ -33,6 +33,9 @@ final class Store
     /** @var list<string>|null */
     private static $dataTables = null;
 
+    /** @var array<string, array<string, string>> Spalten je eigener Tabelle, einmal pro Request (hasColumn) */
+    private static $columns = [];
+
     /**
      * Tabellen, die exportiert werden dürfen (siehe TableList); pro Request einmal ermittelt.
      * Die Tabellen einer Staging-Kopie gehören nie dazu (AC-83) – weder für den Pull noch als
@@ -68,7 +71,8 @@ final class Store
             device VARCHAR(100) NOT NULL,
             created INT UNSIGNED NOT NULL,
             last_used INT UNSIGNED NULL,
-            push_until INT UNSIGNED NOT NULL DEFAULT 0
+            push_until INT UNSIGNED NOT NULL DEFAULT 0,
+            push_opened_by BIGINT UNSIGNED NULL
         ) ' . $collate);
         $wpdb->query('CREATE TABLE IF NOT EXISTS `' . self::table('nonces') . '` (
             nonce CHAR(32) NOT NULL PRIMARY KEY,
@@ -92,6 +96,7 @@ final class Store
             created INT UNSIGNED NOT NULL,
             committed INT UNSIGNED NULL,
             finished INT UNSIGNED NULL,
+            opened_by BIGINT UNSIGNED NULL,
             KEY created (created)
         ) ' . $collate);
         // Update von einem Agent vor 0.4.0: die Tabelle existiert schon ohne die Spalte.
@@ -103,6 +108,14 @@ final class Store
         if (!self::secretColumnFits($columns)) {
             $wpdb->query('ALTER TABLE `' . self::table('pairings') . '` MODIFY secret VARCHAR(255) NOT NULL');
         }
+        // Update von einem Agent vor 0.6.0: wer das Push-Fenster geöffnet hat (Spec Content-Push §9).
+        if (!isset($columns['push_opened_by'])) {
+            $wpdb->query('ALTER TABLE `' . self::table('pairings') . '` ADD COLUMN push_opened_by BIGINT UNSIGNED NULL');
+        }
+        if (!isset(self::columnsOf('pushes')['opened_by'])) {
+            $wpdb->query('ALTER TABLE `' . self::table('pushes') . '` ADD COLUMN opened_by BIGINT UNSIGNED NULL');
+        }
+        self::$columns = [];
         self::sealPlainSecrets();
         delete_option('wpsync_secret'); // Altlast aus dem Spike, Secret im Klartext (SEC-006)
         update_option(self::SCHEMA_OPTION, WPSYNC_VERSION, true);
@@ -274,12 +287,30 @@ final class Store
     /** @return array<string, string> Spaltenname → Typ */
     private static function pairingColumns(): array
     {
+        return self::columnsOf('pairings');
+    }
+
+    /** @return array<string, string> Spaltenname → Typ einer eigenen Tabelle, frisch gelesen */
+    private static function columnsOf(string $name): array
+    {
         global $wpdb;
         $columns = [];
-        foreach ((array) $wpdb->get_results('SHOW COLUMNS FROM `' . self::table('pairings') . '`', ARRAY_A) as $row) {
+        foreach ((array) $wpdb->get_results('SHOW COLUMNS FROM `' . self::table($name) . '`', ARRAY_A) as $row) {
             $columns[(string) $row['Field']] = strtolower((string) $row['Type']);
         }
         return $columns;
+    }
+
+    /**
+     * Gibt es die Spalte? Nach einem fehlgeschlagenen ALTER nicht – dann schreibt der Store sie
+     * nicht, statt jeden Push und jedes Push-Fenster scheitern zu lassen (Spec Content-Push §9).
+     */
+    private static function hasColumn(string $table, string $column): bool
+    {
+        if (!isset(self::$columns[$table])) {
+            self::$columns[$table] = self::columnsOf($table);
+        }
+        return isset(self::$columns[$table][$column]);
     }
 
     /**
@@ -336,10 +367,34 @@ final class Store
         return (int) $wpdb->get_var($wpdb->prepare('SELECT push_until FROM `' . self::table('pairings') . '` WHERE key_id = %s', $keyId));
     }
 
-    public static function setPushUntil(string $keyId, int $until): void
+    /**
+     * Öffnet (until > 0) oder schliesst (0) das Push-Fenster. $openedBy ist der WP-Benutzer, der es
+     * im WP-Admin geöffnet hat; ohne (WP-CLI, Schliessen) bleibt der Öffner leer (Spec Content-Push §9).
+     */
+    public static function setPushUntil(string $keyId, int $until, ?int $openedBy = null): void
     {
         global $wpdb;
-        $wpdb->update(self::table('pairings'), ['push_until' => $until], ['key_id' => $keyId]);
+        $fields = ['push_until' => $until];
+        if (self::hasColumn('pairings', 'push_opened_by')) {
+            $fields['push_opened_by'] = $until > 0 && $openedBy !== null && $openedBy > 0 ? $openedBy : null;
+        }
+        $wpdb->update(self::table('pairings'), $fields, ['key_id' => $keyId]);
+    }
+
+    /** Wer das offene Push-Fenster geöffnet hat; null bei geschlossenem oder abgelaufenem Fenster. */
+    public static function pushOpener(string $keyId): ?int
+    {
+        global $wpdb;
+        if (!self::hasColumn('pairings', 'push_opened_by')) {
+            return null;
+        }
+        $rows = (array) $wpdb->get_results($wpdb->prepare('SELECT push_until, push_opened_by FROM `' . self::table('pairings') . '` WHERE key_id = %s', $keyId), ARRAY_A);
+        $row  = $rows[0] ?? null;
+        if (!is_array($row) || $row['push_opened_by'] === null || !PushWindow::open((int) $row['push_until'], time())) {
+            return null;
+        }
+        $id = (int) $row['push_opened_by'];
+        return $id > 0 ? $id : null;
     }
 
     public static function deviceFor(string $keyId): string
@@ -366,6 +421,9 @@ final class Store
     public static function addPush(array $row): bool
     {
         global $wpdb;
+        if (!self::hasColumn('pushes', 'opened_by')) {
+            unset($row['opened_by']);
+        }
         return 1 === $wpdb->insert(self::table('pushes'), $row);
     }
 
@@ -426,6 +484,7 @@ final class Store
             'created'   => (int) $row['created'],
             'committed' => $row['committed'] === null ? null : (int) $row['committed'],
             'finished'  => $row['finished'] === null ? null : (int) $row['finished'],
+            'opened_by' => isset($row['opened_by']) ? (int) $row['opened_by'] : null,
         ];
     }
 
