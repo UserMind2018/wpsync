@@ -108,8 +108,21 @@ func rescueReady(o Options, r agentapi.PushRescue) error {
 
 // RescueRollback restores the snapshot of a push, bypassing WordPress.
 func RescueRollback(hc *http.Client, rescueURL, pushID, key string) error {
-	_, err := rescuePost(hc, rescueURL, url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}})
+	_, err := RescueRollbackNotes(hc, rescueURL, pushID, key)
 	return err
+}
+
+// RescueRollbackNotes is RescueRollback and returns what rescue.php reports beyond the status
+// (agent 0.6.0: uploads left in place because they changed since the push).
+func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string) (agentapi.RollbackNotes, error) {
+	body, err := rescuePost(hc, rescueURL, url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}})
+	if err != nil {
+		return agentapi.RollbackNotes{}, err
+	}
+	raw, _ := json.Marshal(body)
+	var notes agentapi.RollbackNotes
+	_ = json.Unmarshal(raw, &notes) // a field of another type stays empty
+	return notes.Clean(), nil
 }
 
 func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]any, error) {

@@ -80,24 +80,30 @@ type fakeSite struct {
 
 	// The staging copy as /staging/status describes it and, when copy is set, its files: then a
 	// push to staging is checked against them like PushManifest::conflicts does.
-	copy       map[string]map[string]agentapi.PushStamp // unit → file → stamp; nil: conflicts as scripted
-	copyOld    map[string]map[string]agentapi.PushStamp // the units of the last commit before it
-	copyDir    string                                   // folder of the copy; empty: testStaging
-	copyMade   int64                                    // created
-	copyCopied int64                                    // copied_at
-	copyCode   int64                                    // code_copied_at; 0: an agent before the field
-	noStatus   bool                                     // /staging/status fails
-	statuses   int                                      // calls of /staging/status
-	ids        []string                                 // push ids of the next real begins; empty: testID
-	onUpload   func()                                   // runs when an upload request arrives (SIGTERM tests)
-	onCommit   func(r *http.Request)                    // runs when /push/commit arrives, before it is applied
-	stall      bool                                     // frontend pages after the swap answer only when the request ends
-	pushID     string                                   // id of the last real begin
-	forStaging bool                                     // the last real begin went to staging
+	copy        map[string]map[string]agentapi.PushStamp // unit → file → stamp; nil: conflicts as scripted
+	copyOld     map[string]map[string]agentapi.PushStamp // the units of the last commit before it
+	copyDir     string                                   // folder of the copy; empty: testStaging
+	copyMade    int64                                    // created
+	copyCopied  int64                                    // copied_at
+	copyCode    int64                                    // code_copied_at; 0: an agent before the field
+	noStatus    bool                                     // /staging/status fails
+	statuses    int                                      // calls of /staging/status
+	ids         []string                                 // push ids of the next real begins; empty: testID
+	onUpload    func()                                   // runs when an upload request arrives (SIGTERM tests)
+	onCommit    func(r *http.Request)                    // runs when /push/commit arrives, before it is applied
+	stall       bool                                     // frontend pages after the swap answer only when the request ends
+	pushID      string                                   // id of the last real begin
+	forStaging  bool                                     // the last real begin went to staging
+	uploadsHave map[string]string                        // files below wp-content/uploads on the site: rel → content
+	acceptOld   bool                                     // an agent before 0.6.0 that takes the unit uploads anyway
+	upNeed      []string                                 // need of the unit uploads in the last begin
+	upUnit      map[string]int                           // rel → unit index of the upload request that carried it
+	rescueBody  string                                   // answer of rescue.php to a rollback; empty: {"ok":true,"status":"rolled_back"}
+	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
-	f := &fakeSite{t: t, uploaded: map[string]string{}, version: "0.4.0", window: true, confirm: 200, rollback: 200, rescue: 200}
+	f := &fakeSite{t: t, uploaded: map[string]string{}, upUnit: map[string]int{}, version: "0.4.0", window: true, confirm: 200, rollback: 200, rescue: 200}
 	f.copyMade, f.copyCopied = 1790000000, 1790000100
 	f.versions = map[string]string{"plugins/x": "1.0"}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -159,6 +165,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.rolledBack = true
 		f.restoreCopy()
+		if f.rescueBody != "" {
+			w.Write([]byte(f.rescueBody))
+			return
+		}
 		w.Write([]byte(`{"ok":true,"status":"rolled_back"}`))
 		return
 	}
@@ -225,6 +235,14 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			res.Pending = &agentapi.PushPending{PushID: "p_20261004_ba9876543210", Device: "anderer-mac"}
 		}
 		for _, u := range req.Units {
+			if u.Path == UploadsUnit {
+				plan, refused := f.uploadsPlan(w, req, u)
+				if refused {
+					return
+				}
+				res.Units = append(res.Units, plan)
+				continue
+			}
 			plan := agentapi.PushUnitPlan{Path: u.Path, Exists: len(u.Base) > 0 || f.unpulled[u.Path], Version: f.versions[u.Path], Conflicts: []string{}, Writable: !f.readonly}
 			if u.Path == "plugins/x" {
 				plan.Conflicts = append(plan.Conflicts, f.conflicts...)
@@ -276,6 +294,7 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				f.t.Errorf("chunk of %s at offset %d, have %d bytes", c.Path, c.Offset, len(f.uploaded[c.Path]))
 			}
 			f.uploaded[c.Path] += string(c.Data)
+			f.upUnit[c.Path] = req.Unit
 			f.chunks++
 		}
 		w.Write([]byte(`{"received":1}`))
@@ -287,6 +306,12 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		stamps := map[string]map[string]agentapi.PushStamp{}
 		for _, u := range f.begins[len(f.begins)-1].Units {
 			stamps[u.Path] = map[string]agentapi.PushStamp{}
+			if u.Path == UploadsUnit { // only what the commit added
+				for _, rel := range f.upNeed {
+					stamps[u.Path][rel] = agentapi.PushStamp{Size: u.Files[rel].Size, MTime: u.Files[rel].MTime}
+				}
+				continue
+			}
 			for rel, file := range u.Files {
 				if !slices.Contains(f.leftOut, u.Path+"/"+rel) {
 					stamps[u.Path][rel] = agentapi.PushStamp{Size: file.Size, MTime: file.MTime}
@@ -311,6 +336,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		if f.rollback == 200 {
 			f.rolledBack = true
 			f.restoreCopy()
+			if f.rbBody != "" {
+				w.Write([]byte(f.rbBody))
+				return
+			}
 		}
 		if f.rbCode != "" {
 			w.WriteHeader(f.rollback)
