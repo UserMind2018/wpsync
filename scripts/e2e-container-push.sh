@@ -513,6 +513,92 @@ rm -f "$WPC/mu-plugins/e2e-fatal.php"
 eq "AC-124 Live wieder v4" "$(live_mark)" "e2e-marker v4"
 eq "AC-124 Live erreichbar" "$(code "$SOURCE_URL/")" 200
 
+echo "== P1/AC-140: Uploads – neue Dateien hinzufügen, gleiche nicht übertragen"
+PNG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+png() { printf %s "$PNG_B64" | openssl base64 -d -A > "$1"; [ -z "${2:-}" ] || printf %s "$2" >> "$1"; } # png <datei> [anhang]
+here() { if [ -e "$1" ]; then echo da; else echo weg; fi; }
+LUP="$DOCROOT/wp-content/uploads" # lokal
+SUP="$WPC/uploads"                # Quelle (Live)
+rm -rf "$SUP/2026/12" "$LUP/2026/12" "$SUP/2026/10/e2e-"* "$LUP/2026/10/e2e-"*
+mkdir -p "$LUP/2026/10" "$LUP/2026/12" "$SUP/2026/10"
+png "$LUP/2026/10/e2e-neu.png" neu
+png "$LUP/2026/10/e2e-gleich.png"
+cp -p "$LUP/2026/10/e2e-gleich.png" "$SUP/2026/10/e2e-gleich.png"
+printf '# Liste wie vom Studio\n2026/10/e2e-neu.png\n\n2026/10/e2e-gleich.png\n' > "$E2E/uploads-a.txt"
+# Nur Uploads: die genannte Einheit ist lokal unverändert, der Satz besteht nur aus uploads.
+jrun push-uploads-dry s1 push "$SLUG" code "$HEALTH_REL" --uploads "$E2E/uploads-a.txt" "${C[@]}" --dry-run --json
+eq "AC-140 Probelauf: Exit 0" "$RC" 0
+eq "AC-140 plan.uploads" "$(event push-uploads-dry plan | jq -c '.uploads')" \
+  '{"conflicts":[],"need":["2026/10/e2e-neu.png"],"same":["2026/10/e2e-gleich.png"]}'
+eq "AC-140 Probelauf legt nichts an" "$(here "$SUP/2026/10/e2e-neu.png")" weg
+(cd "$SRC" && ddev wp eval "WpSync\\Admin::openWindow('$KEY_ID', 28800, 1);" >/dev/null) # wie „Öffnen“ im WP-Admin als Benutzer 1
+jrun push-uploads s1 push "$SLUG" code "$HEALTH_REL" --uploads "$E2E/uploads-a.txt" "${C[@]}" --yes --json
+eq "AC-140 Push: Exit 0" "$RC" 0
+eq "AC-140 Status und Einheiten" "$(last push-uploads '.data.status + " " + (.data.units | join(","))')" "confirmed uploads"
+PUSH_U="$(last push-uploads '.data.push_id')"
+ok "AC-140 neue Datei liegt auf Live" cmp -s "$LUP/2026/10/e2e-neu.png" "$SUP/2026/10/e2e-neu.png"
+eq "AC-140 nur die neue Datei übertragen" "$(event push-uploads upload | jq -c '[.unit, .files]')" '["uploads",1]'
+eq "AC-140 Baseline kennt die neue Datei" \
+  "$(jq -r '.files["wp-content/uploads/2026/10/e2e-neu.png"].size' "$BASE")" "$(wc -c < "$LUP/2026/10/e2e-neu.png" | tr -d ' ')"
+jrun pushes-opener s1 pushes "$SLUG" "${C[@]}" --json
+eq "AC-145 Protokoll nennt den Öffner" "$(last pushes-opener ".data.pushes[] | select(.push_id == \"$PUSH_U\") | .opened_by")" 1
+
+echo "== P1/AC-141: gleicher Pfad, anderer Inhalt – nichts wird getauscht, auch kein Code"
+png "$SUP/2026/10/e2e-anders.png" live
+cp -p "$SUP/2026/10/e2e-anders.png" "$E2E/e2e-anders.live"
+png "$LUP/2026/10/e2e-anders.png" lokal
+printf '2026/10/e2e-anders.png\n' > "$E2E/uploads-b.txt"
+LIVE_BEFORE="$(live_mark)"
+PUSHES2="$(pushes_on_site)"
+mark 6
+jrun push-upload-exists s1 push "$SLUG" code "$THEME_REL" --uploads "$E2E/uploads-b.txt" "${C[@]}" --yes --force --json
+eq "AC-141 Exit 1, auch mit --force" "$RC" 1
+eq "AC-141 reason upload_exists" "$(last push-upload-exists '.error.reason')" upload_exists
+eq "AC-141 Konflikt im plan" "$(event push-upload-exists plan | jq -c '.uploads.conflicts')" '["2026/10/e2e-anders.png"]'
+eq "AC-141 kein Code getauscht" "$(live_mark)" "$LIVE_BEFORE"
+ok "AC-141 Datei auf Live unverändert" cmp -s "$E2E/e2e-anders.live" "$SUP/2026/10/e2e-anders.png"
+eq "AC-141 kein Push auf der Site" "$(pushes_on_site)" "$PUSHES2"
+
+echo "== P1/AC-143: Rücknahme über rescue.php – genau die hinzugefügten Dateien, geänderte bleiben"
+png "$LUP/2026/12/e2e-rb-a.png" a
+png "$LUP/2026/10/e2e-rb-b.png" b
+printf '2026/12/e2e-rb-a.png\n2026/10/e2e-rb-b.png\n' > "$E2E/uploads-c.txt"
+set +e
+printf '%s\n' "$SECRET" | WS_NAME="$RUNNER" ws push "$SLUG" code "$HEALTH_REL" --uploads "$E2E/uploads-c.txt" "${C[@]}" --yes --json \
+  >"$JSON/push-uploads-kill.jsonl" 2>"$JSON/push-uploads-kill.err" &
+PID=$!
+set -e
+wait_for "$JSON/push-uploads-kill.jsonl" '"event":"commit"' || bad "AC-143 kein commit"
+docker kill "$RUNNER" >/dev/null 2>&1 || true
+set +e
+wait "$PID"
+set -e
+PUSH_RB="$(jq -r 'select(.event == "commit") | .data.push_id' "$JSON/push-uploads-kill.jsonl")"
+eq "AC-143 Fixture: beide Dateien auf Live" "$(here "$SUP/2026/12/e2e-rb-a.png") $(here "$SUP/2026/10/e2e-rb-b.png")" "da da"
+printf 'seither geändert' >> "$SUP/2026/10/e2e-rb-b.png"
+printf '<?php throw new Error("e2e: WordPress antwortet nicht");\n' > "$WPC/mu-plugins/e2e-fatal.php"
+jrun rollback-uploads-rescue s1 rollback "$SLUG" "$PUSH_RB" "${C[@]}" --json
+rm -f "$WPC/mu-plugins/e2e-fatal.php"
+eq "AC-143 Rücknahme über rescue.php: Exit 0" "$RC" 0
+ok "AC-143 Weg über rescue.php" hasF "$JSON/rollback-uploads-rescue.err" "rescue.php"
+eq "AC-143 warnings" "$(last rollback-uploads-rescue '.data.warnings | join(",")')" upload_changed_since_push
+eq "AC-143 Einheiten" "$(last rollback-uploads-rescue '.data.units | join(",")')" uploads
+eq "AC-143 hinzugefügte Datei weg" "$(here "$SUP/2026/12/e2e-rb-a.png")" weg
+eq "AC-143 vom Push angelegter Ordner weg" "$(here "$SUP/2026/12")" weg
+eq "AC-143 geänderte Datei bleibt" "$(here "$SUP/2026/10/e2e-rb-b.png")" da
+ok "AC-143 Meldung nennt die geänderte Datei" hasF "$JSON/rollback-uploads-rescue.err" "e2e-rb-b.png"
+eq "AC-143 frühere Uploads bleiben" "$(here "$SUP/2026/10/e2e-neu.png")" da
+eq "Live erreichbar" "$(code "$SOURCE_URL/")" 200
+
+echo "== P1/AC-143: Rücknahme über den Agent"
+jrun rollback-uploads s1 rollback "$SLUG" "$PUSH_U" "${C[@]}" --json
+eq "AC-143 Rücknahme: Exit 0" "$RC" 0
+eq "AC-143 neue Datei weg" "$(here "$SUP/2026/10/e2e-neu.png")" weg
+eq "AC-143 gleiche Datei bleibt (sie gehörte nicht dem Push)" "$(here "$SUP/2026/10/e2e-gleich.png")" da
+eq "AC-143 Baseline vergisst die Datei" "$(jq -r '.files | has("wp-content/uploads/2026/10/e2e-neu.png")' "$BASE")" false
+eq "AC-143 ohne Warnung" "$(last rollback-uploads '.data | has("warnings")')" false
+rm -rf "$SUP/2026/10/e2e-"* "$LUP/2026/10/e2e-"* "$LUP/2026/12"
+
 echo "== AC-111: kein Secret, kein Rollback-Schlüssel, kein Salt"
 for journal in "$SITE"/.wpsync/pushes/*.json; do
   id="$(jq -r .push_id "$journal")"
