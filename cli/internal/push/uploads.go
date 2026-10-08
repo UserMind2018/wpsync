@@ -44,8 +44,39 @@ var (
 	ErrUploadsThere = fmt.Errorf("%w – alle Dateien aus --uploads liegen schon auf der Site", ErrNothing)
 )
 
-// uploadBlockedRe mirrors PushUploads::BLOCKED: executable, also as an inner extension.
-var uploadBlockedRe = regexp.MustCompile(`(?i)\.(php[0-9]?|phtml|phar|pht|phps)(\.|$)`)
+// uploadBlockedRe mirrors PushUploads::BLOCKED: executable and active types (SVG, HTML, XML,
+// JavaScript), whatever upload_mimes allows on the site, also as an inner extension.
+var uploadBlockedRe = regexp.MustCompile(`(?i)\.(php[0-9]?|phtml|phar|pht|phps|svgz?|x?html?|shtml|xml|m?js)(\.|$)`)
+
+// middleExtRe is what WordPress' sanitize_file_name() takes for an extension between the first and
+// the last dot of a name; unless it is an allowed type, WordPress appends "_" (bild.cgi.png →
+// bild.cgi_.png) and the agent refuses the name. Ordinary words count too: foto.final.v2.jpg would
+// become foto.final_.v2_.jpg on the site, so the CLI refuses it as well.
+var middleExtRe = regexp.MustCompile(`^[a-zA-Z]{2,5}[0-9]?$`)
+
+// middleExtOK are inner extensions the CLI lets through: common image, media and document types
+// WordPress allows by default. Only a rough local check – the agent decides with the site's list.
+var middleExtOK = map[string]bool{
+	"jpg": true, "jpeg": true, "jpe": true, "png": true, "gif": true, "webp": true, "avif": true, "bmp": true,
+	"tif": true, "tiff": true, "ico": true, "heic": true, "heif": true, "pdf": true, "mp4": true, "m4v": true,
+	"mov": true, "webm": true, "ogv": true, "mp3": true, "m4a": true, "ogg": true, "oga": true, "wav": true,
+	"flac": true, "doc": true, "docx": true, "xls": true, "xlsx": true, "ppt": true, "pptx": true, "odt": true,
+	"ods": true, "odp": true, "rtf": true, "txt": true, "csv": true, "zip": true, "tar": true,
+}
+
+// hiddenMiddleExt reports an inner extension of name that WordPress would rename (see middleExtRe).
+func hiddenMiddleExt(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) <= 2 {
+		return false
+	}
+	for _, p := range parts[1 : len(parts)-1] {
+		if middleExtRe.MatchString(p) && !middleExtOK[strings.ToLower(p)] {
+			return true
+		}
+	}
+	return false
+}
 
 // UploadExistsError names the files that lie on the site with other content.
 type UploadExistsError struct{ Paths []string }
@@ -91,12 +122,13 @@ func ValidUploadPath(rel string) bool {
 }
 
 // BlockedUpload mirrors the fixed part of the agent's type check (PushUploads::blockedName):
-// executable extensions, hidden files (.htaccess, .user.ini), logs, dumps and what the CLI never
-// pushes anyway. Whether WordPress allows the type decides the agent.
+// executable and active extensions, hidden files (.htaccess, .user.ini), logs, dumps and what the
+// CLI never pushes anyway – plus a rough check of inner extensions (hiddenMiddleExt). Whether
+// WordPress allows the type decides the agent.
 func BlockedUpload(rel string) bool {
 	name := path.Base(rel)
 	lower := strings.ToLower(name)
-	return strings.HasPrefix(name, ".") || uploadBlockedRe.MatchString(name) || strings.HasSuffix(lower, ".log") ||
+	return strings.HasPrefix(name, ".") || uploadBlockedRe.MatchString(name) || hiddenMiddleExt(name) || strings.HasSuffix(lower, ".log") ||
 		strings.HasSuffix(lower, ".sql") || strings.HasSuffix(lower, ".sql.gz") || Ignored(UploadsUnit, rel, 0)
 }
 

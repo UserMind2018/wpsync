@@ -321,8 +321,11 @@ relativ zum Arbeitsverzeichnis dort); `--uploads` funktioniert dort genauso.
   (`upload_exists`) – ein Push ersetzt nie einen Upload, auch nicht mit `--force`.
 - PHP in jeder Schreibweise (`.php`, `.phtml`, `.phar`, `.php7`, `bild.php.jpg` …), versteckte
   Dateien (`.htaccess`, `.user.ini`), Logs, Dumps und Typen, die WordPress auf der Site nicht
-  erlaubt, lehnt der Agent ab (`upload_type_blocked`). Den Inhalt prüft er nach dem Upload noch
-  einmal gegen die Endung.
+  erlaubt, lehnt der Agent ab (`upload_type_blocked`) – ebenso aktive Typen (`.svg`, `.svgz`,
+  `.htm`, `.html`, `.xhtml`, `.shtml`, `.xml`, `.js`, `.mjs`), auch wenn ein Theme sie per
+  `upload_mimes` erlaubt, und jeden Namen, den WordPress beim Hochladen umbenennen würde
+  (`sanitize_file_name()`), vor allem versteckte mittlere Endungen wie `bild.cgi.png` oder
+  `foto.final.v2.jpg`. Den Inhalt prüft er nach dem Upload noch einmal gegen die Endung.
 - Die Uploads kommen vor dem Code auf die Site; fehlende Ordner (`JJJJ/MM`) legt der Agent mit den
   Rechten des Elternordners an (höchstens `0755`, Dateien höchstens `0644`). Scheitert der
   Code-Tausch, nimmt er sie wieder weg.
@@ -601,7 +604,9 @@ abbilden lässt, sofern das Profil sie kopiert.
   Hash-Prüfung vor dem Tausch und die Sperre „ein Push gleichzeitig" prüft der Server selbst.
 - **Uploads:** Der Upload-Kanal ist kein zweiter Weg für Code. Erlaubt ist nur, was WordPress auf
   der Site für einen Benutzer ohne `unfiltered_html` zulässt; PHP in jeder Schreibweise,
-  `.htaccess`, `.user.ini` und versteckte Dateien sperrt der Agent zusätzlich fest. Pfade bleiben
+  `.htaccess`, `.user.ini` und versteckte Dateien sperrt der Agent zusätzlich fest, ebenso aktive
+  Typen (SVG, HTML, XML, JavaScript) unabhängig von `upload_mimes` und mittlere Endungen, die
+  WordPress' `sanitize_file_name()` entschärfen würde (`bild.shtml.jpg`). Pfade bleiben
   unter `wp-content/uploads/` ohne Symlink auf dem Weg, nie in Staging- oder Push-Arbeitsordnern.
   Vorhandene Dateien ersetzt ein Push nie.
 - **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,

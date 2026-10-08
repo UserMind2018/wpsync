@@ -12,7 +12,9 @@ wie bisher.
 - `wpsync push <site> code … --uploads <liste>`: neue Dateien unter `wp-content/uploads/` im
   selben Push wie Code (Einheit `uploads`, nur hinzufügen). Der Agent meldet je Datei `need` oder
   `same`, bricht bei anderem Inhalt am selben Pfad ab (`upload_exists`), sperrt PHP, versteckte
-  Dateien und von WordPress nicht erlaubte Typen (`upload_type_blocked`) und prüft den Inhalt
+  Dateien, von WordPress nicht erlaubte Typen, aktive Typen (SVG, HTML, XML, JavaScript – auch
+  wenn `upload_mimes` sie erlaubt) und Namen, die WordPress umbenennen würde, etwa versteckte
+  mittlere Endungen wie `bild.cgi.png` (`upload_type_blocked`), und prüft den Inhalt
   nach dem Upload. Commit Uploads → Code, Rücknahme Code → Uploads, auch über `rescue.php`;
   seither geänderte Dateien bleiben (`warnings: ["upload_changed_since_push"]`). Die Baseline
   kennt die neuen Dateien, ein Folge-Pull überträgt sie nicht noch einmal

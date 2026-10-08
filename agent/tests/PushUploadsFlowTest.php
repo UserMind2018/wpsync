@@ -179,6 +179,29 @@ final class PushUploadsFlowTest extends TestCase
         $this->assertInstanceOf(\WP_REST_Response::class, $this->begin(['2026/10/bild.png' => $this->png()], ['dry' => true]));
     }
 
+    /** Versteckte mittlere Endung: was WordPress' sanitize_file_name() umbenennen würde, geht nicht raus. */
+    public function testHiddenMiddleExtensionsAreRefused(): void
+    {
+        foreach (['2026/10/bild.html.jpg', '2026/10/bild.shtml.jpg', '2026/10/bild.cgi.png', '2026/10/bild.pl.gif', '2026/10/foto.final.v2.jpg'] as $rel) {
+            $this->assertError('wpsync_upload_type_blocked', 400, $this->begin([$rel => 'x'], ['dry' => true]));
+        }
+        foreach (['2026/10/bild-300x200.jpg', '2026/10/Foto_2026.JPG', '2026/10/foto.jpg.png', '2026/10/scan.2026.pdf'] as $rel) {
+            $result = $this->begin([$rel => 'x'], ['dry' => true]);
+            $this->assertInstanceOf(\WP_REST_Response::class, $result, $rel . ($result instanceof \WP_Error ? ' ' . $result->code : ''));
+        }
+    }
+
+    /** Aktive Typen bleiben gesperrt, auch wenn ein Theme sie per upload_mimes erlaubt. */
+    public function testActiveTypesStayBlockedEvenIfWordPressAllowsThem(): void
+    {
+        $GLOBALS['wpsync_test_extra_mimes'] = [
+            'svg|svgz' => 'image/svg+xml', 'js|mjs' => 'text/javascript', 'xml' => 'application/xml', 'xhtml' => 'application/xhtml+xml',
+        ];
+        foreach (['x.svg', 'x.SVG', 'x.svgz', 'x.js', 'x.mjs', 'x.xml', 'x.xhtml'] as $name) {
+            $this->assertError('wpsync_upload_type_blocked', 400, $this->begin(['2026/10/' . $name => 'x'], ['dry' => true]));
+        }
+    }
+
     public function testPathsOutsideTheUploadsAreRefused(): void
     {
         foreach (['../plugins/x/main.php', '2026/../../x.png', 'wpsync-push-0123456789abcdef/a.png', '2026/.git/a.png', "2026/\x01.png"] as $rel) {

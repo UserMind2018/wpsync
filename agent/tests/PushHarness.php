@@ -119,10 +119,47 @@ namespace {
         return true;
     }
 
-    /** @return array<string, string> wie WordPress für einen Request ohne unfiltered_html */
+    /**
+     * Wie WordPress für einen Request ohne unfiltered_html; $GLOBALS['wpsync_test_extra_mimes'] spielt
+     * ein Theme, das per upload_mimes weitere Typen erlaubt.
+     *
+     * @return array<string, string>
+     */
     function get_allowed_mime_types(): array
     {
-        return ['jpg|jpeg|jpe' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'pdf' => 'application/pdf', 'txt' => 'text/plain'];
+        return ['jpg|jpeg|jpe' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'pdf' => 'application/pdf', 'txt' => 'text/plain']
+            + ($GLOBALS['wpsync_test_extra_mimes'] ?? []);
+    }
+
+    /**
+     * Nur die Regel von WordPress für mittlere Endungen: ein Teil zwischen erstem und letztem Punkt,
+     * der wie eine Endung aussieht und kein erlaubter Typ ist, bekommt ein „_“ (bild.cgi.png → bild.cgi_.png).
+     */
+    function sanitize_file_name(string $filename): string
+    {
+        $parts = explode('.', $filename);
+        if (count($parts) <= 2) {
+            return $filename;
+        }
+        $out  = (string) array_shift($parts);
+        $last = (string) array_pop($parts);
+        foreach ($parts as $part) {
+            $out .= '.' . $part;
+            if (preg_match('/^[a-zA-Z]{2,5}\d?$/', $part) !== 1) {
+                continue;
+            }
+            $allowed = false;
+            foreach (array_keys(get_allowed_mime_types()) as $exts) {
+                if (preg_match('!^(' . $exts . ')$!i', $part) === 1) {
+                    $allowed = true;
+                    break;
+                }
+            }
+            if (!$allowed) {
+                $out .= '_';
+            }
+        }
+        return $out . '.' . $last;
     }
 
     /**

@@ -16,8 +16,11 @@ final class PushUploads
     public const MAX_FILES = 5000;
     /** Code einer RuntimeException: am Pfad liegt inzwischen etwas (→ wpsync_upload_exists). */
     public const EXISTS = 409;
-    /** Ausführbares, egal was WordPress erlaubt – auch als mittlere Endung (bild.php.jpg). */
-    private const BLOCKED = '/\.(php[0-9]?|phtml|phar|pht|phps)(\.|\z)/i';
+    /**
+     * Ausführbares und aktive Typen (SVG, HTML, XML, JavaScript – Stored XSS), egal was WordPress
+     * per upload_mimes erlaubt – auch als mittlere Endung (bild.php.jpg, bild.html.jpg).
+     */
+    private const BLOCKED = '/\.(php[0-9]?|phtml|phar|pht|phps|svgz?|x?html?|shtml|xml|m?js)(\.|\z)/i';
 
     /** Pfad relativ zu uploads/: kein Ausbruch, keine VCS-, Staging- oder Push-Arbeitsordner. */
     public static function validFile(string $rel): bool
@@ -44,10 +47,19 @@ final class PushUploads
             || Excludes::path(self::UNIT . '/' . $rel, 0) !== null;
     }
 
-    /** Erlaubt WordPress auf dem Ziel diese Endung? Der Begin kennt nur den Namen. */
+    /**
+     * Erlaubt WordPress auf dem Ziel diese Endung? Der Begin kennt nur den Namen. Ein Name, den
+     * sanitize_file_name() ändern würde, zählt als nicht erlaubt – vor allem versteckte mittlere
+     * Endungen (bild.cgi.png, bild.shtml.jpg), die Apache mit AddHandler ausführt; WordPress' eigener
+     * Upload hängt dort ein „_“ an.
+     */
     public static function allowedName(string $rel): bool
     {
-        $check = wp_check_filetype(basename($rel), get_allowed_mime_types());
+        $name = basename($rel);
+        if (sanitize_file_name($name) !== $name) {
+            return false;
+        }
+        $check = wp_check_filetype($name, get_allowed_mime_types());
         return !empty($check['ext']) && !empty($check['type']);
     }
 

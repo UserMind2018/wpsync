@@ -60,8 +60,20 @@ final class PushUploadsTest extends TestCase
         foreach ($blocked as $rel) {
             $this->assertTrue(PushUploads::blockedName($rel), $rel);
         }
-        foreach (['bild.jpg', 'bericht.pdf', 'php-handbuch.pdf', 'alphabet.png', 'x.phpx', 'archiv.zip'] as $rel) {
+        foreach (['bild.jpg', 'bericht.pdf', 'php-handbuch.pdf', 'alphabet.png', 'x.phpx', 'archiv.zip', 'bild-300x200.jpg', 'Foto_2026.JPG', 'html-kurs.pdf', 'xml.png'] as $rel) {
             $this->assertFalse(PushUploads::blockedName($rel), $rel);
+        }
+    }
+
+    /** Aktive Typen – unabhängig davon, was upload_mimes erlaubt; auch als mittlere Endung. */
+    public function testActiveTypesAreAlwaysBlocked(): void
+    {
+        $blocked = [
+            'x.svg', 'x.SVG', 'x.svgz', 'x.htm', 'x.html', 'x.xhtml', 'x.xml', 'x.js', 'x.mjs', 'x.shtml',
+            '2026/10/bild.html.jpg', '2026/10/bild.shtml.jpg', 'bild.svg.png', 'bild.JS.gif',
+        ];
+        foreach ($blocked as $rel) {
+            $this->assertTrue(PushUploads::blockedName($rel), $rel);
         }
     }
 

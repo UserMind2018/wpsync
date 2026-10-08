@@ -79,9 +79,27 @@ func TestUploadRulesMirrorTheAgent(t *testing.T) {
 			t.Errorf("%q should be blocked", rel)
 		}
 	}
-	for _, rel := range []string{"bild.jpg", "bericht.pdf", "php-handbuch.pdf", "alphabet.png", "x.phpx", "archiv.zip"} {
+	for _, rel := range []string{"bild.jpg", "bericht.pdf", "php-handbuch.pdf", "alphabet.png", "x.phpx", "archiv.zip", "bild-300x200.jpg", "Foto_2026.JPG", "foto.jpg.png", "scan.2026.pdf", "html-kurs.pdf"} {
 		if BlockedUpload(rel) {
 			t.Errorf("%q should not be blocked", rel)
+		}
+	}
+}
+
+// Aktive Typen sind immer gesperrt, egal was upload_mimes auf der Site erlaubt (Finding 2).
+func TestActiveUploadTypesAreBlocked(t *testing.T) {
+	for _, rel := range []string{"x.svg", "x.SVG", "x.svgz", "x.htm", "x.html", "x.xhtml", "x.xml", "x.js", "x.mjs", "x.shtml", "2026/10/bild.svg.png"} {
+		if !BlockedUpload(rel) {
+			t.Errorf("%q should be blocked", rel)
+		}
+	}
+}
+
+// Versteckte mittlere Endungen, die WordPress' sanitize_file_name() umbenennen würde (Finding 1).
+func TestHiddenMiddleExtensionsAreBlocked(t *testing.T) {
+	for _, rel := range []string{"bild.html.jpg", "bild.shtml.jpg", "bild.cgi.png", "2026/10/bild.pl.gif", "foto.final.v2.jpg", "style.min.css"} {
+		if !BlockedUpload(rel) {
+			t.Errorf("%q should be blocked", rel)
 		}
 	}
 }
