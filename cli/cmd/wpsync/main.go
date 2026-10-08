@@ -1006,7 +1006,7 @@ func pushHint(err error, site *sites.Site) error {
 		if errors.As(err, &apiErr) {
 			why = agentText(apiErr.Message)
 		}
-		return cliout.Hint(err, why+" – PHP, .htaccess, .user.ini, versteckte Dateien und Typen, die WordPress auf der Site nicht erlaubt, gehen nie als Upload auf die Site")
+		return cliout.Hint(err, why+" – PHP, .htaccess, .user.ini, versteckte Dateien, aktive Typen (SVG, HTML, XML, JavaScript), Typen, die WordPress auf der Site nicht erlaubt, und Namen, die WordPress umbenennen würde (Leerzeichen, Sonderzeichen, mittlere Endungen), gehen nie als Upload auf die Site")
 	case errors.Is(err, push.ErrUploadMissing):
 		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("%v – die Liste von --uploads nennt Dateien relativ zu wp-content/uploads/ der lokalen Site", err))
 	case errors.As(err, &skipped):

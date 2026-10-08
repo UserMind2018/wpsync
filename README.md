@@ -325,7 +325,8 @@ relativ zum Arbeitsverzeichnis dort); `--uploads` funktioniert dort genauso.
   `.htm`, `.html`, `.xhtml`, `.shtml`, `.xml`, `.js`, `.mjs`), auch wenn ein Theme sie per
   `upload_mimes` erlaubt, und jeden Namen, den WordPress beim Hochladen umbenennen würde
   (`sanitize_file_name()`), vor allem versteckte mittlere Endungen wie `bild.cgi.png` oder
-  `foto.final.v2.jpg`. Den Inhalt prüft er nach dem Upload noch einmal gegen die Endung.
+  `foto.final.v2.jpg`, aber auch Leerzeichen und Sonderzeichen (`Mein Bild (1).jpg`) – solche
+  Dateien vorher umbenennen. Den Inhalt prüft er nach dem Upload noch einmal gegen die Endung.
 - Die Uploads kommen vor dem Code auf die Site; fehlende Ordner (`JJJJ/MM`) legt der Agent mit den
   Rechten des Elternordners an (höchstens `0755`, Dateien höchstens `0644`). Scheitert der
   Code-Tausch, nimmt er sie wieder weg.
@@ -919,7 +920,7 @@ gegen einen Agent unter 0.6.0.
 | `target_mismatch` | `push`/`rollback`: der Agent antwortet für ein anderes Ziel, oder der Push ging an das andere Ziel |
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
 | `upload_exists` | `push --uploads`: auf der Site liegt am selben Pfad eine andere Datei – nichts übertragen, nichts getauscht, auch mit `--force` |
-| `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, von WordPress nicht erlaubt) oder der Inhalt passt nicht zur Endung |
+| `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, aktive Typen wie SVG/HTML, von WordPress nicht erlaubt), der Dateiname ist nicht WordPress-konform (Leerzeichen, Sonderzeichen, mittlere Endungen) oder der Inhalt passt nicht zur Endung |
 
 **Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
 Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
