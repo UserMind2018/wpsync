@@ -84,6 +84,41 @@ namespace {
         return 'https://example.test/wp-content/plugins/wpsync-agent/' . $file;
     }
 
+    function content_url(): string
+    {
+        return $GLOBALS['wpsync_test_content_url'] ?? 'https://example.test/wp-content';
+    }
+
+    /**
+     * @param mixed $default
+     * @return mixed
+     */
+    function get_option(string $name, $default = false)
+    {
+        return $name === 'active_plugins' ? ($GLOBALS['wpsync_test_active_plugins'] ?? []) : $default;
+    }
+
+    function is_multisite(): bool
+    {
+        return false;
+    }
+
+    /**
+     * @param mixed $default
+     * @return mixed
+     */
+    function get_site_option(string $name, $default = false)
+    {
+        return $default;
+    }
+
+    /** @param array<int, mixed> $args */
+    function wp_schedule_single_event(int $timestamp, string $hook, array $args = []): bool
+    {
+        $GLOBALS['wpsync_test_single_events'][] = [$timestamp, $hook];
+        return true;
+    }
+
     /** @param mixed ...$args */
     function add_action(...$args): void
     {
@@ -99,6 +134,8 @@ namespace WpSync {
         public static $pushes = [];
         /** @var int */
         public static $until = 0;
+        /** @var bool Datenbank antwortet nicht: Lesezugriffe liefern null/[], dbOk() false */
+        public static $dbError = false;
 
         public static function install(): void
         {
@@ -107,7 +144,7 @@ namespace WpSync {
         /** @return array<string, mixed>|null */
         public static function getState(string $name): ?array
         {
-            return self::$state[$name] ?? null;
+            return self::$dbError ? null : (self::$state[$name] ?? null);
         }
 
         /** @param array<string, mixed>|null $value */
@@ -163,17 +200,25 @@ namespace WpSync {
         /** @return array<string, mixed>|null */
         public static function getPush(string $pushId): ?array
         {
-            return isset(self::$pushes[$pushId]) ? self::row(self::$pushes[$pushId]) : null;
+            return !self::$dbError && isset(self::$pushes[$pushId]) ? self::row(self::$pushes[$pushId]) : null;
         }
 
         /** @return list<array<string, mixed>> neueste zuerst */
         public static function pushes(int $limit): array
         {
+            if (self::$dbError) {
+                return [];
+            }
             $rows = array_values(self::$pushes);
             usort($rows, static function (array $a, array $b): int {
                 return [$b['created'], $b['push_id']] <=> [$a['created'], $a['push_id']];
             });
             return array_map([self::class, 'row'], array_slice($rows, 0, $limit));
+        }
+
+        public static function dbOk(): bool
+        {
+            return !self::$dbError;
         }
 
         /**

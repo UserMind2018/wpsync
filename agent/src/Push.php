@@ -52,11 +52,14 @@ final class Push
         wp_clear_scheduled_hook(self::CRON);
     }
 
-    /** Deaktivieren entfernt Arbeitsordner und Snapshots; bestätigte Stände bleiben live. */
+    /** Deaktivieren entfernt Arbeitsordner, Snapshots und Rescue-Stubs; bestätigte Stände bleiben live. */
     public static function uninstall(): void
     {
         foreach ((array) glob(self::content() . '/wpsync-push-*', GLOB_ONLYDIR) as $dir) {
             PushSwap::remove((string) $dir);
+        }
+        if (self::content() !== '') {
+            PushRescueStub::remove(dirname(self::content()));
         }
     }
 
@@ -148,16 +151,23 @@ final class Push
             }
         }
         $pending = self::pending();
+        $open    = PushWindow::open(Store::pushUntil($keyId), $now);
         $answer  = [
             'push_id'       => '',
             'target'        => $target,
             'agent_version' => WPSYNC_VERSION,
             'health_urls'   => $target === 'staging' ? Staging::healthUrls() : self::healthUrls(),
-            'window_open'   => PushWindow::open(Store::pushUntil($keyId), $now),
+            'window_open'   => $open,
             'pending'       => $pending,
             'units'         => $plans,
             // Die URL schon im Probelauf: die CLI prüft den Rückweg, bevor sie einen Push anlegt (AC-66).
-            'rescue'        => ['url' => plugins_url('rescue.php', self::$pluginDir . '/wpsync-agent.php'), 'salt' => ''],
+            // Mit rescue_stub ein Stub im Webroot, falls PHP unter plugins/ gesperrt ist (Spec 12, R3) –
+            // nur bei offenem Fenster: sonst bricht die CLI vor dem Ping ab, der Stub läge umsonst da.
+            'rescue'        => [
+                'url'       => self::rescueUrl(!empty($params['rescue_stub']) && $open, $now),
+                'salt'      => '',
+                'hardening' => PushRescueStub::hardening(self::activePlugins()),
+            ],
         ];
         if (!empty($params['dry'])) {
             return new \WP_REST_Response($answer);
@@ -420,6 +430,7 @@ final class Push
             Staging::markUsed(); // ein Push zählt als Nutzung der Kopie (Spec 2b 5.9)
         }
         self::touchLock($pushId, time());
+        self::touchStub(time());
         return new \WP_REST_Response(['next' => null, 'stamps' => (object) $stamps]);
     }
 
@@ -447,7 +458,10 @@ final class Push
             PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
             self::release($push['push_id']);
+            // Die 10 Minuten des Stubs ab jetzt: eine verlorene confirm-Antwort braucht rescue.php (R5).
+            self::touchStub(time());
             self::prune(time());
+            self::scheduleTidy();
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::CONFIRMED]);
     }
@@ -505,6 +519,8 @@ final class Push
                 return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
             }
             self::finishRollback($pushId);
+            self::touchStub(time()); // wie bei confirm (R5)
+            self::scheduleTidy();
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
     }
@@ -563,6 +579,52 @@ final class Push
                 if ($kept[$push['target']] > self::KEEP || $now - $push['created'] > self::MAX_AGE) {
                     self::discard($push['push_id'], PushRescue::CONFIRMED);
                 }
+            }
+        }
+        self::pruneOrphans($now);
+        self::tidyStub($now);
+    }
+
+    /**
+     * Arbeitsordner ohne aktive Zeile in wpsync_pushes (abgebrochener Push, gelöschte Zeile) nach
+     * UPLOAD_TTL – nur was nachweislich fertig ist: nie getauscht (keine rescue.json), zurückgerollt
+     * oder bestätigt. committed ist der einzige Snapshot eines getauschten Pushs, eine unlesbare
+     * rescue.json ebenso möglich; beides bleibt (Spec Stufe 2, 12, R10). Bei einem DB-Fehler ist
+     * eine fehlende Zeile kein Beweis – dann wird gar nichts gelöscht. Live und Kopie getrennt.
+     */
+    private static function pruneOrphans(int $now): void
+    {
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            if ($content === '') {
+                continue;
+            }
+            $work = $content . '/' . Store::pushDirName();
+            if (is_link($work)) {
+                continue;
+            }
+            foreach ((array) @scandir($work) as $name) {
+                if (!is_string($name) || preg_match(PushRescue::ID, $name) !== 1) {
+                    continue;
+                }
+                $dir = $work . '/' . $name;
+                if (is_link($dir) || !is_dir($dir) || $now - (int) @filemtime($dir) < self::UPLOAD_TTL) {
+                    continue;
+                }
+                $row = Store::getPush($name);
+                if (!Store::dbOk()) {
+                    return;
+                }
+                if ($row !== null && !$row['pruned']) {
+                    continue;
+                }
+                if (file_exists(PushRescue::file($work, $name))) {
+                    $record = PushRescue::read($work, $name);
+                    if ($record === null || !in_array($record['status'], [PushRescue::ROLLED_BACK, PushRescue::CONFIRMED], true)) {
+                        continue;
+                    }
+                }
+                PushSwap::remove($dir);
             }
         }
     }
@@ -870,6 +932,101 @@ final class Push
         if ($lock !== null && ($lock['push_id'] ?? '') === $pushId) {
             Store::setState('push_lock', null);
         }
+    }
+
+    /**
+     * rescue.php über einen Stub im Webroot (Spec Stufe 2, 12) – nur auf Wunsch der CLI und nur,
+     * wenn wp-content direkt im Webroot liegt; sonst die Plugin-URL wie bisher (R3, R6).
+     */
+    private static function rescueUrl(bool $stub, int $now): string
+    {
+        $plugin = plugins_url('rescue.php', self::$pluginDir . '/wpsync-agent.php');
+        $base   = self::webrootUrl();
+        if (!$stub || $base === '') {
+            return $plugin;
+        }
+        $webroot = dirname(self::content());
+        $state   = Store::getState('rescue_stub');
+        $name    = is_string($state['name'] ?? null) && PushRescueStub::exists($webroot, $state['name'])
+            ? $state['name']
+            : PushRescueStub::create($webroot, self::$pluginDir);
+        if ($name === null) {
+            return $plugin;
+        }
+        Store::setState('rescue_stub', ['name' => $name, 'touched' => $now]);
+        return $base . $name;
+    }
+
+    /** URL des Webroots mit Schrägstrich am Ende, wenn wp-content direkt darin liegt; sonst ''. */
+    private static function webrootUrl(): string
+    {
+        $url = rtrim((string) content_url(), '/');
+        $dir = self::content();
+        return $dir !== '' && basename($dir) === 'wp-content' && substr($url, -11) === '/wp-content' ? substr($url, 0, -10) : '';
+    }
+
+    private static function touchStub(int $now): void
+    {
+        $state = Store::getState('rescue_stub');
+        if ($state !== null) {
+            $state['touched'] = $now;
+            Store::setState('rescue_stub', $state);
+        }
+    }
+
+    /**
+     * Löscht den Stub, sobald ihn kein Push mehr braucht (R5): kein unbestätigter Push, keine
+     * laufende Sperre und 10 Minuten seit dem letzten Begin oder Commit. Reste daneben immer.
+     */
+    private static function tidyStub(int $now): void
+    {
+        $content = self::content();
+        if ($content === '') {
+            return;
+        }
+        // Jeder Lesezugriff einzeln geprüft: bei einem DB-Fehler sähe alles nach „frei“ aus (M1).
+        $state = Store::getState('rescue_stub');
+        if (!Store::dbOk()) {
+            return;
+        }
+        $lock = Store::getState('push_lock');
+        if (!Store::dbOk()) {
+            return;
+        }
+        $pending = self::pending();
+        if (!Store::dbOk()) {
+            return;
+        }
+        $name = is_string($state['name'] ?? null) ? $state['name'] : null;
+        $busy = $pending !== null
+            || ($lock !== null && $now - (int) ($lock['touched'] ?? 0) < self::LOCK_TTL)
+            || ($name !== null && $now - (int) ($state['touched'] ?? 0) < self::LOCK_TTL);
+        if ($busy) {
+            if ($name !== null) {
+                PushRescueStub::remove(dirname($content), $name);
+            }
+            return;
+        }
+        PushRescueStub::remove(dirname($content));
+        if ($state !== null) {
+            Store::setState('rescue_stub', null);
+        }
+    }
+
+    /** Ein Aufräumlauf nach Ablauf der 10 Minuten, statt bis zum täglichen Cron zu warten (R5). */
+    private static function scheduleTidy(): void
+    {
+        wp_schedule_single_event(time() + self::LOCK_TTL + 60, self::CRON);
+    }
+
+    /** @return list<mixed> Einträge aus active_plugins, bei Multisite samt netzwerkweit aktiven */
+    private static function activePlugins(): array
+    {
+        $active = array_values((array) get_option('active_plugins', []));
+        if (is_multisite()) {
+            $active = array_merge($active, array_keys((array) get_site_option('active_sitewide_plugins', [])));
+        }
+        return $active;
     }
 
     private static function windowClosed(): \WP_Error

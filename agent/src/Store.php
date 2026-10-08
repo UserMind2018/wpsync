@@ -385,6 +385,17 @@ final class Store
     }
 
     /**
+     * Ob die letzte Abfrage ohne Fehler lief. getPush, getState und pushes liefern bei einem
+     * DB-Fehler dasselbe wie „nichts da“ – wer daraufhin löscht, fragt vorher hier nach.
+     * wpdb setzt last_error vor jeder Abfrage zurück; also direkt nach dem Lesen aufrufen.
+     */
+    public static function dbOk(): bool
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error === '';
+    }
+
+    /**
      * Neueste zuerst.
      *
      * @return list<array<string, mixed>>

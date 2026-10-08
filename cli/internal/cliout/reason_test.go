@@ -22,6 +22,7 @@ func TestPushCasesHaveAReason(t *testing.T) {
 		{Hint(&push.SkippedNewError{Units: []string{"plugins/neu"}}, "nichts gepusht"), "nothing_to_push"},
 		{Hint(push.ErrNotWritable, "Rechte prüfen"), "not_writable"},
 		{fmt.Errorf("%w: dial tcp", push.ErrRescueUnreachable), "rescue_unreachable"},
+		{&push.RescueBlockedError{Plugins: []string{"better-wp-security"}, Err: fmt.Errorf("%w: HTTP 403", push.ErrRescueUnreachable)}, "rescue_unreachable"},
 		{fmt.Errorf("plugins/x/a.php %w", push.ErrChanged), "local_changed"},
 		{fmt.Errorf("Upload abgebrochen: %w", fmt.Errorf("plugins/x/a.php %w", push.ErrChanged)), "local_changed"},
 		{fmt.Errorf("public/wp-content/plugins %w", push.ErrSymlink), "local_changed"},

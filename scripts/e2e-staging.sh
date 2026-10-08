@@ -115,9 +115,10 @@ live_tables() { # live_tables <datei>
     SQL "SELECT CONCAT('option:', option_name), CRC32(option_value) FROM e2e_options WHERE option_name NOT LIKE '%transient%' AND option_name NOT LIKE 'wpsync%' AND option_name NOT IN ('cron', 'action_scheduler_lock_async-request-runner', 'action_scheduler_migration_status') ORDER BY option_name"
   } > "$1"
 }
-# Dateien des Live-Webroots mit Hash – ohne die Kopie, den Push-Arbeitsordner des Agents und Logs.
+# Dateien des Live-Webroots mit Hash – ohne die Kopie, den Push-Arbeitsordner des Agents, den
+# Rescue-Stub (liegt auch bei Pushes nach Staging im Live-Webroot, Spec Stufe 2, 12, R2) und Logs.
 live_files() { # live_files <datei>
-  (cd "$PUB" && find . \( -path './wpsync-staging-*' -o -path './wp-content/wpsync-push-*' -o -path ./wp-content/uploads/wc-logs \) -prune \
+  (cd "$PUB" && find . \( -path './wpsync-staging-*' -o -path './wp-content/wpsync-push-*' -o -path './wpsync-rescue-*.php' -o -path ./wp-content/uploads/wc-logs \) -prune \
     -o -type f -print0 | sort -z | xargs -0 md5 -r) > "$1"
 }
 same() { # same <was> <datei-vorher> <datei-nachher> [Zeilen, die nicht zählen (grep -E)]
@@ -986,6 +987,7 @@ same "Zusatz 12: Live-Tabellen wie vor dem ersten create (bis vor dem Deaktivier
 same "Zusatz 12: Live-Dateien wie vor dem ersten create (bis vor dem Deaktivieren)" "$E2E/inv-files.0" "$E2E/inv-files.5"
 ddev wp plugin deactivate wpsync-agent
 no_staging_left "AC-103 Deaktivieren"
+no "R9 kein Rescue-Stub nach dem Deaktivieren" sh -c "ls '$PUB'/wpsync-rescue-*.php"
 eq "Zusatz 10: Tabellen des Agents samt Datensatz weg" "$(SQL "SHOW TABLES LIKE 'e2e_wpsync%'" | wc -l | tr -d ' ')" 0
 ddev wp plugin activate wpsync-agent >/dev/null
 live_tables "$E2E/inv-tables.6"

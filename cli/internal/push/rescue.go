@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -21,7 +23,12 @@ var (
 	// ErrRescueConfirmed: rescue.php takes back only a push that was swapped in but not yet
 	// confirmed; a confirmed one goes through the agent or the WP admin (U18).
 	ErrRescueConfirmed = errors.New("rescue.php rollt nur unbestätigte Pushes zurück – dieser ist bestätigt; im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
+	// ErrRescueGone: the stub in the webroot lives only while a push is open (Spec Stufe 2, 12, R8).
+	ErrRescueGone = errors.New("der Notfallweg über rescue.php besteht nur bis kurz nach der Bestätigung eines Pushs und ist nicht mehr da – im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
 )
+
+// stubName matches the rescue stub the agent puts into the webroot.
+var stubName = regexp.MustCompile(`^wpsync-rescue-[a-f0-9]{32}\.php$`)
 
 // RescueKey derives the per-push rollback key from the pairing secret. The agent stores only its
 // sha256, so rescue.php needs neither the database nor the secret.
@@ -52,6 +59,53 @@ func RescuePing(hc *http.Client, rescueURL string) error {
 	return nil
 }
 
+// RescueBlockedError: rescue.php did not answer and the agent names active plugins that can block
+// PHP below wp-content (Spec Stufe 2, 12, R7). It still is ErrRescueUnreachable.
+type RescueBlockedError struct {
+	Plugins []string // folder names as the agent reports them
+	Err     error
+}
+
+func (e *RescueBlockedError) Error() string {
+	names := make([]string, len(e.Plugins))
+	for i, p := range e.Plugins {
+		names[i] = agentapi.Printable(p)
+	}
+	return fmt.Sprintf("%v (aktiv: %s)", e.Err, strings.Join(names, ", "))
+}
+
+func (e *RescueBlockedError) Unwrap() error { return e.Err }
+
+// HardeningHint says where an active plugin blocks PHP below wp-content.
+func HardeningHint(plugins []string) string {
+	var out []string
+	for _, p := range plugins {
+		switch p {
+		case "better-wp-security", "ithemes-security-pro":
+			out = append(out, "Solid Security/iThemes Security: Advanced → System Tweaks → „Disable PHP in Plugins“")
+		case "sucuri-scanner":
+			out = append(out, "Sucuri Security: Settings → Hardening (PHP-Ausführung in wp-content)")
+		default:
+			out = append(out, agentapi.Printable(p))
+		}
+	}
+	return strings.Join(out, "; ")
+}
+
+// rescueReady checks the way back before anything is created or swapped (AC-66).
+func rescueReady(o Options, r agentapi.PushRescue) error {
+	if err := RescueAllowed(o.Site.URL, r.URL); err != nil {
+		return err
+	}
+	if err := RescuePing(o.HTTP, r.URL); err != nil {
+		if len(r.Hardening) > 0 {
+			return &RescueBlockedError{Plugins: r.Hardening, Err: err}
+		}
+		return err
+	}
+	return nil
+}
+
 // RescueRollback restores the snapshot of a push, bypassing WordPress.
 func RescueRollback(hc *http.Client, rescueURL, pushID, key string) error {
 	_, err := rescuePost(hc, rescueURL, url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}})
@@ -76,6 +130,9 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4000))
 	var body map[string]any
 	if json.Unmarshal(raw, &body) != nil {
+		if resp.StatusCode == http.StatusNotFound && stubName.MatchString(path.Base(req.URL.Path)) {
+			return nil, ErrRescueGone
+		}
 		return nil, fmt.Errorf("HTTP %d, keine Antwort von rescue.php", resp.StatusCode)
 	}
 	if ok, _ := body["ok"].(bool); resp.StatusCode != http.StatusOK || !ok {

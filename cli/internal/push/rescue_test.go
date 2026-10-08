@@ -213,3 +213,34 @@ func TestRescueDoesNotFollowRedirects(t *testing.T) {
 		t.Error("the caller's client must stay unchanged")
 	}
 }
+
+// R8: der Stub ist nach dem Aufräumen weg – 404 heisst dann „Notfallweg vorbei“, nicht „kaputt“.
+func TestRescueRollbackOnAStubThatIsGone(t *testing.T) {
+	gone := rescueServer(t, 404, `<html>Not Found</html>`, nil)
+	defer gone.Close()
+	err := RescueRollback(gone.Client(), gone.URL+"/wpsync-rescue-"+strings.Repeat("a", 32)+".php", "p_20261005_0123456789ab", "k")
+	if !errors.Is(err, ErrRescueGone) {
+		t.Errorf("stub: err = %v, want ErrRescueGone", err)
+	}
+	err = RescueRollback(gone.Client(), gone.URL+"/wp-content/plugins/wpsync-agent/rescue.php", "p_20261005_0123456789ab", "k")
+	if err == nil || errors.Is(err, ErrRescueGone) {
+		t.Errorf("plugin path: err = %v, want a plain HTTP 404", err)
+	}
+}
+
+// AC-136
+func TestHardeningHint(t *testing.T) {
+	got := HardeningHint([]string{"ithemes-security-pro", "sucuri-scanner", "evil\x1b[2J"})
+	for _, want := range []string{"Disable PHP in Plugins", "Sucuri", "evil"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hint %q lacks %q", got, want)
+		}
+	}
+	if strings.ContainsRune(got, '\x1b') {
+		t.Errorf("hint passes control characters: %q", got)
+	}
+	blocked := &RescueBlockedError{Plugins: []string{"x\x1by"}, Err: ErrRescueUnreachable}
+	if strings.ContainsRune(blocked.Error(), '\x1b') {
+		t.Errorf("error passes control characters: %q", blocked.Error())
+	}
+}

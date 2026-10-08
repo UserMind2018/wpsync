@@ -24,12 +24,15 @@ type PushUnit struct {
 }
 
 // PushBeginRequest asks the agent to check a push. With Dry nothing is created and no push
-// window is needed.
+// window is needed – apart from the rescue stub, when RescueStub asks for it.
 type PushBeginRequest struct {
 	Target string     `json:"target"`
 	Force  bool       `json:"force"`
 	Dry    bool       `json:"dry"`
 	Units  []PushUnit `json:"units"`
+	// RescueStub asks agent 0.5.1 for rescue.php through a stub in the webroot (Spec Stufe 2, 12).
+	// An older agent ignores it and names rescue.php in its plugin folder.
+	RescueStub bool `json:"rescue_stub,omitempty"`
 }
 
 // PushUnitPlan is the agent's view of one unit.
@@ -53,6 +56,8 @@ type PushPending struct {
 type PushRescue struct {
 	URL  string `json:"url"`
 	Salt string `json:"salt"`
+	// Hardening names active plugins that may block PHP below wp-content (agent 0.5.1).
+	Hardening []string `json:"hardening"`
 }
 
 // PushBegin is the answer to /push/begin. PushID and Rescue.Salt are empty for a dry run.
