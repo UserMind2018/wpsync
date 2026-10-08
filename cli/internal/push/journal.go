@@ -46,6 +46,11 @@ type Journal struct {
 	// Target is live or staging; empty (journals before CLI 0.4.0) means live. A push to staging
 	// never touches the baseline (Spec 2b 6.2), so Applied stays false for it.
 	Target string `json:"target,omitempty"`
+	// Uploads lists the files the push adds below wp-content/uploads (Spec Content-Push §8),
+	// UploadsBefore their baseline entries before the push, if any. Never the whole folder: a
+	// rollback forgets exactly these.
+	Uploads       []string                      `json:"uploads,omitempty"`
+	UploadsBefore map[string]baseline.FileStamp `json:"uploads_before,omitempty"`
 }
 
 // target is the target of the push, live for a journal that names none.
@@ -76,9 +81,13 @@ func NewJournal(pushID, rescueURL, salt string, b *baseline.Baseline, units []st
 	return j
 }
 
-// Apply replaces the baseline entries of the pushed units with the server's new stamps.
+// Apply replaces the baseline entries of the pushed units with the server's new stamps. The
+// unit uploads is left to ApplyUploads: replacing it would drop every other upload.
 func Apply(b *baseline.Baseline, stamps map[string]map[string]agentapi.PushStamp) {
 	for unit, files := range stamps {
+		if unit == UploadsUnit {
+			continue
+		}
 		dropUnit(b, unit)
 		for rel, s := range files {
 			b.Files[unitPrefix(unit)+rel] = baseline.FileStamp{Size: s.Size, MTime: s.MTime}
@@ -92,6 +101,50 @@ func Revert(b *baseline.Baseline, j *Journal) {
 		dropUnit(b, unit)
 		for path, stamp := range files {
 			b.Files[path] = stamp
+		}
+	}
+}
+
+func uploadKey(rel string) string { return "wp-content/" + UploadsUnit + "/" + rel }
+
+// NoteUploads remembers which uploads the push adds and their baseline entries before it.
+func (j *Journal) NoteUploads(b *baseline.Baseline, need []string) {
+	j.Uploads = append([]string(nil), need...)
+	for _, rel := range need {
+		if stamp, ok := b.Files[uploadKey(rel)]; ok {
+			if j.UploadsBefore == nil {
+				j.UploadsBefore = map[string]baseline.FileStamp{}
+			}
+			j.UploadsBefore[uploadKey(rel)] = stamp
+		}
+	}
+}
+
+// ApplyUploads records the added uploads with the server's stamps, so the next pull does not
+// transfer them again. Other entries below wp-content/uploads stay.
+func ApplyUploads(b *baseline.Baseline, stamps map[string]agentapi.PushStamp) {
+	for rel, s := range stamps {
+		if ValidUploadPath(rel) {
+			b.Files[uploadKey(rel)] = baseline.FileStamp{Size: s.Size, MTime: s.MTime}
+		}
+	}
+}
+
+// RevertUploads forgets the uploads of the journal again – except those the rollback left on the
+// site because they changed since the push (kept).
+func RevertUploads(b *baseline.Baseline, j *Journal, kept []string) {
+	stays := map[string]bool{}
+	for _, rel := range kept {
+		stays[rel] = true
+	}
+	for _, rel := range j.Uploads {
+		if stays[rel] || !ValidUploadPath(rel) {
+			continue
+		}
+		key := uploadKey(rel)
+		delete(b.Files, key)
+		if stamp, ok := j.UploadsBefore[key]; ok {
+			b.Files[key] = stamp
 		}
 	}
 }
