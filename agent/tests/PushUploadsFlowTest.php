@@ -222,4 +222,122 @@ final class PushUploadsFlowTest extends TestCase
         $this->assertError('wpsync_push_build', 409, Push::commit(['push_id' => $id], self::KEY));
         $this->assertFileDoesNotExist($this->upload('2026/10/bild.png'));
     }
+
+    /** AC-140: neue Dateien liegen danach da, mit Ordnern, Rechten und Stempeln; gleiche bleiben unberührt. */
+    public function testAPushAddsTheNewFilesOnly(): void
+    {
+        chmod($this->live . '/uploads/2026', 0750);
+        file_put_contents($this->upload('2026/10/gleich.png'), $this->png());
+        touch($this->upload('2026/10/gleich.png'), 1600000000);
+        $files = ['2026/10/neu.png' => $this->png('neu'), '2026/11/tief/b.png' => $this->png('b'), '2026/10/gleich.png' => $this->png()];
+
+        [$id, $commit] = $this->push($files);
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code : '');
+        $this->assertSame($this->png('neu'), file_get_contents($this->upload('2026/10/neu.png')));
+        $this->assertSame($this->png('b'), file_get_contents($this->upload('2026/11/tief/b.png')));
+        $this->assertSame(1600000000, filemtime($this->upload('2026/10/gleich.png')));
+        $this->assertSame(['0750', '0750', '0640'], [$this->perms($this->upload('2026/11')), $this->perms($this->upload('2026/11/tief')), $this->perms($this->upload('2026/11/tief/b.png'))]);
+        $stamps = (array) $commit->data['stamps']->uploads;
+        $this->assertSame(['2026/10/neu.png', '2026/11/tief/b.png'], array_keys($stamps));
+        $this->assertSame(['size' => strlen($this->png('neu')), 'mtime' => 1700000000], $stamps['2026/10/neu.png']);
+
+        $record = PushRescue::read($this->live . '/' . Store::pushDirName(), $id);
+        $this->assertSame([], $record['pairs']);
+        $this->assertSame([
+            'added' => [
+                ['path' => '2026/10/neu.png', 'sha256' => hash('sha256', $this->png('neu'))],
+                ['path' => '2026/11/tief/b.png', 'sha256' => hash('sha256', $this->png('b'))],
+            ],
+            'dirs'  => ['uploads/2026/11', 'uploads/2026/11/tief'],
+        ], $record['uploads']);
+        $this->assertSame([['path' => 'uploads', 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => 3, 'uploaded' => 2]], Store::getPush($id)['units']);
+        $this->assertSame(PushRescue::COMMITTED, Store::getPush($id)['status']);
+    }
+
+    /** AC-141/AC-144: taucht die Datei vor dem Commit auf, bricht der Satz vor jedem Code-Tausch ab. */
+    public function testAFileThatAppearsBeforeTheCommitStopsTheSetBeforeAnyCode(): void
+    {
+        $files = ['2026/10/neu.png' => $this->png('neu'), '2026/10/spaet.png' => $this->png('spaet')];
+        $begin = $this->begin($files, [], 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin);
+        $this->sendAll($begin, $files, 'new');
+        file_put_contents($this->upload('2026/10/spaet.png'), 'fremd'); // ein Redakteur lädt sie inzwischen hoch
+
+        $this->assertError('wpsync_upload_exists', 409, Push::commit(['push_id' => (string) $begin->data['push_id']], self::KEY));
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->upload('2026/10/neu.png'));
+        $this->assertSame('fremd', file_get_contents($this->upload('2026/10/spaet.png')));
+        $this->assertSame(Push::FAILED, Store::getPush((string) $begin->data['push_id'])['status']);
+        $this->assertNull(Store::getState('push_lock'));
+    }
+
+    /** AC-144: scheitert der Code-Tausch nach den Uploads, nimmt der Agent die Uploads wieder weg. */
+    public function testAFailedCodeSwapTakesTheUploadsBack(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('root ignores file permissions');
+        }
+        $files = ['2026/12/neu.png' => $this->png('neu')];
+        $begin = $this->begin($files, [], 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin);
+        $this->sendAll($begin, $files, 'new');
+        chmod($this->live . '/plugins', 0555); // plugins/x lässt sich nicht mehr beiseite legen
+
+        $result = Push::commit(['push_id' => (string) $begin->data['push_id']], self::KEY);
+        chmod($this->live . '/plugins', 0777);
+
+        $this->assertError('wpsync_push_swap', 500, $result);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->upload('2026/12/neu.png'));
+        $this->assertDirectoryDoesNotExist($this->upload('2026/12'));
+    }
+
+    /** AC-143/AC-144: die Rücknahme nimmt Code und Uploads zurück – genau die hinzugefügten. */
+    public function testRollbackTakesBackCodeAndUploads(): void
+    {
+        file_put_contents($this->upload('2026/10/gleich.png'), $this->png());
+        [$id, $commit] = $this->push(['2026/12/neu.png' => $this->png('neu'), '2026/10/gleich.png' => $this->png()], 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit);
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::confirm(['push_id' => $id], self::KEY));
+
+        $result = Push::rollbackPush($id);
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $result);
+        $this->assertSame(['ok' => true, 'status' => PushRescue::ROLLED_BACK], $result->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->upload('2026/12/neu.png'));
+        $this->assertDirectoryDoesNotExist($this->upload('2026/12'));
+        $this->assertFileExists($this->upload('2026/10/gleich.png'));
+    }
+
+    /** AC-143: eine seither geänderte Datei bleibt und wird gemeldet. */
+    public function testAChangedUploadStaysAndIsReported(): void
+    {
+        [$id] = $this->push(['2026/10/a.png' => $this->png('a'), '2026/10/b.png' => $this->png('b')]);
+        file_put_contents($this->upload('2026/10/b.png'), 'vom Redakteur ersetzt');
+
+        $result = Push::rollbackPush($id);
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $result);
+        $this->assertSame(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::UPLOAD_CHANGED], 'kept' => ['2026/10/b.png']], $result->data);
+        $this->assertFileDoesNotExist($this->upload('2026/10/a.png'));
+        $this->assertSame('vom Redakteur ersetzt', file_get_contents($this->upload('2026/10/b.png')));
+    }
+
+    /** Ziel Staging: die Kopie hat noch kein uploads/ – der Push legt es an, die Rücknahme räumt es weg. */
+    public function testAStagingPushAddsToTheCopyOnly(): void
+    {
+        [$id, $commit] = $this->push(['2026/10/neu.png' => $this->png('neu')], null, 'staging');
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code : '');
+        $this->assertSame($this->png('neu'), file_get_contents($this->staging . '/uploads/2026/10/neu.png'));
+        $this->assertFileDoesNotExist($this->upload('2026/10/neu.png'));
+        $record = PushRescue::read($this->staging . '/' . Store::pushDirName(), $id);
+        $this->assertSame(['uploads', 'uploads/2026', 'uploads/2026/10'], $record['uploads']['dirs']);
+
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollbackPush($id));
+        $this->assertDirectoryDoesNotExist($this->staging . '/uploads');
+    }
 }

@@ -71,6 +71,11 @@ final class Admin
                     self::notice('error', $result->get_error_message());
                 } else {
                     self::notice('success', 'Push zurückgerollt.');
+                    $data = (array) $result->get_data();
+                    $kept = is_array($data['kept'] ?? null) ? $data['kept'] : [];
+                    if ($kept !== []) {
+                        self::notice('warning', 'Seit dem Push geändert, bleibt unter wp-content/uploads liegen: ' . implode(', ', array_map('strval', $kept)));
+                    }
                 }
             }
         }
