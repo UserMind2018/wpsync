@@ -3,6 +3,24 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unreleased]
+
+**Agent und CLI ändern sich.** Uploads pushen braucht Agent ≥ 0.6.0; ohne `--uploads` gilt alles
+wie bisher.
+
+### Neu
+- `wpsync push <site> code … --uploads <liste>`: neue Dateien unter `wp-content/uploads/` im
+  selben Push wie Code (Einheit `uploads`, nur hinzufügen). Der Agent meldet je Datei `need` oder
+  `same`, bricht bei anderem Inhalt am selben Pfad ab (`upload_exists`), sperrt PHP, versteckte
+  Dateien und von WordPress nicht erlaubte Typen (`upload_type_blocked`) und prüft den Inhalt
+  nach dem Upload. Commit Uploads → Code, Rücknahme Code → Uploads, auch über `rescue.php`;
+  seither geänderte Dateien bleiben (`warnings: ["upload_changed_since_push"]`). Die Baseline
+  kennt die neuen Dateien, ein Folge-Pull überträgt sie nicht noch einmal
+- Agent: wer das Push-Fenster geöffnet hat, steht in `wpsync_pairings.push_opened_by` und im
+  Protokoll jedes Pushs (`opened_by`, WP-Admin „Fenster von“)
+- `push --json`: `health` je verschlechterter Seite nach einer Rücknahme; `error.skipped_new` bei
+  `nothing_to_push`
+
 ## [0.5.1] – 2026-10-08 · Agent 0.5.1
 
 **Agent und CLI ändern sich.** Push nach Live braucht weiter Agent ≥ 0.4.0, nach Staging ≥ 0.5.0;

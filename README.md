@@ -135,7 +135,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
-| `wpsync push <site> code [einheit…] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
+| `wpsync push <site> code [einheit…] [--uploads <liste>] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
 | `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
 | `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
@@ -283,6 +283,10 @@ wpsync rollback kunde                # nimmt den letzten Push zurück
 
 **Vorher im WP-Admin:** Werkzeuge → wpsync → beim eigenen Gerät „Push-Fenster öffnen" (15 Minuten,
 1 Stunde oder 8 Stunden). Ausserhalb des Fensters kann auch ein gültiger Schlüssel nichts schreiben.
+Ab Agent 0.6.0 merkt sich der Agent, welcher WordPress-Benutzer das Fenster geöffnet hat; jeder
+Push in diesem Fenster nennt ihn im Protokoll (`opened_by` mit der Benutzer-ID in
+`wpsync pushes --json`, Spalte „Fenster von“ im WP-Admin). Ein Fenster, das nicht im WP-Admin
+geöffnet wurde, hat keinen.
 
 **Was gepusht wird.** Eine Einheit ist immer ein ganzes Verzeichnis: `plugins/<slug>`,
 `themes/<slug>` oder `mu-plugins`. Als geändert gilt eine Einheit, wenn eine ihrer Dateien lokal
@@ -299,6 +303,32 @@ Liegt ein gleichnamiges Verzeichnis schon auf der Site, ist das ein Konflikt.
 Entwicklungs-Plugin), überspringt die CLI sie mit Hinweis und liest sie nie; ausdrücklich genannt
 bricht der Push ab. Ist `public`, `wp-content`, `plugins`, `themes` oder `mu-plugins` ein Symlink,
 bricht jeder Push ab.
+
+**Uploads mitschicken (ab Agent 0.6.0).** `--uploads <liste>` nennt eine Datei mit einem Pfad je
+Zeile relativ zu `wp-content/uploads/` (Leerzeilen und Zeilen, die mit `#` beginnen, zählen nicht;
+höchstens 5000 Dateien, Liste höchstens 1 MB). Sie gehen als Einheit `uploads` im selben Push mit.
+Wie immer gilt: Ohne genannte Einheiten nimmt `push` alle lokal geänderten Code-Einheiten mit –
+wer genau einen Satz pushen will (etwa das Website Studio), nennt die Einheiten ausdrücklich:
+
+    printf '2026/10/titelbild.jpg\n2026/10/titelbild-300x200.jpg\n' > neue-medien.txt
+    wpsync push kunde code themes/kunde --uploads neue-medien.txt --dry-run
+
+Im Container-Modus liegt die Liste im Container der CLI (Pfad wie `--docroot` absolut oder
+relativ zum Arbeitsverzeichnis dort); `--uploads` funktioniert dort genauso.
+
+- Der Agent entscheidet je Datei: fehlt sie auf der Site, wird sie übertragen; liegt sie dort mit
+  gleichem Inhalt, passiert nichts; liegt dort eine andere Datei, bricht der ganze Push ab
+  (`upload_exists`) – ein Push ersetzt nie einen Upload, auch nicht mit `--force`.
+- PHP in jeder Schreibweise (`.php`, `.phtml`, `.phar`, `.php7`, `bild.php.jpg` …), versteckte
+  Dateien (`.htaccess`, `.user.ini`), Logs, Dumps und Typen, die WordPress auf der Site nicht
+  erlaubt, lehnt der Agent ab (`upload_type_blocked`). Den Inhalt prüft er nach dem Upload noch
+  einmal gegen die Endung.
+- Die Uploads kommen vor dem Code auf die Site; fehlende Ordner (`JJJJ/MM`) legt der Agent mit den
+  Rechten des Elternordners an (höchstens `0755`, Dateien höchstens `0644`). Scheitert der
+  Code-Tausch, nimmt er sie wieder weg.
+- Liegen alle Dateien schon auf der Site und gibt es keinen Code, ist nichts zu pushen.
+- Nicht unterstützt: `wp-content/uploads` als Symlink, ein abweichendes Upload-Verzeichnis
+  (`UPLOADS`, `upload_path`) und Multisite – der Agent lehnt dann ab.
 
 **Ablauf.**
 
@@ -331,12 +361,17 @@ Stub im Webroot, der bis etwa 10 Minuten nach der Bestätigung liegen bleibt): D
 Skript lädt kein WordPress, prüft einen Schlüssel, den nur dein Mac aus dem Pairing-Secret
 ableiten kann, und rollt nur unbestätigte Pushes zurück. Ein Push lässt sich nur zurückrollen,
 solange kein späterer Push dieselbe Einheit getauscht hat.
+Die Uploads eines Pushs nimmt die Rücknahme nach dem Code zurück – auch über `rescue.php`: Sie
+löscht genau die Dateien, die der Push angelegt hat, und die Ordner, die er dafür angelegt hat,
+wenn sie leer sind. Wurde eine Datei seither auf der Site geändert, bleibt sie liegen; die
+Ausgabe nennt sie (`--json`: `warnings: ["upload_changed_since_push"]`).
 
 **Was ein Push nie tut.**
 
 - Er aktiviert nichts: Ein neues Plugin liegt danach inaktiv auf der Site.
 - Er löscht nichts: Ein lokal entferntes Plugin bleibt auf der Site bestehen.
-- Er schreibt weder Datenbank noch Uploads.
+- Er schreibt keine Datenbank. Unter `wp-content/uploads/` legt er nur neue Dateien aus
+  `--uploads` an – er ersetzt oder löscht dort nie eine fremde Datei.
 - Er überträgt nie den Agent selbst, den lokalen Mail-Riegel (`00-local-mailguard.php`), den
   Staging-Riegel (`00-wpsync-staging.php`), Dateien in `mu-plugins`, die mit `wpsync` beginnen, `.git`, `*.log`, `.env*`, `.DS_Store`
   und Symlinks. Was davon auf der Site liegt, bleibt beim Tausch unverändert stehen.
@@ -564,6 +599,11 @@ abbilden lässt, sofern das Profil sie kopiert.
   Kopie zu sein, ist ebenfalls Code-Ausführung auf dem Server.
 - **Push-Schutz im Agent, nicht in der CLI:** erlaubte Einheiten, verbotene Dateinamen,
   Hash-Prüfung vor dem Tausch und die Sperre „ein Push gleichzeitig" prüft der Server selbst.
+- **Uploads:** Der Upload-Kanal ist kein zweiter Weg für Code. Erlaubt ist nur, was WordPress auf
+  der Site für einen Benutzer ohne `unfiltered_html` zulässt; PHP in jeder Schreibweise,
+  `.htaccess`, `.user.ini` und versteckte Dateien sperrt der Agent zusätzlich fest. Pfade bleiben
+  unter `wp-content/uploads/` ohne Symlink auf dem Weg, nie in Staging- oder Push-Arbeitsordnern.
+  Vorhandene Dateien ersetzt ein Push nie.
 - **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
   rollt nur unbestätigte Pushes zurück und sperrt einen Push nach 5 falschen Schlüsseln für
   10 Minuten. Der Schlüssel ist pro Push
@@ -809,6 +849,14 @@ Rollback-Schlüssel nennt die CLI nie – der Rückweg ist `wpsync rollback <sit
 stummem WordPress selbst über `rescue.php` geht.
 `push` braucht mit `--json` `--yes`, bei geänderter Version zusätzlich `--allow-version-change`.
 `--to` kennt nur `live` und `staging`, genau so geschrieben; alles andere ist Exit 2.
+Ab CLI 0.6.0 zusätzlich: mit `--uploads` im `plan` das Objekt `uploads` (`need`, `same`,
+`conflicts`, je `[]` wenn leer) und ein `upload`-Ereignis mit `unit: "uploads"`; im Ergebnis
+`units` mit `"uploads"`. Nach einer Rücknahme wegen des Health-Checks nennt `push` je
+verschlechterter Seite `health: [{"url", "before", "after"}]` (z. B. `"HTTP 200"` →
+`"HTTP 500, Fehlermeldung von WordPress oder PHP"`), auch bei reinen Code-Pushs. `push` und
+`rollback` melden in `warnings` zusätzlich `upload_changed_since_push`. Bei
+`error.reason: "nothing_to_push"` nennt `error.skipped_new` die lokal neuen, nicht genannten
+Einheiten (fehlt, wenn es keine gibt).
 
 **Site-Lock.** Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (`flock` auf
 `<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
@@ -848,7 +896,8 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 
 40–44 und 50–53 gibt es ab CLI 0.4.0; bis 0.3.1 endete `push` in diesen Fällen mit 1. Die lokale
 Site-Sperre bleibt Exit 20 mit `error.reason: "site_locked"` – 44 meint nur die Sperre auf dem
-Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11.
+Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11, ebenso `push --uploads`
+gegen einen Agent unter 0.6.0.
 
 `error.reason` bei Exit 1 (Aufrufer prüfen `reason`, nicht den Meldungstext):
 
@@ -858,12 +907,14 @@ Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11.
 | `staging_state` | Der Zustand der Kopie lässt den Aufruf nicht zu, z. B. `refresh`, `open` oder ein Push bei `failed` |
 | `staging_copy` | Die Anfrage hat einen Agent in einer Staging-Kopie erreicht statt den der Live-Site |
 | `foreign_url` | Der Agent nannte eine Adresse ausserhalb der gekoppelten Site (Probe, Login-Link) |
-| `nothing_to_push` | `push`: lokal ist nichts geändert, oder nur neue Einheiten, die nicht genannt wurden |
+| `nothing_to_push` | `push`: lokal ist nichts geändert, oder nur neue Einheiten, die nicht genannt wurden, oder ohne Code liegen alle Dateien aus `--uploads` schon auf der Site |
 | `not_writable` | `push`: der Webserver darf ein Verzeichnis nicht ersetzen |
 | `rescue_unreachable` | `push`: `rescue.php` antwortet nicht – ohne Rückweg kein Push |
 | `local_changed` | `push`: eine lokale Datei oder ein Verzeichnis änderte sich während des Pushs oder ist ein Symlink |
 | `target_mismatch` | `push`/`rollback`: der Agent antwortet für ein anderes Ziel, oder der Push ging an das andere Ziel |
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
+| `upload_exists` | `push --uploads`: auf der Site liegt am selben Pfad eine andere Datei – nichts übertragen, nichts getauscht, auch mit `--force` |
+| `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, von WordPress nicht erlaubt) oder der Inhalt passt nicht zur Endung |
 
 **Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
 Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
