@@ -93,6 +93,9 @@ type Result struct {
 	RescueURL string `json:"rescue_url,omitempty"`
 	// Warnings name what failed without failing the push or rollback; omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
+	// Health names every page that got worse after the swap, when the push was taken back for it
+	// (Spec Content-Push §7.4, S5); omitted otherwise.
+	Health []HealthFinding `json:"health,omitempty"`
 }
 
 // WarningSnapshotFailed: the push (or rollback) is done, baseline and journal are written, only the
@@ -715,6 +718,7 @@ func Run(o Options) error {
 	}
 	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
 	if len(worse) > 0 {
+		report.Health = WorsePages(before, after)
 		return rolledBack(report, rollbackNow(done, o, acc, journal, urls, before, worse))
 	}
 	if err := o.Client.PushConfirm(begin.PushID); err != nil {
