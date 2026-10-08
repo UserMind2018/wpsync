@@ -3,6 +3,37 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.5.1] – 2026-10-08 · Agent 0.5.1
+
+**Agent und CLI ändern sich.** Push nach Live braucht weiter Agent ≥ 0.4.0, nach Staging ≥ 0.5.0;
+den Rescue-Stub gibt es erst mit Agent 0.5.1 – ältere Agents liefern wie bisher
+`rescue.php` im Plugin-Ordner.
+
+### Behoben
+- Push scheiterte mit `rescue_unreachable`, wenn ein Sicherheits-Plugin (Solid/iThemes Security
+  „Disable PHP in Plugins“, Sucuri-Härtung) PHP unter `wp-content/plugins/` sperrt. Der Agent
+  liefert `rescue.php` auf Wunsch der CLI jetzt über einen kurzlebigen Stub
+  `wpsync-rescue-<32 hex>.php` im Live-Webroot – nur bei offenem Push-Fenster, auch für Pushes
+  nach Staging. Er bleibt, solange ein Push läuft oder unbestätigt ist, und rund 10 Minuten
+  darüber hinaus; Deaktivieren löscht ihn. Ist der Webroot nicht beschreibbar oder liegt
+  `wp-content` nicht direkt darin, bleibt es bei der Plugin-URL
+- Verwaiste Push-Arbeitsordner (abgebrochener Push, Zeile fehlt) werden nach 30 Minuten
+  aufgeräumt – nur, wenn nie getauscht, zurückgerollt oder bestätigt; bei einem Datenbankfehler
+  oder unlesbarer `rescue.json` bleibt alles liegen
+
+### Neu
+- `/push/begin`: Feld `rescue_stub` im Request, `rescue.hardening` (aktive Härtungs-Plugins) in
+  der Antwort
+- CLI: bei `rescue_unreachable` nennt der Hinweis erkannte Sicherheits-Plugins und ihre
+  Einstellung (Reason und Exit-Code unverändert); `rollback` über einen schon aufgeräumten Stub
+  erklärt, dass der Notfallweg nur bis kurz nach der Bestätigung besteht
+
+### Geändert
+- `rescue_url` im Ergebnis von `push` und in `pushes` zeigt bei Agent 0.5.1 auf den Stub im
+  Webroot statt auf `wp-content/plugins/wpsync-agent/rescue.php`. Weicht die URL des echten Begin
+  von der des Probelaufs ab, prüft die CLI sie vor dem ersten Upload; `push --dry-run` legt keinen
+  Stub an
+
 ## [0.5.0] – 2026-10-08 · Agent 0.5.0
 
 **Nur die CLI ändert sich.** Agent 0.5.0 bleibt; Push nach Live braucht weiter Agent ≥ 0.4.0,
