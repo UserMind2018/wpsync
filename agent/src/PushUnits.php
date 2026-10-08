@@ -5,7 +5,8 @@ defined('ABSPATH') || exit;
 
 /**
  * Was ein Push anfassen darf (Spec Stufe 2, 5.4). Fest im Agent, nicht per CLI änderbar:
- * eine Einheit ist ein ganzes Plugin, ein ganzes Theme oder mu-plugins – nie der Agent selbst.
+ * eine Einheit ist ein ganzes Plugin, ein ganzes Theme oder mu-plugins – nie der Agent selbst –,
+ * dazu „uploads“ für neue Dateien unter wp-content/uploads (Spec Content-Push §8, PushUploads).
  */
 final class PushUnits
 {
@@ -13,7 +14,7 @@ final class PushUnits
 
     public static function valid(string $unit): bool
     {
-        if ($unit === self::MU) {
+        if ($unit === self::MU || $unit === 'uploads') {
             return true;
         }
         if (preg_match('#^(plugins|themes)/[A-Za-z0-9][A-Za-z0-9._-]*\z#', $unit) !== 1) {

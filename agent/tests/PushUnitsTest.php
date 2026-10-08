@@ -42,6 +42,15 @@ final class PushUnitsTest extends TestCase
         }
     }
 
+    /** Spec Content-Push §8.1: „uploads“ ist eine Einheit – genau so geschrieben, ohne Unterordner. */
+    public function testUploadsIsAUnit(): void
+    {
+        $this->assertTrue(PushUnits::valid('uploads'));
+        foreach (['Uploads', 'uploads/', 'uploads/2026', '/uploads'] as $unit) {
+            $this->assertFalse(PushUnits::valid($unit), $unit);
+        }
+    }
+
     public function testValidFiles(): void
     {
         $this->assertTrue(PushUnits::validFile('plugins/a', 'a.php'));

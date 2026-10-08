@@ -23,7 +23,7 @@ const WPSYNC_VERSION = '0.5.1';
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
-    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
+    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'StagingReplace', 'StagingConfig', 'StagingAccess', 'StagingHosts',
     'StagingFiles', 'StagingDb', 'Staging', 'Rest', 'Admin',
 ] as $wpsync_class) {
