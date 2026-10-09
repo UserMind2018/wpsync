@@ -49,7 +49,8 @@ final class ContentRollback
                     $table   = $entry['t'];
                     $key     = $entry['k'];
                     $current = self::fingerprint($target, $table, $key, $now[$table][$key] ?? null);
-                    if ($current !== self::fingerprint($target, $table, $key, $entry['state'])) {
+                    // '!' gleicht keinem Stand, auch nicht einem zweiten '!'.
+                    if ($current === '!' || $current !== self::fingerprint($target, $table, $key, $entry['state'])) {
                         $untouched = false;
                     }
                     $pushed = $after === null ? null : ($after[$i] ?? null);

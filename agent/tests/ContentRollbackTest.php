@@ -199,4 +199,33 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->assertArrayNotHasKey('1000001', $now['posts'], 'eingefügte Zeilen gehen weiter ganz');
         $this->assertArrayNotHasKey('page_on_front', $now['options']);
     }
+
+    /**
+     * Ein Stand, der sich nicht normalisieren lässt, gleicht keinem – auch nicht einem anderen, der
+     * sich nicht normalisieren lässt: dann ist nicht zu beweisen, dass sich nichts geändert hat.
+     */
+    public function testAStateWithoutFingerprintNeverCountsAsUnchanged(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $broken = \WpSync\ContentOrigin::PLAIN . ' steht roh in der Datenbank';
+        $before = json_decode((string) file_get_contents($this->dir . '/before.json'), true);
+        foreach ($before['keys'] as $i => $entry) {
+            if ($entry['t'] === 'postmeta' && $entry['k'] === "219\0_elementor_data") {
+                $before['keys'][$i]['state'] = ['values' => [base64_encode($broken)]];
+            }
+        }
+        file_put_contents($this->dir . '/before.json', json_encode($before));
+        $this->store->data = $old; // alles wie vor dem Push – bis auf das eine Paar
+        $this->store->data['postmeta']["219\0_elementor_data"] = ['values' => [$broken]];
+        $now = $this->store->data;
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::CHANGED, $e->reason());
+            $this->assertContains(['table' => 'postmeta', 'key' => "219\0_elementor_data"], $e->keys());
+        }
+        $this->assertSame($now, $this->store->data);
+    }
 }
