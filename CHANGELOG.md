@@ -55,7 +55,9 @@ sich wie bisher (`content_not_rolled_back`).
   Kind-Terme, deren `parent` auf die ID eines neuen Terms zeigt) –
   `error.reason: "id_has_leftovers"` (HTTP 409 `wpsync_content_id_has_leftovers`, Exit 1) mit den
   Resten in `error.keys`; nicht im Probelauf ohne offenes Push-Fenster. **(b)** Beim Wiederanlauf
-  entfernt der Agent an jedem eingefügten Objekt, das weiterhin fehlt, alle Meta und Zuordnungen;
+  entfernt der Agent an jedem eingefügten Objekt, das weiterhin fehlt, die Meta und die
+  Zuordnungen – an einem Beitrag nur die in Taxonomien, die für Beiträge gelten (`object_id` ist
+  auch die ID von Benutzern und Links);
   das Protokoll nennt es als Nacharbeit `left_cleanup`. Kommentare und Kinder (Revisionen,
   Kindseiten) löscht er nicht – solange sie liegen, greift (a)
 - `rescue.php` schickt die CLI ab jetzt `content=1`, wenn der Push Inhalte trug; ohne das Feld

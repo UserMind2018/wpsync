@@ -707,7 +707,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
 | `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |
 | `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors des Pakets, mehr als `limits.id_headroom` (2.000.000) über der höchsten ID, die das Ziel in dieser Tabelle schon vergeben hat, oder über 2^53 − 1 – bzw. seine ID ist auf dem Ziel belegt |
-| `id_has_leftovers` | die ID eines neuen Beitrags, Terms oder einer neuen `term_taxonomy`-Zeile ist frei, aber auf dem Ziel hängt noch etwas an ihr: Meta, Zuordnungen, Kommentare, Kindbeiträge (auch Revisionen), weitere Taxonomien eines Terms, Kind-Terme (Unterkategorien, deren `parent` auf die ID zeigt) – Reste eines früheren Objekts, etwa nach einer [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress). Sie hingen sich an das neue Objekt. `error.keys` nennt die Reste (Kommentare als `{"table":"comments","key":"<post-id>"}`); dort entfernen, dann erneut pushen. Was das Paket an der ID selbst schreibt, zählt nicht. Nicht im Probelauf ohne offenes Push-Fenster |
+| `id_has_leftovers` | die ID eines neuen Beitrags, Terms oder einer neuen `term_taxonomy`-Zeile ist frei, aber auf dem Ziel hängt noch etwas an ihr: Meta, Zuordnungen, Kommentare, Kindbeiträge (auch Revisionen), weitere Taxonomien eines Terms, Kind-Terme (Unterkategorien, deren `parent` auf die ID zeigt) – Reste eines früheren Objekts, etwa nach einer [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress). Sie hingen sich an das neue Objekt. `error.keys` nennt die Reste (Kommentare als `{"table":"comments","key":"<post-id>"}`); dort entfernen, dann erneut pushen. Was das Paket an der ID selbst schreibt, zählt nicht; ebenso wenig eine Zuordnung in einer Taxonomie, die auf der Site nur für Benutzer oder Links registriert ist (sie gehört einem anderen Objekt mit derselben Zahl). Nicht im Probelauf ohne offenes Push-Fenster |
 | `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
 | `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
 | `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
@@ -924,8 +924,11 @@ Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren
   gepusht), hängen sie an ihm: fremde Meta an der neuen Seite, alte Kommentare darunter, fremde
   Beiträge im neuen Term. Deshalb zweierlei:
   - **Der Agent räumt nach.** Sobald WordPress wieder lädt, entfernt er an jedem eingefügten
-    Objekt, das weiterhin fehlt, alle Meta und Zuordnungen (auch die der festen Sperrliste) –
-    dasselbe, was die Rücknahme über den Agent mitnähme. Im Protokoll steht es als Nacharbeit
+    Objekt, das weiterhin fehlt, die Meta (auch die der festen Sperrliste) und die Zuordnungen.
+    An einem Beitrag nur Zuordnungen in Taxonomien, die für Beiträge gelten: in
+    `term_relationships` steht für eine Benutzer- oder Link-Taxonomie die ID eines Benutzers bzw.
+    Links – dieselbe Zahl, ein anderes Objekt. Zuordnungen in einer nicht registrierten Taxonomie
+    oder ohne `term_taxonomy`-Zeile bleiben deshalb stehen (und blockieren die ID, siehe unten). Im Protokoll steht es als Nacharbeit
     `left_cleanup` (`ok: false`, wenn es nicht gelang; der Schritt fehlt, wenn nichts hing).
     Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms) löscht der
     Agent **nicht** – das sind eigene Inhalte.

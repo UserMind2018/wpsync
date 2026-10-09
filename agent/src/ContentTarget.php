@@ -75,6 +75,38 @@ final class ContentTarget
         $this->autoload   = $autoload;
     }
 
+    /** Objekttypen einer Taxonomie, die keine Beiträge sind: dort trägt term_relationships.object_id die ID eines Benutzers bzw. Links. */
+    private const OTHER_OBJECTS = ['user', 'link'];
+
+    /**
+     * Gilt eine Taxonomie auf dieser Site für Beiträge? term_relationships.object_id ist nicht nur
+     * die ID eines Beitrags: in einer Taxonomie für Benutzer oder Links steht dort deren ID – dieselbe
+     * Zahl, ein anderes Objekt.
+     *
+     * @return bool|null true: für Beiträge (Whitelist des Agents, oder registriert und weder für Benutzer
+     *         noch für Links); false: registriert, aber nur für Benutzer bzw. Links; null: nicht zu sagen –
+     *         keine Taxonomie (verwaiste Zuordnung), nicht registriert, für beides registriert, oder die
+     *         Site gibt keine Auskunft (ohne WordPress)
+     */
+    public function postTaxonomy(string $taxonomy): ?bool
+    {
+        if ($taxonomy === '') {
+            return null;
+        }
+        if (in_array($taxonomy, ContentLists::TAXONOMIES, true)) {
+            return true;
+        }
+        $types = $this->objectTypes === null ? null : ($this->objectTypes)($taxonomy);
+        if (!is_array($types) || $types === []) {
+            return null;
+        }
+        $other = array_intersect($types, self::OTHER_OBJECTS);
+        if ($other === []) {
+            return true;
+        }
+        return count($other) === count($types) ? false : null;
+    }
+
     /** Rechnet Abdrücke aus dem Rohzustand – mit der Origin des Ziels (ContentState::record()). */
     public function reader(): ContentReader
     {

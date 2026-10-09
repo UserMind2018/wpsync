@@ -397,6 +397,31 @@ final class ContentCheckTest extends TestCase
         $this->assertNull($this->partial($rows)['error']);
     }
 
+    /**
+     * NR-3: object_id in term_relationships ist nicht nur die ID eines Beitrags. Eine Zuordnung in einer
+     * Taxonomie, die nur für Benutzer (oder Links) registriert ist, gehört einem anderen Objekt mit
+     * derselben Zahl – kein Rest eines Beitrags, sie blockiert nicht. Was sich nicht zuordnen lässt
+     * (nicht registriert, auch für Beiträge registriert), blockiert weiter.
+     */
+    public function testARelationshipOfAnotherKindOfObjectIsNoLeftoverOfAPost(): void
+    {
+        $rows   = [ContentFixtures::row('insert', 'posts', '1000001', 'absent', ContentFixtures::postRow('1000001'))];
+        $target = ContentFixtures::live($this->store);
+        $target->objectTypes = static function (string $taxonomy): ?array {
+            return ['user-group' => ['user'], 'link_category' => ['link'], 'gemischt' => ['post', 'user']][$taxonomy] ?? null;
+        };
+        $this->store->data['term_relationships']["1000001\0user-group"]    = ['values' => ['30:0']];
+        $this->store->data['term_relationships']["1000001\0link_category"] = ['values' => ['31:0']];
+        $this->check($rows, [], $target)->run();
+
+        $this->store->data['term_relationships']["1000001\0gemischt"]  = ['values' => ['32:0']];
+        $this->store->data['term_relationships']["1000001\0unbekannt"] = ['values' => ['33:0']];
+        $e = $this->refused('id_has_leftovers', $rows, [], $target);
+        $this->assertSame([['table' => 'term_relationships', 'key' => "1000001\0gemischt"], ['table' => 'term_relationships', 'key' => "1000001\0unbekannt"]], $e->keys());
+        // Ohne Auskunft der Site (kein WordPress) blockiert jede Zuordnung an der ID.
+        $this->assertCount(4, $this->refused('id_has_leftovers', $rows)->keys());
+    }
+
     /** M2: was das Paket an der ID selbst schreibt, ist kein Rest – und an bestehenden Objekten gilt die Prüfung nicht. */
     public function testWhatThePackageWritesItselfIsNoLeftover(): void
     {

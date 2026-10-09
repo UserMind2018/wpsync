@@ -681,6 +681,11 @@ final class ContentCheck
                     }
                 }
                 foreach ($have['relations'] as $pair) {
+                    // object_id ist nicht nur die ID eines Beitrags: eine Zuordnung in einer Taxonomie nur für
+                    // Benutzer oder Links gehört einem anderen Objekt mit derselben Zahl – kein Rest eines Beitrags.
+                    if ($table === 'posts' && $this->target->postTaxonomy(ContentState::split((string) $pair)[1]) === false) {
+                        continue;
+                    }
                     if (!isset($named['term_relationships'][(string) $pair])) {
                         $left["term_relationships\0\0" . $pair] = ContentException::key('term_relationships', (string) $pair);
                     }

@@ -180,13 +180,17 @@ final class ContentRollback
      * Räumt auf, was eine Rücknahme mit $leave an den vom Push eingefügten Objekten stehen liess
      * (R15; Security-Review P3 M2) – für den Agent, sobald WordPress wieder lädt. Für jeden Beitrag,
      * jeden Term und jede term_taxonomy-Zeile, die der Push eingefügt hat und die es weiterhin nicht
-     * gibt, geht, was purge() auch bei der Rücknahme über den Agent nähme: alle Meta und
-     * Zuordnungen an dieser ID, die der festen Sperrliste eingeschlossen. Sie sind für WordPress
-     * unerreichbar, solange das Objekt fehlt – und hingen sich an das nächste Objekt mit dieser ID.
+     * gibt, gehen die Meta an dieser ID (die der festen Sperrliste eingeschlossen) und die
+     * Zuordnungen: an einem Term und einer term_taxonomy-Zeile alle, an einem Beitrag nur die in
+     * Taxonomien, die für Beiträge gelten (ContentTarget::postTaxonomy()) – object_id ist dort nicht
+     * nur die ID eines Beitrags, eine Zuordnung in einer Taxonomie für Benutzer oder Links gehört
+     * einem anderen Objekt mit derselben Zahl. Was sich nicht zuordnen lässt (ohne
+     * term_taxonomy-Zeile, nicht registrierte Taxonomie), bleibt ebenfalls. Was geht, ist für
+     * WordPress unerreichbar, solange das Objekt fehlt – und hinge sich an das nächste mit dieser ID.
      * Gibt es das Objekt wieder, gehört ihm, was an ihm hängt: dann geschieht dort nichts.
-     * Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms) bleiben – das
-     * sind eigene Zeilen, die niemand ungefragt löscht; ContentCheck lehnt ein neues Objekt an
-     * einer solchen ID ab (id_has_leftovers).
+     * Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms, Kind-Terme)
+     * bleiben – das sind eigene Zeilen, die niemand ungefragt löscht. Für alles, was bleibt und einem
+     * Beitrag gehören könnte, lehnt ContentCheck ein neues Objekt an dieser ID ab (id_has_leftovers).
      *
      * @param string $dir Ordner content im Arbeitsordner des Pushs
      * @return int an so vielen Objekten hing etwas, das entfernt wurde
@@ -215,7 +219,7 @@ final class ContentRollback
         ContentState::innodb($target->store);
         $store = $target->store;
         try {
-            return $store->transaction(static function () use ($store, $inserted): int {
+            return $store->transaction(static function () use ($store, $target, $inserted): int {
                 $swept   = 0;
                 $recount = [];
                 foreach ($inserted as $table => $ids) {
@@ -233,10 +237,30 @@ final class ContentRollback
                     $terms = $table === 'posts' ? $store->relations($gone, true) : [];
                     foreach ($gone as $id) {
                         $have = $hanging[$id] ?? ['meta' => [], 'relations' => []];
-                        if ($have['meta'] === [] && $have['relations'] === []) {
-                            continue;
+                        if ($table === 'posts') {
+                            // Nicht purge(): das löschte jede Zuordnung mit dieser object_id – auch die eines
+                            // Benutzers oder Links mit derselben Zahl. Nur Taxonomien, die für Beiträge gelten.
+                            $pairs = [];
+                            foreach ($have['relations'] as $pair) {
+                                if ($target->postTaxonomy(ContentState::split((string) $pair)[1]) === true) {
+                                    $pairs[] = (string) $pair;
+                                }
+                            }
+                            if ($have['meta'] === [] && $pairs === []) {
+                                continue;
+                            }
+                            foreach ($have['meta'] as $name) {
+                                $store->write('postmeta', Canon::pairKey($id, (string) $name), null);
+                            }
+                            foreach ($pairs as $pair) {
+                                $store->write('term_relationships', $pair, null);
+                            }
+                        } else {
+                            if ($have['meta'] === [] && $have['relations'] === []) {
+                                continue;
+                            }
+                            $store->purge($table, $id); // termmeta nach term_id, Zuordnungen nach term_taxonomy_id: eindeutig
                         }
-                        $store->purge($table, $id);
                         $swept++;
                         foreach ($terms[$id] ?? [] as $tt) {
                             $recount[(string) $tt] = true;

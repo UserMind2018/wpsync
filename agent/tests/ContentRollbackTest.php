@@ -621,22 +621,44 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->store->orphans['220'] = ['1000002'];
         $this->store->log            = [];
 
-        $this->assertSame(3, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir), 'Beitrag, Term, term_taxonomy-Zeile');
+        // NR-3: object_id ist nicht nur die ID eines Beitrags. Zuordnungen in einer Taxonomie für Benutzer
+        // (dieselbe Zahl, ein anderes Objekt), in einer nicht registrierten und ohne term_taxonomy-Zeile
+        // bleiben stehen – gelöscht wird nur, was sicher an einem Beitrag hing.
+        foreach (['30' => 'user-group', '31' => 'unbekannt', '32' => 'gemischt'] as $tt => $taxonomy) {
+            $this->store->data['terms'][$tt]                                    = ContentFixtures::term((string) $tt, $taxonomy);
+            $this->store->data['term_taxonomy'][$tt]                            = ContentFixtures::taxonomy((string) $tt, (string) $tt, $taxonomy);
+            $this->store->data['term_relationships']["1000001\0" . $taxonomy] = ['values' => [$tt . ':0']];
+        }
+        $foreign              = array_intersect_key($this->store->data, ['terms' => 1, 'term_taxonomy' => 1, 'term_relationships' => 1]);
+        $target               = ContentFixtures::live($this->store);
+        $target->objectTypes = static function (string $taxonomy): ?array {
+            return ['user-group' => ['user'], 'gemischt' => ['post', 'user'], 'post_tag' => ['post']][$taxonomy] ?? null;
+        };
+        $this->assertSame([true, true, false, null, null, null], array_map([$target, 'postTaxonomy'], ['category', 'post_tag', 'user-group', 'gemischt', 'unbekannt', '']));
 
+        $this->assertSame(3, ContentRollback::sweep($target, $this->dir), 'Beitrag, Term, term_taxonomy-Zeile');
+
+        foreach (['30' => 'user-group', '31' => 'unbekannt', '32' => 'gemischt'] as $tt => $taxonomy) {
+            $this->assertSame($foreign['term_relationships']["1000001\0" . $taxonomy], $this->store->data['term_relationships']["1000001\0" . $taxonomy], $taxonomy . ' bleibt');
+            unset($this->store->data['terms'][$tt], $this->store->data['term_taxonomy'][$tt], $this->store->data['term_relationships']["1000001\0" . $taxonomy]);
+        }
         $expected                           = $old;
         $expected['terms']['8']             = $this->store->data['terms']['8'];
         $expected['term_taxonomy']['8']     = ContentFixtures::taxonomy('8', '8', 'post_tag');
         $expected['term_taxonomy']['8']['count'] = '0';
         $expected['posts']['1000050']       = $this->store->data['posts']['1000050'];
         $this->assertSame(self::sorted($expected), self::sorted(array_filter($this->store->data)), 'der Stand vor dem Push; die Revision bleibt');
-        $this->assertSame([], $this->store->orphans, 'auch die verwaisten Zuordnungen am Beitrag und auf die term_taxonomy-Zeile');
+        $this->assertSame(['1000001' => ['77']], $this->store->orphans, 'die verwaiste Zuordnung auf die term_taxonomy-Zeile ist weg; die an der ID des Beitrags bleibt – ohne Taxonomie ist nicht zu sagen, wessen sie ist');
         $this->assertSame(2, $this->store->comments['1000001'], 'Kommentare bleiben');
-        $this->assertSame(['begin', 'purge posts:1000001', 'purge terms:1000001', 'purge term_taxonomy:1000002', 'recount 8,77', 'commit'], $this->store->log);
+        $this->assertSame([
+            'begin', "delete postmeta:1000001\0farbe", "delete postmeta:1000001\0_wp_old_slug", "delete term_relationships:1000001\0post_tag",
+            'purge terms:1000001', 'purge term_taxonomy:1000002', 'recount 8,30,31,32,77', 'commit',
+        ], $this->store->log);
         $this->assertContains('posts:1000001', $this->store->locked, 'unter Sperre gelesen');
 
         // Ein zweiter Lauf findet nichts mehr – und schreibt nichts.
         $this->store->log = [];
-        $this->assertSame(0, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir));
+        $this->assertSame(0, ContentRollback::sweep($target, $this->dir));
         $this->assertSame([], preg_grep('/^(purge|write|delete|recount)/', $this->store->log));
     }
 
