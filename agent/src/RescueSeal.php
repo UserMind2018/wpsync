@@ -35,6 +35,12 @@ final class RescueSeal
      * von WordPress, und der läuft gerade dann nicht, wenn die Site unten ist.
      */
     public const MAX_AGE = 604800;
+    /**
+     * So weit darf created vor der Uhr des Servers liegen (eine Uhr, die zwischen Begin und Rücknahme
+     * nachgestellt wurde). Weiter in der Zukunft ist ein Umschlag keiner: ein negatives Alter gälte
+     * sonst für immer als jung, und MAX_AGE griffe nie.
+     */
+    public const MAX_SKEW = 300;
 
     /** Mehr trägt kein Umschlag; eine grössere Datei ist keiner. */
     private const MAX_BYTES    = 65536;
@@ -90,7 +96,8 @@ final class RescueSeal
 
     /**
      * @param int|null $now für Tests: die Zeit anstelle von time()
-     * @return array<string, mixed>|null null auch, wenn der Umschlag älter ist als MAX_AGE oder sein Alter nicht nennt
+     * @return array<string, mixed>|null null auch, wenn der Umschlag älter ist als MAX_AGE, mehr als MAX_SKEW in
+     *         der Zukunft liegt oder sein Alter nicht nennt
      */
     public static function open(string $raw, string $key, string $pushId, ?int $now = null): ?array
     {
@@ -126,7 +133,11 @@ final class RescueSeal
                 return null;
             }
             $created = $data['created'] ?? null;
-            return is_int($created) && $created >= 0 && ($now ?? time()) - $created <= self::MAX_AGE ? $data : null;
+            if (!is_int($created) || $created < 0) {
+                return null;
+            }
+            $age = ($now ?? time()) - $created;
+            return $age <= self::MAX_AGE && $age >= -self::MAX_SKEW ? $data : null;
         } catch (\Throwable $e) {
             return null;
         }
