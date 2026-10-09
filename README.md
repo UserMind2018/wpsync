@@ -491,6 +491,8 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
   Ein späterer, noch stehender Push, der dieselbe Einheit **tauscht oder schaltet**, sperrt die
   Rücknahme des älteren („Zuerst den späteren Push … zurückrollen“): sonst aktivierte die Rücknahme
   Code, den ein anderer Push gebracht und niemand als aktiven geprüft hat.
+  Das gilt für jeden späteren Push, nicht nur den nächsten, und auch für einen, den `rescue.php`
+  zurückgenommen hat, solange sein Datenbank-Anteil noch steht (`plugins_not_restored`).
 - **Staging.** `--to staging` schreibt nur die Tabelle der Kopie. Plugins, die die Kopie bewusst
   abschaltet (Mail, Cache, Backup …), werden dort nicht aktiviert (`skipped`,
   `disabled_on_staging`) – und was ein solches voraussetzt, ebenfalls nicht (`requires_skipped`);

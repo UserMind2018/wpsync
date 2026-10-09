@@ -435,4 +435,106 @@ final class PushRescuePluginsTest extends ContentRollbackPluginsCase
         ]], $this->rescue(['content' => '0']));
         $this->assertSame(['akismet/akismet.php', 'kunde/kunde.php', 'old/old.php'], $this->active(), 'die Liste trägt den Stand des Pushs');
     }
+
+    /** Ein Datensatz für die Tests zu „überholt“: getauschte und geschaltete Einheiten, Zeit des Commits. */
+    private function chain(string $id, array $swapped, array $switched, float $at, string $status = PushRescue::COMMITTED): void
+    {
+        $pairs = [];
+        foreach ($swapped as $n => $unit) {
+            $pairs[] = ['unit' => $unit, 'target' => $this->content . '/' . $unit, 'snapshot' => null, 'discard' => $this->work . '/' . $id . '/discard/' . $n];
+        }
+        @mkdir($this->work . '/' . $id, 0777, true);
+        PushRescue::write($this->work, $id, hash('sha256', $id), $pairs, $status, [], null, $switched !== [], $switched);
+        $record                 = (array) PushRescue::read($this->work, $id);
+        $record['committed_at'] = $at;
+        file_put_contents(PushRescue::file($this->work, $id), (string) json_encode($record));
+    }
+
+    private function by(string $id): ?string
+    {
+        return PushRescue::supersededBy($this->work, (array) PushRescue::read($this->work, $id));
+    }
+
+    /**
+     * Nach-Review NR-2: der gespeicherte Vermerk hält nur EINEN Nachfolger. A tauscht x und schaltet y, B tauscht
+     * x, C schaltet y – nach der Rücknahme von B sperrt weiter C. Gerechnet wird deshalb aus den Datensätzen:
+     * jeder spätere, noch stehende Push mit gemeinsamer Einheit sperrt.
+     */
+    public function testEveryLaterStandingPushOfASharedUnitBlocks(): void
+    {
+        mkdir($this->work, 0777, true);
+        $a = 'p_20261009_aaaaaaaaaaaa';
+        $b = 'p_20261009_bbbbbbbbbbbb';
+        $c = 'p_20261009_cccccccccccc';
+        $this->chain($a, ['plugins/x'], ['plugins/y'], 100.0);
+        $this->assertNotNull(PushRescue::read($this->work, $a)['committed_at'] ?? null);
+        $this->assertNull($this->by($a));
+        $this->chain($b, ['plugins/x'], [], 200.0);
+        PushRescue::supersede($this->work, $b, ['plugins/x']);
+        $this->chain($c, [], ['plugins/y'], 300.0);
+        PushRescue::supersede($this->work, $c, ['plugins/y']);
+        $this->assertSame($b, PushRescue::read($this->work, $a)['superseded_by'], 'der Vermerk nennt weiter nur den ersten');
+        $this->assertSame($c, $this->by($a), 'genannt wird der späteste – in dieser Reihenfolge geht es zurück');
+        $this->assertNull($this->by($b));
+        $this->assertNull($this->by($c));
+
+        PushRescue::setStatus($this->work, $b, PushRescue::ROLLED_BACK);
+        $this->assertSame($c, $this->by($a), 'B ist zurück, C steht noch');
+        PushRescue::setStatus($this->work, $c, PushRescue::ROLLED_BACK);
+        PushRescue::setContent($this->work, $c, PushRescue::CONTENT_DONE); // samt DB-Anteil (sonst sperrte C weiter, NR-4)
+        $this->assertNull($this->by($a));
+        // Ein früherer Push sperrt nie einen späteren, ein Push ohne gemeinsame Einheit keinen.
+        $this->chain('p_20261009_dddddddddddd', ['plugins/z'], [], 400.0);
+        $this->assertNull($this->by($a));
+        // Ein aufgeräumter (fehlender) späterer Push sperrt nicht.
+        $this->chain($c, [], ['plugins/y'], 300.0);
+        $this->assertSame($c, $this->by($a));
+        exec('rm -rf ' . escapeshellarg($this->work . '/' . $c));
+        $this->assertNull($this->by($a));
+    }
+
+    /**
+     * NR-4: rescue.php hat den späteren Push zurückgenommen, sein DB-Anteil STEHT aber noch (plugins_not_restored):
+     * die Liste trägt weiter seinen Stand – er sperrt den älteren für die Einheiten, die er geschaltet hat.
+     */
+    public function testALaterPushWhoseDatabasePartStillStandsKeepsBlocking(): void
+    {
+        mkdir($this->work, 0777, true);
+        $a = 'p_20261009_aaaaaaaaaaaa';
+        $b = 'p_20261009_bbbbbbbbbbbb';
+        $this->chain($a, ['plugins/x'], ['plugins/y'], 100.0);
+        $this->chain($b, ['plugins/x'], ['plugins/y'], 200.0);
+        PushRescue::setStatus($this->work, $b, PushRescue::ROLLED_BACK); // Code zurück, content.state weiter pending/applied
+        $this->assertTrue(PushRescue::contentOpen((array) PushRescue::read($this->work, $b)));
+        $this->assertSame($b, $this->by($a));
+        // Hat A nur die getauschte Einheit mit B gemein, ist es frei: der Code von B ist zurück.
+        $this->chain('p_20261009_eeeeeeeeeeee', ['plugins/x'], [], 150.0);
+        $this->assertNull($this->by('p_20261009_eeeeeeeeeeee'));
+        // Ist auch der DB-Anteil von B abgeschlossen (und der dritte Push zurück), ist A frei.
+        PushRescue::setContent($this->work, $b, PushRescue::CONTENT_DONE);
+        $this->assertSame('p_20261009_eeeeeeeeeeee', $this->by($a), 'der dritte tauscht dieselbe Einheit und steht noch');
+        PushRescue::setStatus($this->work, 'p_20261009_eeeeeeeeeeee', PushRescue::ROLLED_BACK);
+        $this->assertNull($this->by($a));
+    }
+
+    /** NR-2: Datensätze von vor dieser Version tragen keine Zeit – für sie gilt der gespeicherte Vermerk wie bisher. */
+    public function testRecordsWithoutATimeFollowTheStoredNote(): void
+    {
+        mkdir($this->work, 0777, true);
+        $a = 'p_20261009_aaaaaaaaaaaa';
+        $b = 'p_20261009_bbbbbbbbbbbb';
+        foreach ([$a, $b] as $id) {
+            $this->chain($id, ['plugins/x'], [], 0.0);
+            $record = (array) PushRescue::read($this->work, $id);
+            unset($record['committed_at']);
+            file_put_contents(PushRescue::file($this->work, $id), (string) json_encode($record));
+        }
+        $this->assertNull($this->by($a), 'ohne Zeit und ohne Vermerk: niemand sperrt');
+        PushRescue::supersede($this->work, $b, ['plugins/x']);
+        $this->assertSame($b, $this->by($a));
+        $this->assertNull($this->by($b));
+        // Ein neuer Push (mit Zeit) ist später als jeder alte ohne.
+        $this->chain('p_20261009_cccccccccccc', ['plugins/x'], [], 10.0);
+        $this->assertSame('p_20261009_cccccccccccc', $this->by($b));
+    }
 }

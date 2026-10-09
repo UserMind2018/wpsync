@@ -56,7 +56,9 @@ Agent ≥ 0.9.0 wie bisher.
 - Ein Satz mit Plugin-Zustand braucht den Umschlag für `rescue.php` – immer, auch ohne
   `--require-rescue-db` (`rescue_db_unavailable` mit `error.detail`, schon nach dem Probelauf)
 - „Überholt“ zählt auch geschaltete Einheiten: ein späterer, noch stehender Push, der dieselbe
-  Einheit tauscht oder schaltet, sperrt die Rücknahme des älteren (`rescue.json`: `switched`)
+  Einheit tauscht oder schaltet, sperrt die Rücknahme des älteren (`rescue.json`: `switched`,
+  `committed_at`). Gerechnet wird aus allen Datensätzen: jeder spätere Push sperrt, nicht nur der
+  erste – auch einer, dessen Datenbank-Anteil nach `rescue.php` noch steht
 - Ein Satz mit Plugin-Zustand hat einen Datenbank-Anteil: Die Rücknahme geht zuerst über den Agent
   und schickt `rescue.php` `content=1`, auch ohne Paket
 - `--no-code` braucht `--uploads`, `--content` oder `--deactivate`

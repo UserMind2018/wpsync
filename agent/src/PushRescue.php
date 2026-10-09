@@ -154,6 +154,8 @@ final class PushRescue
             'content'       => $content,
             'status'        => $status,
             'superseded_by' => null,
+            // Wann dieser Datensatz entstand: daran erkennt supersededBy() den späteren Push (NR-2).
+            'committed_at'  => microtime(true),
             // Seit 0.8.0 ohne Bedeutung (Fehlversuche stehen in rescue.tries); die Felder bleiben für einen Agent 0.7.x.
             'attempts'      => 0,
             'locked_until'  => 0,
@@ -350,7 +352,8 @@ final class PushRescue
     }
 
     /**
-     * Der spätere Push, der diesen überholt hat (U6) – solange er noch getauscht ist. Ein Vermerk,
+     * Der spätere Push, der diesen überholt hat (U6) – solange er noch getauscht ist: der späteste unter
+     * allen, die noch stehen und eine Einheit mit diesem teilen (getauscht oder geschaltet). Ein Vermerk,
      * dessen Push inzwischen zurückgerollt ist oder dessen Datensatz fehlt (zurückgerollt und
      * aufgeräumt), gilt nicht mehr: er kann stehen geblieben sein, weil beim Lösen die Sperre dieses
      * Pushs belegt war (amend()), und sperrte ihn sonst auf Dauer.
@@ -359,12 +362,54 @@ final class PushRescue
      */
     public static function supersededBy(string $workDir, array $record): ?string
     {
+        // Gerechnet, nicht nur nachgeschlagen (Nach-Review NR-2): der Vermerk superseded_by hält einen einzigen
+        // Nachfolger. Sperren muss jeder spätere Push, der noch steht und eine Einheit mit diesem teilt – nur
+        // gelesen, ohne Sperre: ein Push, der eben erst entsteht, vermerkt sich über supersede() selbst.
+        $mine  = self::unitsOf($record);
+        $at    = self::committedAt($record);
+        $found = null;
+        $when  = 0.0;
+        foreach (self::others($workDir, (string) ($record['push_id'] ?? '')) as $other) {
+            $later = self::committedAt($other);
+            if ($later === null || ($at !== null && ($later < $at || ($later === $at && strcmp((string) $other['push_id'], (string) $record['push_id']) <= 0)))) {
+                continue; // ohne Zeit (Datensatz von vor 0.9.0) oder früher: dafür gilt nur der Vermerk unten
+            }
+            if (in_array($other['status'], [self::COMMITTED, self::CONFIRMED], true)) {
+                $theirs = self::unitsOf($other);
+            } elseif ($other['status'] === self::ROLLED_BACK && self::contentOpen($other)) {
+                // rescue.php hat Code und Uploads zurückgenommen, der DB-Anteil steht noch: die Liste trägt
+                // weiter den Stand dieses Pushs (NR-4) – er sperrt für die Einheiten, die er geschaltet hat.
+                $theirs = self::unitsOf(['switched' => $other['switched'] ?? []]);
+            } else {
+                continue;
+            }
+            if (array_intersect($mine, $theirs) !== [] && ($found === null || $later > $when)) {
+                $found = (string) $other['push_id'];
+                $when  = $later;
+            }
+        }
+        if ($found !== null) {
+            return $found;
+        }
         $by = $record['superseded_by'] ?? null;
         if (!is_string($by) || preg_match(self::ID, $by) !== 1) {
             return null;
         }
         $later = self::read($workDir, $by);
         return $later !== null && $later['status'] !== self::ROLLED_BACK ? $by : null;
+    }
+
+    /**
+     * Wann der Commit eines Pushs seinen Datensatz angelegt hat (Unix-Zeit mit Bruchteil); null für einen
+     * Datensatz von vor dieser Version. Auf einer Site läuft immer nur ein Push (Sperre push_lock) – die
+     * Zeiten zweier Datensätze eines Arbeitsordners sind deshalb geordnet.
+     *
+     * @param array<string, mixed> $record
+     */
+    private static function committedAt(array $record): ?float
+    {
+        $at = $record['committed_at'] ?? null;
+        return (is_int($at) || is_float($at)) && $at > 0 ? (float) $at : null;
     }
 
     /**
