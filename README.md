@@ -1238,6 +1238,9 @@ scripts/e2e-security.sh
 
 # Staging-Kopie gegen eine Apache-Quelle mit PHP 7.4 (eigene DDEV-Projekte, braucht jq)
 scripts/e2e-staging.sh
+
+# Inhalte: pull --content und content export (eigene DDEV-Projekte, braucht jq; rund 3 Minuten)
+scripts/e2e-content.sh
 ```
 
 Struktur:
