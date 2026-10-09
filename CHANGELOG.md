@@ -56,6 +56,9 @@ Agent ≥ 0.9.0 wie bisher.
 - Ein Satz mit Plugin-Zustand hat einen Datenbank-Anteil: Die Rücknahme geht zuerst über den Agent
   und schickt `rescue.php` `content=1`, auch ohne Paket
 - `--no-code` braucht `--uploads`, `--content` oder `--deactivate`
+- Die CLI liest eine JSON-Antwort des Agents nur noch bis 256 MiB (nach dem Entpacken gezählt);
+  darüber bricht der Befehl mit einem klaren Fehler ab. Dateien, Tabellen und das Inhalts-Manifest
+  werden weiter gestreamt
 - Die Rückfrage vor einem Push nennt die Plugins, die abgeschaltet werden, beim Namen; ohne Terminal
   (Container-Modus, `--json`) gilt wie bisher `--yes`
 - Der Plan nennt eine neue Einheit aus `--activate` nicht mehr „bleibt auf der Site inaktiv“; der

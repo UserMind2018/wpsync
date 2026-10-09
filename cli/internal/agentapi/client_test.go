@@ -319,3 +319,53 @@ func TestRefreshInfosheetSendsStart(t *testing.T) {
 		t.Fatalf("status = %+v, err = %v", st, err)
 	}
 }
+
+// Security-Review P4 S5: eine JSON-Antwort der Site wird nicht unbegrenzt gelesen – auch nicht nach dem
+// Entpacken (eine kleine gzip-Antwort kann sehr gross werden). Über der Grenze: ein klarer Fehler.
+func TestPostJSONBoundsTheAnswer(t *testing.T) {
+	old := MaxJSONBytes
+	MaxJSONBytes = 1 << 10
+	defer func() { MaxJSONBytes = old }()
+	body, zipped := "", false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if zipped {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			gz.Write([]byte(body))
+			gz.Close()
+			return
+		}
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := newTestClient(srv.URL)
+	var out map[string]any
+
+	body = `{"x":"` + strings.Repeat("a", 500) + `"}`
+	if err := c.PostJSON("/wpsync/v1/ping", map[string]any{}, &out); err != nil || len(out["x"].(string)) != 500 {
+		t.Fatalf("an answer below the bound: %v", err)
+	}
+	body = `{"x":"` + strings.Repeat("a", 5000) + `"}`
+	for _, z := range []bool{false, true} {
+		zipped = z
+		err := c.PostJSON("/wpsync/v1/ping", map[string]any{}, &out)
+		if !errors.Is(err, ErrAnswerTooLarge) || !strings.Contains(err.Error(), "/wpsync/v1/ping") {
+			t.Errorf("gzip %v: err = %v", z, err)
+		}
+	}
+	// Genau an der Grenze geht es noch.
+	zipped, body = false, `{"x":"`+strings.Repeat("a", 1024-8)+`"}`
+	if err := c.PostJSON("/wpsync/v1/ping", map[string]any{}, &out); err != nil {
+		t.Errorf("an answer of exactly the bound: %v", err)
+	}
+	// Routen, die streamen (Dateien, Tabellen, Manifest), gehen nicht durch PostJSON und bleiben unbegrenzt.
+	body = strings.Repeat("a", 5000)
+	resp, err := c.Post("/wpsync/v1/files", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if raw, _ := io.ReadAll(resp.Body); len(raw) != 5000 {
+		t.Errorf("a streamed answer was cut: %d bytes", len(raw))
+	}
+}

@@ -154,10 +154,50 @@ func (c *Client) PostJSON(route string, body, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	// After decompression: a small gzip answer of a hostile site can unpack to anything.
+	if err := json.NewDecoder(&boundedReader{r: resp.Body, left: MaxJSONBytes}).Decode(out); err != nil {
+		if errors.Is(err, ErrAnswerTooLarge) {
+			return fmt.Errorf("%s: %w (mehr als %d MiB)", route, ErrAnswerTooLarge, MaxJSONBytes>>20)
+		}
 		return fmt.Errorf("decode %s: %w", route, err)
 	}
 	return nil
+}
+
+// MaxJSONBytes bounds one JSON answer of the agent, counted after decompression (Security-Review P4
+// S5). The routes that go through PostJSON answer with plans, lists and stamps; the largest legitimate
+// one is /delta, with roughly 150 bytes per file of the site – 256 MiB is beyond 1.5 million files.
+// Files, tables and the content manifest are streamed by their own readers and are not bounded here.
+var MaxJSONBytes int64 = 256 << 20
+
+// ErrAnswerTooLarge: a JSON answer of the site is larger than MaxJSONBytes. Nothing of it was used.
+var ErrAnswerTooLarge = errors.New("die Antwort der Site ist grösser, als wpsync für diese Abfrage annimmt")
+
+// boundedReader reads at most left bytes and fails beyond – it never ends quietly like
+// io.LimitReader, which would let a cut answer pass as a complete one.
+type boundedReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (b *boundedReader) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		// Only a byte beyond the bound is too much: an answer of exactly the bound ends with EOF here.
+		var one [1]byte
+		if n, err := b.r.Read(one[:]); n == 0 {
+			if err == nil {
+				err = io.ErrNoProgress
+			}
+			return 0, err
+		}
+		return 0, ErrAnswerTooLarge
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.r.Read(p)
+	b.left -= int64(n)
+	return n, err
 }
 
 func (c *Client) ctx() context.Context {
