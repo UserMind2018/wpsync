@@ -221,6 +221,7 @@ final class PushContent
                 );
                 $target->indexables  = self::existing($copy['indexables']);
                 $target->objectTypes = [self::class, 'objectTypes']; // die Kopie läuft mit dem Code von Live
+                $target->userExists  = [self::class, 'userExists'];
                 return $target;
             }
             $tables = [];
@@ -241,6 +242,7 @@ final class PushContent
             );
             $target->indexables = self::existing((string) $wpdb->prefix . 'yoast_indexable');
             $target->objectTypes = [self::class, 'objectTypes'];
+            $target->userExists  = [self::class, 'userExists'];
             // Wie wp_insert_post() beim Weg in den Papierkorb. Nur auf Live: die Funktion liest dessen Tabellen.
             $target->slug = static function (string $name, string $id, string $type, string $parent): string {
                 return function_exists('wp_unique_post_slug') ? (string) wp_unique_post_slug($name, (int) $id, 'trash', $type, (int) $parent) : $name;
@@ -249,6 +251,12 @@ final class PushContent
         } catch (\InvalidArgumentException $e) {
             throw new ContentException(ContentException::ORIGIN, 'Die Adresse oder die Tabellen dieser Site lassen sich nicht bestimmen.');
         }
+    }
+
+    /** Gibt es diesen Benutzer auf der Site? Ohne WordPress-Funktion: nicht zu prüfen, also ja. */
+    public static function userExists(int $id): bool
+    {
+        return !function_exists('get_userdata') || get_userdata($id) !== false;
     }
 
     /**

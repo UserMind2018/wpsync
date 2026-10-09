@@ -101,6 +101,7 @@ final class ContentApply
     {
         $modified = ['post_modified' => $nowLocal, 'post_modified_gmt' => gmdate('Y-m-d H:i:s', $now)];
         $byTable  = array_fill_keys(ContentState::ORDER, []);
+        $known    = []; // Autoren, die es gibt
         foreach ($package->rows() as $row) {
             $table   = $row['table'];
             $key     = $row['key'];
@@ -136,6 +137,13 @@ final class ContentApply
             if ($table === 'posts') {
                 if ($current === null && ($author === null || $author < 1)) {
                     throw new ContentException(ContentException::AUTHOR, 'Neue Beiträge brauchen einen Autor: das Push-Fenster muss im WP-Admin geöffnet sein, nicht per WP-CLI.');
+                }
+                // Der Öffner kann gelöscht worden sein, seit er das Fenster geöffnet hat: kein Beitrag ohne Autor.
+                if ($current === null && !isset($known[$author])) {
+                    if ($target->userExists !== null && !($target->userExists)($author)) {
+                        throw new ContentException(ContentException::AUTHOR, 'Der Benutzer, der das Push-Fenster geöffnet hat, existiert nicht mehr – neue Beiträge hätten keinen Autor. Das Fenster im WP-Admin neu öffnen.');
+                    }
+                    $known[$author] = true;
                 }
                 $values += $current === null
                     ? ['post_author' => (string) $author, 'guid' => self::guid($key, $check, $target), 'to_ping' => '', 'pinged' => '', 'comment_count' => '0']

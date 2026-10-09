@@ -43,6 +43,11 @@ final class ContentTarget
      *      Taxonomien aus Projekt-Erweiterungen (ContentCheck); null: nicht geprüft
      */
     public $objectTypes = null;
+    /**
+     * @var (callable(int): bool)|null gibt es diesen Benutzer auf der Site (get_userdata())? Für den
+     *      Autor neuer Beiträge; null: nicht geprüft
+     */
+    public $userExists = null;
     /** @var ContentReader|null */
     private $reader = null;
 

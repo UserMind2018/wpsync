@@ -75,6 +75,43 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertFileDoesNotExist($this->dir . '/before.json');
     }
 
+    /**
+     * H2: der Öffner des Fensters wird Autor neuer Beiträge. Gibt es ihn als Benutzer nicht mehr
+     * (gelöscht, seit er das Fenster geöffnet hat), entstünden Beiträge ohne Autor – author_unknown,
+     * und nichts wird geschrieben. Ohne neue Beiträge spielt er keine Rolle.
+     */
+    public function testNewPostsNeedAnAuthorThatStillExists(): void
+    {
+        $old    = $this->store->data;
+        $asked  = [];
+        $target = ContentFixtures::live($this->store);
+        $target->userExists = static function (int $id) use (&$asked): bool {
+            $asked[] = $id;
+            return $id === 7;
+        };
+        try {
+            $this->apply($this->rows(), 99, $target);
+            $this->fail('no exception');
+        } catch (\WpSync\ContentException $e) {
+            $this->assertSame('author_unknown', $e->reason());
+        }
+        $this->assertSame([99], $asked);
+        $this->assertSame($old, $this->store->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+        $this->assertFileDoesNotExist($this->dir . '/before.json');
+
+        // Ein Paket ohne neuen Beitrag fragt nicht nach ihm.
+        $asked = [];
+        $this->apply([ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => 'Neu'])], 99, $target);
+        $this->assertSame([], $asked);
+        $this->assertSame('Neu', $this->store->data['options']['blogname']['option_value']);
+
+        // Und mit einem Benutzer, den es gibt, geht der ganze Satz.
+        $this->store->data = $old;
+        $this->apply($this->rows(), 7, $target);
+        $this->assertSame('7', $this->store->data['posts']['1000001']['post_author']);
+    }
+
     /** Hilfsprüfung: ein anderer Öffner landet im neuen Beitrag. */
     private function applyAuthor(): string
     {
