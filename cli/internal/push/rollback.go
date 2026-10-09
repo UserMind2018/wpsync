@@ -3,6 +3,7 @@ package push
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -51,7 +52,7 @@ func Pushes(o Options) error {
 		}
 		var units []string
 		for _, u := range r.Units {
-			if ValidUnit(u.Path) || u.Path == UploadsUnit {
+			if ValidUnit(u.Path) || u.Path == UploadsUnit || u.Path == ContentUnit {
 				units = append(units, u.Path)
 			} else {
 				units = append(units, agentapi.Printable(u.Path))
@@ -128,6 +129,9 @@ func Rollback(o Options, pushID string) error {
 		if len(j.Uploads) > 0 {
 			units = append(units, UploadsUnit)
 		}
+		if j.Content != nil {
+			units = append(units, ContentUnit)
+		}
 	case target == "" && (o.Target != "" || o.Report != nil):
 		// A push from another machine: only the agent knows where it went.
 		target, units = recorded(o, pushID)
@@ -146,7 +150,9 @@ func Rollback(o Options, pushID string) error {
 			return fmt.Errorf("Push %s: %w", pushID, ErrRollbackWindow) // never around the window through rescue.php
 		}
 		if errors.As(err, &apiErr) && apiErr.Code != "" && apiErr.Status < 500 {
-			return agentError(target, err) // the agent answered and refused: superseded, pruned or not ours
+			// The agent answered and refused: superseded, pruned, not ours – or rows of the push changed
+			// since (changed_since_push): then nothing is taken back, and never through rescue.php.
+			return contentError(agentError(target, err))
 		}
 		// WordPress does not answer – the reason this script exists.
 		if jerr != nil {
@@ -163,14 +169,23 @@ func Rollback(o Options, pushID string) error {
 		if notes, rerr = RescueRollbackNotes(o.HTTP, j.RescueURL, pushID, RescueKey(o.Secret, pushID, j.Salt)); rerr != nil {
 			return fmt.Errorf("Rollback über rescue.php fehlgeschlagen: %w", rerr)
 		}
+		if j.Content != nil && !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
+			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack) // rescue.php knows no database
+		}
 	}
 	fmt.Fprintf(o.Out, "✓ Push %s ist zurückgerollt.\n", pushID)
 	printKept(o.Out, notes.Kept)
+	printActions(o.Out, notes.PostActions)
+	contentLeft := slices.Contains(notes.Warnings, WarningContentNotRolledBack)
+	if contentLeft {
+		fmt.Fprintf(o.Out, "  ! Nur Code und Uploads sind zurück – die Inhalte des Pushs stehen noch auf der Site.\n"+
+			"    Sobald WordPress wieder antwortet: wpsync rollback %s %s\n", o.Site.Name, pushID)
+	}
 	if o.Report != nil {
 		if units == nil {
 			units = []string{}
 		}
-		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings}
+		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings, PostActions: notes.PostActions}
 	}
 
 	if target == TargetStaging {
@@ -192,6 +207,15 @@ func Rollback(o Options, pushID string) error {
 	RevertUploads(base, j, notes.Kept)
 	if err := baseline.Save(siteDir, base); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
+	}
+	// Manifest and baseline go back with the content – not while the content still stands.
+	if j.Content != nil && j.Content.Applied && !contentLeft {
+		if err := revertContent(siteDir, j); err != nil {
+			fmt.Fprintf(o.Out, "  ! Manifest und Baseline liessen sich nicht zurücksetzen – vor dem nächsten Inhalts-Push: wpsync pull %s --content (%v)\n", o.Site.Name, err)
+			if o.Report != nil {
+				o.Report.Warnings = append(o.Report.Warnings, WarningContentState)
+			}
+		}
 	}
 	j.Applied = false
 	if err := SaveJournal(siteDir, j); err != nil {
@@ -247,7 +271,7 @@ func recorded(o Options, pushID string) (target string, units []string) {
 			continue
 		}
 		for _, u := range r.Units {
-			if ValidUnit(u.Path) || u.Path == UploadsUnit {
+			if ValidUnit(u.Path) || u.Path == UploadsUnit || u.Path == ContentUnit {
 				units = append(units, u.Path)
 			}
 		}

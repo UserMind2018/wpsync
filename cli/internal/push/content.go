@@ -11,9 +11,11 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/content"
+	"github.com/usermind/wpsync/internal/safefs"
 )
 
 // ContentUnit is how a push with a package names its content in results and in the push log. It is
@@ -196,5 +198,106 @@ func (p *Package) CheckSite(siteDir string) error {
 	if p.Head.Home != m.Live.Home {
 		return &ContentError{Reason: "origin_mismatch", Message: "--content: das Paket ist für eine andere Site gebaut"}
 	}
+	return nil
+}
+
+// stagePackage puts the package on the site; an agent without the route has no content channel.
+func stagePackage(o Options, pkg *Package) error {
+	sent, err := o.Client.ContentStageBytes(pkg.SHA256, pkg.Data, o.ChunkBytes)
+	if err != nil {
+		var apiErr *agentapi.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "rest_no_route" {
+			return fmt.Errorf("%w: %w", ErrAgentNoContent, err)
+		}
+		return contentError(err)
+	}
+	if sent {
+		fmt.Fprintf(o.Out, "Inhalts-Paket abgelegt (%d Zeilen, %d Bytes)\n", len(pkg.Rows), len(pkg.Data))
+	}
+	return nil
+}
+
+// printContent shows the agent's check of the package.
+func printContent(out io.Writer, pkg *Package, plan *agentapi.ContentPlan) {
+	fmt.Fprintf(out, "content – %d Zeilen", len(pkg.Rows))
+	for _, table := range []string{"posts", "postmeta", "terms", "term_taxonomy", "term_relationships", "termmeta", "options"} {
+		if n := plan.Rows[table]; n > 0 {
+			fmt.Fprintf(out, ", %s %d", table, n)
+		}
+	}
+	fmt.Fprintln(out)
+	if !plan.OK && plan.Error != nil {
+		fmt.Fprintf(out, "  ! %v\n", contentFailure(plan.Error))
+	}
+}
+
+// printActions names the steps after applying or taking back content that did not work.
+func printActions(out io.Writer, actions []agentapi.PostAction) {
+	for _, a := range actions {
+		if !a.OK {
+			fmt.Fprintf(out, "  ! Nacharbeit %s ist nicht gelungen – bitte auf der Site von Hand nachholen\n", a.Step)
+		}
+	}
+}
+
+// contentUndoName is the file next to the journal with the lines of manifest and baseline a push
+// replaced.
+func contentUndoName(pushID string) string { return pushID + ".content.json" }
+
+// applyContent brings manifest and baseline of the site folder to the state the agent reports
+// and keeps what they held before for a rollback.
+func applyContent(siteDir string, j *Journal, pkg *Package, after []agentapi.ContentAfter) error {
+	rows := map[content.Key]PackageRow{}
+	for _, r := range pkg.Rows {
+		rows[content.Key{T: r.Table, K: r.Key}] = r
+	}
+	changes := map[content.Key]content.Change{}
+	for _, a := range after {
+		key := content.Key{T: a.T, K: a.K}
+		c := content.Change{H: a.H}
+		if r, ok := rows[key]; ok {
+			c.Row, c.Trash = r.Row, r.Op == "trash"
+		}
+		changes[key] = c
+	}
+	undo, err := content.Patch(siteDir, changes)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(undo)
+	if err != nil {
+		return err
+	}
+	root, err := safefs.OpenTree(siteDir, journalRel)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := safefs.WriteFile(root, contentUndoName(j.PushID), bytes.NewReader(data), int64(len(data)), time.Time{}, 0o600); err != nil {
+		return err
+	}
+	j.Content.Applied = true
+	return nil
+}
+
+// revertContent takes applyContent back after the push was rolled back on the site.
+func revertContent(siteDir string, j *Journal) error {
+	root, err := safefs.OpenDir(siteDir, journalRel)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	data, err := safefs.ReadFile(root, contentUndoName(j.PushID))
+	if err != nil {
+		return err
+	}
+	var undo content.Undo
+	if err := json.Unmarshal(data, &undo); err != nil {
+		return err
+	}
+	if err := content.Unpatch(siteDir, &undo); err != nil {
+		return err
+	}
+	j.Content.Applied = false
 	return nil
 }
