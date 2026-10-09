@@ -34,6 +34,8 @@ final class Push
     public const TARGETS    = ['live', 'staging'];
     /** So lange wartet der Commit vor COMMIT höchstens auf die Sperre des Pushs (Spec Content-Push P3 §7.1). */
     public const GATE_SECONDS = 15.0;
+    /** Der Umschlag für rescue.php (rescue.sealed) verfällt nach 24 Stunden (P3 R14). */
+    public const RESCUE_DB_TTL = 86400;
 
     /** @var float|null für Tests: Wartezeit an der Naht anstelle von GATE_SECONDS */
     public static $gateWait = null;
@@ -45,6 +47,8 @@ final class Push
     {
         self::$pluginDir = $pluginDir;
         add_action(self::CRON, [self::class, 'maintain']);
+        // Früh: hat rescue.php einen Push zurückgenommen, holt der Agent nach, was WordPress braucht (P3 §8.1).
+        add_action('init', [self::class, 'catchUp'], 1);
         add_action('init', static function (): void {
             if (!wp_next_scheduled(self::CRON)) {
                 wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CRON);
@@ -73,6 +77,57 @@ final class Push
         Store::install();
         self::sync();
         self::prune(time());
+        self::expireEnvelopes(time());
+    }
+
+    /**
+     * Auf init, ohne Datenbankabfrage (Spec Content-Push P3 §8.1): liegt im Arbeitsordner von Live der
+     * Marker rescue.pending, hat rescue.php einen Push an WordPress vorbei zurückgenommen – dann, und
+     * nur dann, läuft sync(). Der Marker verschwindet vorher: ein Fehler in einer Nacharbeit
+     * wiederholt sich so nicht in jedem Request. Für Pushes nach Staging liegt der Marker in der
+     * Kopie; sie holt sync() beim nächsten REST-Aufruf oder im täglichen Cron nach.
+     */
+    public static function catchUp(): void
+    {
+        $live = self::content();
+        if ($live === '') {
+            return;
+        }
+        $found = false;
+        foreach (glob($live . '/wpsync-push-*/' . PushRescue::PENDING_FILE) ?: [] as $marker) {
+            if (is_file((string) $marker) && !is_link((string) $marker) && @unlink((string) $marker)) {
+                $found = true;
+            }
+        }
+        if (!$found) {
+            return;
+        }
+        try {
+            self::sync();
+        } catch (\Throwable $e) {
+            // der tägliche Cron und der nächste REST-Aufruf holen es nach
+        }
+    }
+
+    /** Löscht Umschläge, die älter als RESCUE_DB_TTL sind (R14) – auf beiden Zielen. Läuft der Cron, läuft WordPress, und der Agent kann zurücknehmen. */
+    private static function expireEnvelopes(int $now): void
+    {
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            $work    = $content . '/' . Store::pushDirName();
+            if ($content === '' || is_link($work)) {
+                continue;
+            }
+            foreach ((array) @scandir($work) as $name) {
+                if (!is_string($name) || preg_match(PushRescue::ID, $name) !== 1 || is_link($work . '/' . $name)) {
+                    continue;
+                }
+                $file = RescueSeal::file($work, $name);
+                if (is_file($file) && !is_link($file) && $now - (int) @filemtime($file) > self::RESCUE_DB_TTL) {
+                    RescueSeal::forget($work, $name);
+                }
+            }
+        }
     }
 
     /**
@@ -732,6 +787,8 @@ final class Push
                 return $dirs;
             }
             PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
+            // Einen bestätigten Push nimmt rescue.php nie zurück: der Umschlag mit den Zugangsdaten hat ausgedient (P3 R14).
+            RescueSeal::forget($dirs[1], $push['push_id']);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
             // Das Paket ist auf Live: die Ablage braucht niemand mehr. Nach Staging bleibt sie für den Push nach Live.
             $record = PushRescue::read($dirs[1], $push['push_id']);
@@ -902,7 +959,11 @@ final class Push
         return new \WP_REST_Response(['pushes' => $pushes]);
     }
 
-    /** Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. */
+    /**
+     * Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. Hat
+     * rescue.php dabei auch die Inhalte zurückgenommen, laufen hier die Nacharbeiten, die ohne
+     * WordPress nicht gingen (Spec Content-Push P3 §8.2).
+     */
     public static function sync(): void
     {
         $name = Store::pushDirName();
@@ -923,9 +984,71 @@ final class Push
             // Hat rescue.php nur Code und Uploads zurückgenommen, stehen die Inhalte noch (§7.6): der
             // Push bleibt offen, sein Vorher-Abbild liegen – wpsync rollback holt sie über den Agent nach.
             if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
+                self::afterRescue($push, $content, $content . '/' . $name, $record);
                 self::finishRollback($push['push_id']);
             }
         }
+        // Die Marker beider Ziele haben ausgedient – nur wenn die Liste oben wirklich gelesen wurde.
+        if (!Store::dbOk()) {
+            return;
+        }
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            $marker  = PushRescue::pendingFile($content . '/' . $name);
+            if ($content !== '' && is_file($marker) && !is_link($marker)) {
+                @unlink($marker);
+            }
+        }
+    }
+
+    /**
+     * Was nach einer Rücknahme der Inhalte durch rescue.php nachzuholen ist (P3 §8.2): die
+     * Nacharbeiten (§7.7) – höchstens einmal, ein Fehlschlag hält den Abschluss nie auf – und der
+     * Vermerk im Protokoll der Pushes (via, post_actions, was stehen blieb).
+     *
+     * @param array<string, mixed> $push
+     * @param array<string, mixed> $record rescue.json
+     */
+    private static function afterRescue(array $push, string $content, string $work, array $record): void
+    {
+        $stored = $record['content'] ?? null;
+        if (!is_array($stored) || ($stored['via'] ?? '') !== PushRescue::VIA_RESCUE) {
+            return;
+        }
+        $pushId = (string) $push['push_id'];
+        $note   = ['via' => PushRescue::VIA_RESCUE];
+        if (is_array($stored['left'] ?? null) && $stored['left'] !== []) {
+            $note['left']       = array_slice(array_values($stored['left']), 0, ContentException::MAX_KEYS);
+            $note['left_total'] = (int) ($stored['left_total'] ?? count($stored['left']));
+        }
+        if (($stored['post'] ?? '') === PushRescue::POST_PENDING) {
+            // Erst merken, dann ausführen: legt eine Nacharbeit WordPress lahm, läuft sie kein zweites Mal.
+            PushRescue::setContentFields($work, $pushId, ['post' => PushRescue::POST_DONE]);
+            $actions = [['step' => 'post_actions', 'ok' => false]];
+            $changes = null;
+            try {
+                // Hier wieder mit dem Schlüssel der Installation – der Umschlag ist längst weg.
+                $image   = ContentImage::get($work . '/' . $pushId . '/' . PushContent::UNIT, ContentImage::AFTER);
+                $changes = is_array($image) && is_array($image['changes'] ?? null) ? $image['changes'] : null;
+            } catch (\Throwable $e) {
+                $changes = null;
+            }
+            try {
+                if ($changes !== null) {
+                    $actions = PushContent::postActions((string) $push['target'], $content, $changes);
+                } elseif ($push['target'] === 'live' && function_exists('wp_cache_flush')) {
+                    wp_cache_flush(); // ohne after.json wenigstens kein Object-Cache mit dem gepushten Stand
+                }
+            } catch (\Throwable $e) {
+                $actions = [['step' => 'post_actions', 'ok' => false]];
+            }
+            $note['post_actions'] = $actions;
+        }
+        $units = [];
+        foreach ((array) $push['units'] as $unit) {
+            $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? array_merge($unit, $note) : $unit;
+        }
+        Store::updatePush($pushId, ['units' => (string) wp_json_encode($units)]);
     }
 
     /**

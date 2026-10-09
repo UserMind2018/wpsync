@@ -297,7 +297,25 @@ final class Admin
                 $parts[] = $label . ' ' . implode(', ', $names);
             }
         }
-        return $parts === [] ? $line : $line . ' – Projekt-Erweiterungen: ' . implode('; ', $parts);
+        if ($parts !== []) {
+            $line .= ' – Projekt-Erweiterungen: ' . implode('; ', $parts);
+        }
+        // Inhalte, die rescue.php ohne WordPress zurückgenommen hat (Spec Content-Push P3 §8.2).
+        if (($unit['via'] ?? '') === PushRescue::VIA_RESCUE) {
+            $line  .= ' – über rescue.php zurückgenommen';
+            $steps  = is_array($unit['post_actions'] ?? null) ? $unit['post_actions'] : [];
+            $failed = count(array_filter($steps, static function ($step): bool {
+                return is_array($step) && empty($step['ok']);
+            }));
+            if ($steps !== []) {
+                $line .= ', Nacharbeiten nachgeholt' . ($failed > 0 ? ' (' . $failed . ' fehlgeschlagen)' : '');
+            }
+            $left = (int) ($unit['left_total'] ?? 0);
+            if ($left > 0) {
+                $line .= ', ' . $left . ' fremde Stelle(n) an eingefügten Objekten blieben stehen';
+            }
+        }
+        return $line;
     }
 
     private static function notice(string $type, string $message): void
