@@ -11,7 +11,9 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 
 ### Neu
 - `wpsync push <site> code … --content <package.jsonl>`: Inhalte als dritter Kanal eines Pushs –
-  ein Paket aus Zeilen der sieben Inhaltstabellen (`update`, `insert` mit fester ID, `trash`),
+  ein Paket aus Zeilen der sieben Inhaltstabellen (`update`, `insert` mit fester ID, `trash` –
+  der Agent tut dabei, was WordPress beim Weg in den Papierkorb tut, samt `__trashed` am Namen
+  und `_wp_desired_post_slug`),
   transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
   Vorher-Abbild, Nacharbeiten (`data.post_actions`) und Health-Check der geänderten Seiten.
   `--dry-run` prüft das ganze Paket ohne Push-Fenster; das `plan`-Ereignis nennt
@@ -20,12 +22,18 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 - `wpsync rollback` nimmt den ganzen Satz zurück (Inhalte → Code → Uploads) – oder nichts, wenn
   sich Zeilen seit dem Push geändert haben (`changed_since_push`). Antwortet WordPress nicht,
   nimmt `rescue.php` Code und Uploads zurück und das Ergebnis nennt
-  `warnings: ["content_not_rolled_back"]`; ein späterer `rollback` holt die Inhalte nach
+  `warnings: ["content_not_rolled_back"]`; ein späterer `rollback` holt die Inhalte nach – oder
+  `pushes --confirm` schliesst den Push als zurückgerollt ab und lässt die Inhalte stehen
+  (`status: "rolled_back"`, `warnings: ["content_kept"]`). Die Rücknahme schreibt an bestehenden
+  Zeilen nur zurück, was der Push geschrieben hat
 - Nach einem bestätigten Inhalts-Push nach Live zieht die CLI `manifest.jsonl` und
   `baseline.jsonl` nach; `rollback` nimmt das zurück
 - Agent: Endpunkt `/content/stage` (Paket in Stücken, je Kopplung, 24 h), Prüfungen eines Pakets
   gegen die Listen des Agents, Sperre von serialisierten Objekten (`unsafe_value`), von Resten
-  der lokalen Adresse und von Pseudonymen; `rescue.json` kennt den DB-Anteil eines Pushs
+  der lokalen Adresse und von Pseudonymen; `rescue.json` kennt den DB-Anteil eines Pushs. Die
+  Transaktion ist an ihre Datenbankverbindung gebunden (Sitzungsmarke): nach einem Reconnect
+  schreibt nichts mehr und es gibt keinen `COMMIT`. Sites hinter HyperDB/LudicrousDB lehnt der
+  Agent ab (`engine_unsupported`)
 - `error.reason` bei Exit 1 für Inhalte: `package_invalid`, `baseline_outdated`,
   `origin_mismatch`, `package_too_large`, `engine_unsupported`, `blocked_row`,
   `list_version_mismatch`, `unsafe_value`, `local_origin_in_package`, `pseudonym_in_package`,
