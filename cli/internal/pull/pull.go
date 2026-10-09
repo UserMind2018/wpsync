@@ -11,6 +11,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/content"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/localgit"
 	"github.com/usermind/wpsync/internal/profile"
@@ -28,10 +29,13 @@ type Options struct {
 	// localgit.GitDir. With SiteDir set (server mode) the repo is localgit.TreeGitDir(SiteDir).
 	SiteDir string
 	// Docroot holds the WordPress files; default SiteDir/public. Must lie directly below SiteDir.
-	Docroot         string
-	Full            bool
-	Yes             bool                    // accept profile deviations without asking
-	NoAnonymize     bool                    // pull personal data in plain text (needs confirmation)
+	Docroot     string
+	Full        bool
+	Yes         bool // accept profile deviations without asking
+	NoAnonymize bool // pull personal data in plain text (needs confirmation)
+	// Content: also fetch the row manifest of the content tables and build the baseline for a
+	// content push (Spec Content-Push §4); reloads all seven content tables when one changed.
+	Content         bool
 	Confirm         func(string) bool       // asks the user; nil without a terminal
 	SaveSite        func(*sites.Site) error // records a confirmed deviation in the profile
 	Out             io.Writer
@@ -71,6 +75,8 @@ type Result struct {
 	AgentVersion       string `json:"agent_version"`
 	LocalAdminUser     string `json:"local_admin_user,omitempty"`
 	LocalAdminPassword string `json:"local_admin_password,omitempty"`
+	// Content: rows of the manifest, unfaithful rows, ID maxima and canon version – only with --content.
+	Content *content.Summary `json:"content,omitempty"`
 	// Warnings name what failed without failing the pull; omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -318,6 +324,17 @@ func run(o Options) error {
 		return err
 	}
 	delta := p.delta
+	// Checked before anything is set up or downloaded: neither an old agent nor a profile without
+	// the content tables gets better by pulling first.
+	var contentNames []string
+	if o.Content {
+		if !agentapi.AtLeast(delta.Env.AgentVersion, agentapi.MinAgentContent) {
+			return &agentapi.OutdatedError{Installed: delta.Env.AgentVersion, Required: agentapi.MinAgentContent, Err: ErrAgentNoContent}
+		}
+		if contentNames, err = contentTables(delta.Tables, delta.Env.TablePrefix); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintf(o.Out, "Quelle: WP %s, PHP %s, DB %s – im Profil: %d Tabellen, %d Dateien\n",
 		delta.Env.WPVersion, delta.Env.PHPVersion, delta.Env.DBServer, len(delta.Tables), len(delta.Files))
 	for _, s := range delta.Skipped {
@@ -386,6 +403,10 @@ func run(o Options) error {
 	}
 
 	tables := ChangedTables(delta.Tables, base)
+	refreshContent := false
+	if o.Content {
+		tables, refreshContent = withContent(tables, delta.Tables, contentNames, content.Fresh(siteDir))
+	}
 	fmt.Fprintf(o.Out, "Tabellen: %d von %d neu zu laden\n", len(tables), len(delta.Tables))
 	if len(tables) > 0 {
 		dir, err := openTables(siteDir)
@@ -428,6 +449,28 @@ func run(o Options) error {
 	fmt.Fprintln(o.Out, "  local-mailguard aktiv ✓")
 	o.progress(PhaseMailguard, 1, 1)
 
+	// Before baseline.Save: if the manifest fails, the old baseline stays and the next pull
+	// reloads the tables.
+	var summary *content.Summary
+	if o.Content {
+		if refreshContent {
+			url, err := drv.LocalURL(name)
+			if err != nil {
+				return localenv.Wrap("local url", err)
+			}
+			o.progress(PhaseContent, 0, 1)
+			if summary, err = content.Refresh(siteDir, client, runner, p.scope, url, time.Now()); err != nil {
+				return fmt.Errorf("Inhalts-Manifest: %w", err)
+			}
+			timer.done("Inhalte")
+		} else if summary, err = content.LoadSummary(siteDir); err != nil {
+			return fmt.Errorf("Inhalts-Manifest: %w", err)
+		}
+		summary.Reloaded = refreshContent // B10: the studio's working state was overwritten
+		o.progress(PhaseContent, 1, 1)
+		fmt.Fprintf(o.Out, "Inhalte: %d Zeilen im Manifest, %d nicht treu übertragen (nicht pushbar)\n", summary.Rows, summary.Unfaithful)
+	}
+
 	next := baseline.New(o.Site.URL)
 	notWritten := make(map[string]bool, len(skipped))
 	for _, p := range skipped {
@@ -466,7 +509,7 @@ func run(o Options) error {
 			TablesLoaded: len(tables), TablesTotal: len(delta.Tables),
 			Requests: client.Stats.Requests, BytesIn: client.Stats.BytesIn,
 			DurationMS: time.Since(started).Milliseconds(), LocalURL: localURL, AgentVersion: delta.Env.AgentVersion,
-			Warnings: warnings,
+			Content: summary, Warnings: warnings,
 		}
 		if !o.NoAnonymize {
 			o.Report.LocalAdminUser, o.Report.LocalAdminPassword = LocalAdminUser, LocalAdminPassword

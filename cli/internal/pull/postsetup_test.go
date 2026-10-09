@@ -51,6 +51,7 @@ func TestPostSetup(t *testing.T) {
 	for _, want := range []string{
 		"wp search-replace https://www.kunde.de http://kunde.ddev.site --all-tables-with-prefix --skip-columns=guid --report-changed-only --skip-plugins --skip-themes",
 		`wp search-replace https:\/\/www.kunde.de http:\/\/kunde.ddev.site`,
+		`wp search-replace https:\\\/\\\/www.kunde.de http:\\\/\\\/kunde.ddev.site --all-tables-with-prefix --skip-columns=guid --report-changed-only --skip-plugins --skip-themes`,
 		"wp config set WP_ENVIRONMENT_TYPE local --type=constant",
 		"wp config set DISABLE_WP_CRON true --raw --type=constant",
 		"wp plugin deactivate wp-mail-smtp password-protected --skip-plugins --skip-themes",

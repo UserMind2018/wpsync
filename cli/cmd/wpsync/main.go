@@ -49,7 +49,8 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync stop <site>… | --all          lokale Umgebung(en) stoppen (Daten bleiben erhalten)
   wpsync scan <site> [--refresh]       zeigen, was auf der Site liegt, und auswählen, was gezogen wird
   wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen,
-                                       --no-anonymize: personenbezogene Daten im Klartext)
+                                       --no-anonymize: personenbezogene Daten im Klartext,
+                                       --content: Manifest und Baseline für den Inhalts-Push)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
   wpsync trust <site>                  eigene Änderungen in .ddev ansehen und freigeben
                                        (ohne Terminal: --fingerprint <fp> aus der Anzeige)
@@ -653,11 +654,12 @@ func (a *app) cmdPull(args []string) error {
 	full := fs.Bool("full", false, "alles neu laden (Baseline und vorhandene Dateien ignorieren)")
 	yes := fs.Bool("yes", false, "neue Tabellen/Plugins ohne Rückfrage nach dem Preset behandeln")
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was sich geändert hat (wie wpsync status)")
+	withContent := fs.Bool("content", false, "auch das Inhalts-Manifest holen und die Baseline für einen Inhalts-Push bauen (lädt die Inhaltstabellen neu, sobald sich eine geändert hat)")
 	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	secretStdin := secretStdinFlag(fs)
 	df := addDriverFlags(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--json] [--secret-stdin] [--driver container …]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--json] [--secret-stdin] [--driver container …]")
 	if err != nil {
 		return err
 	}
@@ -690,6 +692,7 @@ func (a *app) cmdPull(args []string) error {
 		Full:            *full,
 		Yes:             *yes,
 		NoAnonymize:     *noAnon,
+		Content:         *withContent,
 		SaveSite:        saveProfile,
 		Out:             a.out(),
 		RowsPerChunk:    2000,
