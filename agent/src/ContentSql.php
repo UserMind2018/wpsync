@@ -1,0 +1,375 @@
+<?php
+namespace WpSync;
+
+defined('ABSPATH') || exit;
+
+/**
+ * ContentStore auf $wpdb (Spec Content-Push §7.3, §11): schreibt nur in die sieben
+ * Inhaltstabellen, deren volle Namen der Aufrufer nennt – für Live Präfix plus fester Name, für
+ * die Staging-Kopie Namen, die StagingGuard::table() geprüft hat. Jeder Wert geht durch
+ * $wpdb->prepare(), Bezeichner stehen in Backticks und stammen nie aus dem Paket: Spaltennamen
+ * kommen aus der Datenbank selbst (SELECT *) oder aus den festen Listen. Meta-Schlüssel und
+ * Taxonomien werden bytegenau verglichen (BINARY), wie Manifest und Export sie gruppieren.
+ */
+final class ContentSql implements ContentStore
+{
+    private const NAME  = '/^[A-Za-z0-9_$]{1,64}\z/';
+    /** Schlüssel je Abfrage. */
+    private const CHUNK = 100;
+    private const PAIRS = 50;
+
+    private const META = ['postmeta' => 'post_id', 'termmeta' => 'term_id'];
+
+    /** @var object $wpdb */
+    private $db;
+    /** @var array<string, string> Tabelle ohne Präfix → voller Name */
+    private $tables;
+
+    /**
+     * @param object                $db     $wpdb der Site
+     * @param array<string, string> $tables alle sieben Inhaltstabellen: Name ohne Präfix → voller Name
+     * @throws \InvalidArgumentException wenn eine Tabelle fehlt oder ein Name kein Bezeichner ist
+     */
+    public function __construct($db, array $tables)
+    {
+        foreach (Canon::TABLES as $name) {
+            if (!is_string($tables[$name] ?? null) || preg_match(self::NAME, $tables[$name]) !== 1) {
+                throw new \InvalidArgumentException('invalid content table ' . $name);
+            }
+        }
+        $this->db     = $db;
+        $this->tables = array_intersect_key($tables, array_flip(Canon::TABLES));
+    }
+
+    public function engines(array $tables): array
+    {
+        $out = [];
+        foreach ($tables as $name) {
+            $rows       = $this->results($this->db->prepare('SHOW TABLE STATUS LIKE %s', $this->db->esc_like($this->name($name))));
+            $out[$name] = (string) ($rows[0]['Engine'] ?? '');
+        }
+        return $out;
+    }
+
+    public function read(string $table, array $keys, bool $lock): array
+    {
+        $keys = array_values(array_unique(array_map('strval', $keys)));
+        $out  = array_fill_keys($keys, null);
+        $tail = $lock ? ' FOR UPDATE' : '';
+        if (isset(self::META[$table])) {
+            return $this->readMeta($table, $keys, $out, $tail);
+        }
+        if ($table === 'term_relationships') {
+            return $this->readRelations($keys, $out, $tail);
+        }
+        $column = $table === 'options' ? 'option_name' : (ContentState::PK[$table] ?? '');
+        if ($column === '') {
+            throw new \InvalidArgumentException('unknown content table ' . $table);
+        }
+        $mark = $table === 'options' ? '%s' : '%d';
+        foreach (array_chunk($keys, self::CHUNK) as $chunk) {
+            $sql = 'SELECT * FROM ' . $this->quoted($table) . ' WHERE `' . $column . '` IN (' . implode(',', array_fill(0, count($chunk), $mark)) . ')' . $tail;
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                $key = (string) $row[$column];
+                // Bytegenau: was die Datenbank grosszügiger gleichsetzt (Gross/klein), meldet aliases().
+                if (array_key_exists($key, $out)) {
+                    $out[$key] = $row;
+                }
+            }
+        }
+        return $out;
+    }
+
+    public function aliases(string $table, array $keys): array
+    {
+        $keys = array_values(array_unique(array_map('strval', $keys)));
+        $out  = [];
+        if ($table === 'options') {
+            foreach (array_chunk($keys, self::PAIRS) as $chunk) {
+                $where = [];
+                foreach ($chunk as $key) {
+                    $where[] = $this->db->prepare('(`option_name` = %s AND BINARY `option_name` <> %s)', $key, $key);
+                }
+                foreach ($this->results('SELECT `option_name` AS k FROM ' . $this->quoted('options') . ' WHERE ' . implode(' OR ', $where)) as $row) {
+                    $out = array_merge($out, self::twins($chunk, '', (string) $row['k']));
+                }
+            }
+            return array_values(array_unique($out));
+        }
+        if (!isset(self::META[$table])) {
+            return [];
+        }
+        $column = self::META[$table];
+        foreach (array_chunk($keys, self::PAIRS) as $chunk) {
+            $where = [];
+            foreach ($chunk as $key) {
+                list($object, $name) = ContentState::split($key);
+                $where[] = $this->db->prepare('(`' . $column . '` = %d AND `meta_key` = %s AND BINARY `meta_key` <> %s)', $object, $name, $name);
+            }
+            $sql = 'SELECT DISTINCT `' . $column . '` AS o, `meta_key` AS k FROM ' . $this->quoted($table) . ' WHERE ' . implode(' OR ', $where);
+            foreach ($this->results($sql) as $row) {
+                $out = array_merge($out, self::twins($chunk, (string) $row['o'], (string) $row['k']));
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * Die gefragten Schlüssel, deren Zwilling $found ist: dasselbe Objekt, ohne Gross/klein gleich.
+     * Setzt die Datenbank noch mehr gleich (Akzente), gelten alle gefragten Schlüssel des Objekts.
+     *
+     * @param list<string> $asked
+     * @return list<string>
+     */
+    private static function twins(array $asked, string $object, string $found): array
+    {
+        $same = [];
+        $all  = [];
+        foreach ($asked as $key) {
+            list($o, $name) = $object === '' ? ['', $key] : ContentState::split($key);
+            if ($o !== $object) {
+                continue;
+            }
+            $all[] = $key;
+            if (strcasecmp($name, $found) === 0) {
+                $same[] = $key;
+            }
+        }
+        return $same !== [] ? $same : $all;
+    }
+
+    public function write(string $table, string $key, ?array $state): void
+    {
+        if (isset(self::META[$table])) {
+            $this->writeMeta($table, $key, $state);
+            return;
+        }
+        if ($table === 'term_relationships') {
+            $this->writeRelations($key, $state);
+            return;
+        }
+        $column = $table === 'options' ? 'option_name' : (ContentState::PK[$table] ?? '');
+        if ($column === '') {
+            throw new \InvalidArgumentException('unknown content table ' . $table);
+        }
+        // Optionen bytegenau: der Index findet die Zeile, BINARY schliesst den Zwilling aus.
+        $where = $table === 'options'
+            ? $this->db->prepare(' WHERE `option_name` = %s AND BINARY `option_name` = %s', $key, $key)
+            : $this->db->prepare(' WHERE `' . $column . '` = %d', $key);
+        if ($state === null) {
+            $this->exec('DELETE FROM ' . $this->quoted($table) . $where);
+            return;
+        }
+        unset($state['option_id']); // vergibt die Datenbank
+        $state[$column] = $key;
+        $exists         = $this->results('SELECT `' . $column . '` FROM ' . $this->quoted($table) . $where) !== [];
+        $names          = [];
+        $values         = [];
+        $sets           = [];
+        foreach ($state as $name => $value) {
+            $name     = $this->column((string) $name);
+            $literal  = $this->literal($value);
+            $names[]  = $name;
+            $values[] = $literal;
+            if ($name !== '`' . $column . '`') {
+                $sets[] = $name . ' = ' . $literal;
+            }
+        }
+        if ($exists) {
+            if ($sets !== []) {
+                $this->exec('UPDATE ' . $this->quoted($table) . ' SET ' . implode(', ', $sets) . $where);
+            }
+            return;
+        }
+        $this->exec('INSERT INTO ' . $this->quoted($table) . ' (' . implode(', ', $names) . ') VALUES (' . implode(', ', $values) . ')');
+    }
+
+    public function taxonomies(array $termIds): array
+    {
+        $out = [];
+        foreach (array_chunk(array_values(array_unique(array_map('strval', $termIds))), self::CHUNK) as $chunk) {
+            $sql = 'SELECT `term_id`, `taxonomy` FROM ' . $this->quoted('term_taxonomy')
+                . ' WHERE `term_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ') ORDER BY `term_taxonomy_id`';
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                $out[(string) $row['term_id']][] = (string) $row['taxonomy'];
+            }
+        }
+        return $out;
+    }
+
+    public function purge(string $table, string $key): void
+    {
+        switch ($table) {
+            case 'posts':
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `post_id` = %d', $key));
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `object_id` = %d', $key));
+                return;
+            case 'terms':
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('termmeta') . ' WHERE `term_id` = %d', $key));
+                return;
+            case 'term_taxonomy':
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `term_taxonomy_id` = %d', $key));
+                return;
+        }
+        throw new \InvalidArgumentException('nothing hangs on ' . $table);
+    }
+
+    public function recount(array $termTaxonomyIds): void
+    {
+        foreach (array_chunk(array_values(array_unique(array_map('strval', $termTaxonomyIds))), self::CHUNK) as $chunk) {
+            $sql = 'UPDATE ' . $this->quoted('term_taxonomy') . ' x SET x.`count` = (SELECT COUNT(*) FROM ' . $this->quoted('term_relationships')
+                . ' r WHERE r.`term_taxonomy_id` = x.`term_taxonomy_id`) WHERE x.`term_taxonomy_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ')';
+            $this->exec($this->db->prepare($sql, ...$chunk));
+        }
+    }
+
+    public function dropMeta(string $metaKey): void
+    {
+        // Erst über den Index, dann bytegenau.
+        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `meta_key` = %s AND BINARY `meta_key` = %s', $metaKey, $metaKey));
+    }
+
+    public function transaction(callable $do)
+    {
+        $this->exec('START TRANSACTION');
+        try {
+            $result = $do();
+            $this->exec('COMMIT');
+        } catch (\Throwable $e) {
+            $this->db->query('ROLLBACK');
+            throw $e;
+        }
+        return $result;
+    }
+
+    /**
+     * @param list<string>                              $keys
+     * @param array<string, array<string, mixed>|null> $out
+     * @return array<string, array<string, mixed>|null>
+     */
+    private function readMeta(string $table, array $keys, array $out, string $tail): array
+    {
+        $column = self::META[$table];
+        foreach (array_chunk($keys, self::PAIRS) as $chunk) {
+            $where = [];
+            foreach ($chunk as $key) {
+                list($object, $name) = ContentState::split($key);
+                $where[] = $this->db->prepare('(`' . $column . '` = %d AND BINARY `meta_key` = %s)', $object, $name);
+            }
+            $sql = 'SELECT `' . $column . '` AS o, `meta_key` AS k, `meta_value` AS v FROM ' . $this->quoted($table)
+                . ' WHERE ' . implode(' OR ', $where) . ' ORDER BY `meta_id`' . $tail;
+            foreach ($this->results($sql) as $row) {
+                $key = Canon::pairKey((string) $row['o'], (string) $row['k']);
+                if (array_key_exists($key, $out)) {
+                    $out[$key]['values'][] = $row['v'];
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * @param list<string>                              $keys
+     * @param array<string, array<string, mixed>|null> $out
+     * @return array<string, array<string, mixed>|null>
+     */
+    private function readRelations(array $keys, array $out, string $tail): array
+    {
+        $objects = [];
+        foreach ($keys as $key) {
+            $objects[ContentState::split($key)[0]] = true;
+        }
+        foreach (array_chunk(array_map('strval', array_keys($objects)), self::CHUNK) as $chunk) {
+            $sql = 'SELECT r.`object_id` AS o, r.`term_taxonomy_id` AS tt, r.`term_order` AS ord, x.`taxonomy` AS tax FROM '
+                . $this->quoted('term_relationships') . ' r JOIN ' . $this->quoted('term_taxonomy') . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id`'
+                . ' WHERE r.`object_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ') ORDER BY r.`object_id`, r.`term_taxonomy_id`' . $tail;
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                $key = Canon::pairKey((string) $row['o'], (string) $row['tax']);
+                if (array_key_exists($key, $out)) {
+                    $out[$key]['values'][] = $row['tt'] . ':' . $row['ord'];
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** @param array<string, mixed>|null $state */
+    private function writeMeta(string $table, string $key, ?array $state): void
+    {
+        $column = self::META[$table];
+        list($object, $name) = ContentState::split($key);
+        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted($table) . ' WHERE `' . $column . '` = %d AND BINARY `meta_key` = %s', $object, $name));
+        foreach ((array) ($state['values'] ?? []) as $value) {
+            $this->exec(
+                'INSERT INTO ' . $this->quoted($table) . ' (`' . $column . '`, `meta_key`, `meta_value`) VALUES ('
+                . $this->db->prepare('%d, %s', $object, $name) . ', ' . $this->literal($value) . ')'
+            );
+        }
+    }
+
+    /** @param array<string, mixed>|null $state */
+    private function writeRelations(string $key, ?array $state): void
+    {
+        list($object, $taxonomy) = ContentState::split($key);
+        $this->exec($this->db->prepare(
+            'DELETE r FROM ' . $this->quoted('term_relationships') . ' r JOIN ' . $this->quoted('term_taxonomy')
+            . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`object_id` = %d AND BINARY x.`taxonomy` = %s',
+            $object,
+            $taxonomy
+        ));
+        foreach ((array) ($state['values'] ?? []) as $entry) {
+            $parts = explode(':', (string) $entry);
+            $this->exec($this->db->prepare(
+                'INSERT INTO ' . $this->quoted('term_relationships') . ' (`object_id`, `term_taxonomy_id`, `term_order`) VALUES (%d, %d, %d)',
+                $object,
+                $parts[0],
+                $parts[1] ?? 0
+            ));
+        }
+    }
+
+    private function name(string $table): string
+    {
+        if (!isset($this->tables[$table])) {
+            throw new \InvalidArgumentException('unknown content table ' . $table);
+        }
+        return $this->tables[$table];
+    }
+
+    private function quoted(string $table): string
+    {
+        return '`' . $this->name($table) . '`';
+    }
+
+    /** Ein Spaltenname als Bezeichner; er kommt aus der Datenbank oder aus dem Vorher-Abbild. */
+    private function column(string $name): string
+    {
+        if (preg_match(self::NAME, $name) !== 1) {
+            throw new ContentException(ContentException::FAILED, 'Ungültiger Spaltenname.');
+        }
+        return '`' . $name . '`';
+    }
+
+    /** @param mixed $value */
+    private function literal($value): string
+    {
+        return $value === null ? 'NULL' : (string) $this->db->prepare('%s', (string) $value);
+    }
+
+    private function exec(string $sql): void
+    {
+        if ($this->db->query($sql) === false) {
+            throw new ContentException(ContentException::FAILED, 'Die Datenbank hat einen Schreibzugriff abgelehnt – nichts wurde übernommen.');
+        }
+    }
+
+    /** @return list<array<string, string|null>> */
+    private function results(string $sql): array
+    {
+        $rows = $this->db->get_results($sql, 'ARRAY_A');
+        if ((string) $this->db->last_error !== '') {
+            throw new ContentException(ContentException::FAILED, 'Die Datenbank liess sich nicht lesen.');
+        }
+        return is_array($rows) ? array_values($rows) : [];
+    }
+}

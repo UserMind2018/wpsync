@@ -31,6 +31,8 @@ final class FakeWpdb
     public $queries = [];
     /** @var (callable(string): void)|null sieht jede Abfrage, bevor sie beantwortet wird */
     public $observer = null;
+    /** @var list<mixed> jeder Wert, der durch prepare() ging */
+    public $prepared = [];
     /** @var list<array{pattern: string, results: list<mixed>, error: string|null}> */
     private $answers = [];
 
@@ -55,8 +57,9 @@ final class FakeWpdb
 
     public function prepare(string $query, ...$args): string
     {
-        return (string) preg_replace_callback('/%[sd]/', static function (array $m) use (&$args): string {
-            $value = array_shift($args);
+        return (string) preg_replace_callback('/%[sd]/', function (array $m) use (&$args): string {
+            $value            = array_shift($args);
+            $this->prepared[] = $value;
             return $m[0] === '%d' ? (string) (int) $value : "'" . addslashes((string) $value) . "'";
         }, $query);
     }
