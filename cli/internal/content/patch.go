@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/safefs"
 )
 
@@ -197,7 +198,10 @@ func rewrite(root *os.Root, name string, undo map[string]json.RawMessage, keys m
 		}
 		br := bufio.NewReaderSize(in, 1<<20)
 		for {
-			data, readErr := br.ReadBytes('\n')
+			data, readErr := agentapi.ReadLine(br, maxRecordLine)
+			if errors.Is(readErr, agentapi.ErrLineTooLong) {
+				return fmt.Errorf("%s: %w (mehr als %d Bytes)", name, readErr, maxRecordLine)
+			}
 			line := bytes.TrimRight(data, "\r\n")
 			if len(line) > 0 {
 				var rec recordLine

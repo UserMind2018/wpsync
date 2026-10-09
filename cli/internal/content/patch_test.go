@@ -3,11 +3,13 @@ package content
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/safefs"
 )
 
@@ -170,5 +172,35 @@ func TestPatchNeverWritesThroughASymlink(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(outside); string(data) != "bleibt" {
 		t.Errorf("wrote through the symlink: %q", data)
+	}
+}
+
+// Patch and Unpatch read manifest and baseline under the same bound per line as every other reader
+// of these files; a file with a longer line stays as it is.
+func TestPatchRefusesAnOverlongLine(t *testing.T) {
+	siteDir := patchSite(t)
+	h := "hneu"
+	changes := map[Key]Change{{T: "options", K: "blogname"}: {H: &h, Row: json.RawMessage(`{"option_value":"` + b64("Neu") + `"}`)}}
+	undo, err := Patch(siteDir, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Unpatch(siteDir, undo); err != nil {
+		t.Fatal(err)
+	}
+	defer func(old int) { maxRecordLine = old }(maxRecordLine)
+	maxRecordLine = 64
+	baseline := read(t, siteDir, baselineName)
+	if _, err := Patch(siteDir, changes); !errors.Is(err, agentapi.ErrLineTooLong) || !strings.Contains(err.Error(), baselineName) {
+		t.Fatalf("Patch with an overlong baseline line: %v", err)
+	}
+	if err := Unpatch(siteDir, undo); !errors.Is(err, agentapi.ErrLineTooLong) {
+		t.Fatalf("Unpatch with an overlong baseline line: %v", err)
+	}
+	if got := read(t, siteDir, baselineName); got != baseline {
+		t.Errorf("baseline changed:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(siteDir, ".wpsync", "content", baselineName+safefs.TmpSuffix)); !os.IsNotExist(err) {
+		t.Errorf("temp file left behind: %v", err)
 	}
 }
