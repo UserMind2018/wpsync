@@ -22,7 +22,7 @@ final class RescueIsolatedTest extends TestCase
         $code = proc_close($process);
         $this->assertSame(0, $code, $err . $out);
         $this->assertSame('', $err);
-        $this->assertMatchesRegularExpression('/^OK 21 classes\n\z/', $out);
+        $this->assertMatchesRegularExpression('/^OK 22 classes\n\z/', $out);
     }
 
     /** Das Skript selbst darf nichts vortäuschen: keine Konstante ABSPATH, kein Autoloader von Composer, keine Attrappe. */

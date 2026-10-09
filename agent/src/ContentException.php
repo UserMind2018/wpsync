@@ -47,6 +47,21 @@ final class ContentException extends \RuntimeException
     public const FAILED           = 'content_failed';
 
     /**
+     * Plugin-Zustand eines Pushs (Spec Content-Push P4 §4.5, A16): dieselbe Form wie die Ablehnungen
+     * des Inhaltskanals, als Antwort einer Route aber wpsync_<grund> statt wpsync_content_<grund>.
+     * Welche Einheiten es betrifft, steht unter plugins in den weiteren Feldern:
+     * [{unit, why, needs?, has?}] – nie ein Wert der Option, nie die Liste des Ziels.
+     */
+    public const PLUGINS_INVALID      = 'plugins_invalid';
+    public const PLUGINS_REQUIREMENTS = 'plugins_requirements';
+    public const PLUGINS_NOT_ALLOWED  = 'plugins_not_allowed';
+    public const PLUGINS_UNSUPPORTED  = 'plugins_unsupported';
+    /** active_plugins des Ziels ist nicht lesbar oder liess sich nicht schreiben – nichts wurde übernommen. */
+    public const PLUGINS_FAILED       = 'plugins_failed';
+    /** Ohne Umschlag für rescue.php kein Plugin-Zustand (A9); der Grund steht unter detail. */
+    public const PLUGINS_RESCUE_DB    = 'plugins_rescue_db';
+
+    /**
      * Nur zwischen ContentStore::transaction() und seinem Aufrufer: die Verbindung ging im COMMIT
      * verloren, ob er ankam, ist offen. Der Aufrufer sieht nach und macht daraus Erfolg oder
      * content_failed – dieser Grund verlässt den Agent nie.
@@ -118,19 +133,26 @@ final class ContentException extends \RuntimeException
         return new self($reason, $message, $keys, $error);
     }
 
-    /** Als Antwort einer Route: Code wpsync_content_<reason>, die Einzelheiten in den Fehlerdaten. */
+    /**
+     * Als Antwort einer Route: Code wpsync_content_<reason> – für den Plugin-Zustand
+     * wpsync_plugins_<rest> –, die Einzelheiten in den Fehlerdaten.
+     */
     public function toError(): \WP_Error
     {
         $data = $this->toArray();
         unset($data['code'], $data['message']);
-        return new \WP_Error('wpsync_content_' . $this->reason, $this->getMessage(), ['status' => $this->status()] + $data);
+        $family = strpos($this->reason, 'plugins_') === 0 ? 'wpsync_' : 'wpsync_content_';
+        return new \WP_Error($family . $this->reason, $this->getMessage(), ['status' => $this->status()] + $data);
     }
 
     public function status(): int
     {
         switch ($this->reason) {
             case self::INVALID:
+            case self::PLUGINS_INVALID:
                 return 400;
+            case self::PLUGINS_NOT_ALLOWED:
+                return 403;
             case self::TOO_LARGE:
                 return 413;
             case self::FAILED:

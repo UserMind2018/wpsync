@@ -19,7 +19,7 @@ final class RescueContent
     /** Was load() lädt, in dieser Reihenfolge – nichts sonst, kein Autoloader (§4.2). */
     public const CLASSES = [
         'Canon', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'ContentException', 'ContentStore', 'ContentState', 'ContentLists',
-        'ContentReader', 'ContentImage', 'ContentTarget', 'ContentSql', 'ContentRepair', 'ContentRollback', 'RescueSeal', 'RescueLink',
+        'ContentReader', 'ContentImage', 'ContentTarget', 'ContentSql', 'ContentRepair', 'ContentPlugins', 'ContentRollback', 'RescueSeal', 'RescueLink',
         'MysqliLink', 'RescueDb',
     ];
 
