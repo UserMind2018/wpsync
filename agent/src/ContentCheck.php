@@ -324,6 +324,10 @@ final class ContentCheck
                             $unknown[] = ContentException::key($table, $key);
                             continue 2;
                         }
+                        if ($new !== (string) $value && SerializedWalker::hasObject($new) !== false) {
+                            $unsafe[] = ContentException::key($table, $key);
+                            continue 2;
+                        }
                         if (self::hasHost((string) $value, $host) || self::hasHost($new, $host)) {
                             $local[] = ContentException::key($table, $key);
                             continue 2;

@@ -500,4 +500,31 @@ final class ContentCheckTest extends TestCase
             $this->assertStringNotContainsString('boom', $e->getMessage());
         }
     }
+
+    /** Härtung S1: auch was nach dem Einsetzen der Adresse geschrieben würde, trägt kein Objekt. */
+    public function testTheValueAsWrittenCarriesNoObjectEither(): void
+    {
+        $target         = ContentFixtures::live($this->store);
+        $target->origin = new class ($target->origin) {
+            /** @var \WpSync\ContentOrigin */
+            private $inner;
+
+            public function __construct(\WpSync\ContentOrigin $inner)
+            {
+                $this->inner = $inner;
+            }
+
+            public function insert(string $value): ?string
+            {
+                return $value === 'harmlos' ? 'O:8:"stdClass":0:{}' : $this->inner->insert($value);
+            }
+
+            public function normalize(string $value): ?string
+            {
+                return $value === 'O:8:"stdClass":0:{}' ? 'harmlos' : $this->inner->normalize($value);
+            }
+        };
+        $e = $this->refused('unsafe_value', [ContentFixtures::row('insert', 'postmeta', "219\0_x", 'absent', ['values' => ['harmlos']])], [], $target);
+        $this->assertSame([['table' => 'postmeta', 'key' => "219\0_x"]], $e->keys());
+    }
 }
