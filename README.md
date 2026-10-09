@@ -558,7 +558,9 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   beim Hoster leeren (oder `wp cache flush`).
 - **Einträge mit ungewöhnlichen Pfaden.** Hat die Hauptdatei eines Plugins Zeichen ausserhalb
   `[A-Za-z0-9._/ -]` (Klammern, Umlaute), nennt die CLI den Eintrag in der Ausgabe in
-  Anführungszeichen; in `--json` steht er unverändert. Zeigt eine Liste nicht alle Einträge (mehr
+  Anführungszeichen; in `--json` steht er unverändert – Einträge sind Daten von der Site, die der
+  Aufrufer für seine Anzeige selbst escapen muss. Einträge mit Steuer-, Bidi- oder unsichtbaren
+  Zeichen reicht die CLI gar nicht durch; sie zählen nur in `<liste>_total`. Zeigt eine Liste nicht alle Einträge (mehr
   als 100), steht daneben `<liste>_total`.
 - **`plugins_effective` kann fälschlich scheitern.** Liefert ein Plugin über die Filter
   `pre_wp_load_alloptions` oder `alloptions` eine andere Liste, oder schreibt ein gleichzeitiger

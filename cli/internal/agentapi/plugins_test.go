@@ -255,3 +255,24 @@ func TestEntriesWithUnusualCharactersAreKeptAndCounted(t *testing.T) {
 		t.Error("PluginEntry is the narrow form that is shown unquoted")
 	}
 }
+
+// Nach-Review NR-6: ein Eintrag mit Zeichen, die eine Anzeige umsteuern oder unsichtbar sind (C1, Bidi,
+// Zero-Width), geht nicht roh in --json – er wird nicht gezeigt, aber gezählt.
+func TestEntriesThatSteerADisplayAreCountedNotPassed(t *testing.T) {
+	bad := []string{"a/x‮gnp.php", "a/x\u0085y.php", "a/x​y.php", "a/x⁦y.php", "a/x" + string(rune(0xfeff)) + "y.php", "a/x‏y.php", "a/x y.php"}
+	raw, _ := json.Marshal(map[string]any{"plugins": map[string]any{"deactivated": append([]string{"gut/größe(1).php"}, bad...), "reactivated": []string{}}})
+	var n RollbackNotes
+	if err := json.Unmarshal(raw, &n); err != nil {
+		t.Fatal(err)
+	}
+	n = n.Clean()
+	if !reflect.DeepEqual(n.Plugins.Deactivated, []string{"gut/größe(1).php"}) || n.Plugins.DeactivatedTotal != 1+len(bad) {
+		t.Errorf("plugins = %+v", n.Plugins)
+	}
+	out, _ := json.Marshal(n.Plugins)
+	for _, r := range string(out) {
+		if Unsafe(r) || invisible(r) {
+			t.Errorf("json carries %U: %s", r, out)
+		}
+	}
+}

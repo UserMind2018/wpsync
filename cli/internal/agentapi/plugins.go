@@ -193,12 +193,24 @@ func agentEntry(s string) bool {
 	if len(s) > 255 || !utf8.ValidString(s) || !agentEntryRe.MatchString(s) {
 		return false
 	}
+	// What steers or hides in a display is not passed on, not even as data (Nach-Review NR-6): the agent's
+	// rule only excludes C0 controls. Such an entry is counted (…_total), not shown.
+	if strings.ContainsFunc(s, func(r rune) bool { return Unsafe(r) || invisible(r) }) {
+		return false
+	}
 	for _, seg := range strings.Split(s, "/") {
 		if seg == "" || seg == "." || seg == ".." {
 			return false
 		}
 	}
 	return true
+}
+
+// invisible reports characters that show nothing or break a line although they are no controls:
+// zero-width space, joiners and marks (U+200B–U+200F), line and paragraph separator, word joiner and
+// invisible operators (U+2060–U+2064), and the byte order mark.
+func invisible(r rune) bool {
+	return (r >= 0x200b && r <= 0x200f) || r == 0x2028 || r == 0x2029 || (r >= 0x2060 && r <= 0x2064) || r == 0xfeff
 }
 
 // cleanEntries keeps entries of active_plugins in the agent's form, at most 100; never nil.
