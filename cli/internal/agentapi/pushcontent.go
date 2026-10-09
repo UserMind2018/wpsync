@@ -37,6 +37,9 @@ type ContentLimits struct {
 	// IDHeadroom is how far above the highest id of the target a new post, term or term_taxonomy
 	// may lie (id_outside_corridor); 0 from an agent that does not name it.
 	IDHeadroom int64 `json:"id_headroom,omitempty"`
+	// MaxStateBytes bounds the rows on the target a package touches, summed (package_too_large);
+	// 0 from an agent that does not name it.
+	MaxStateBytes int64 `json:"max_state_bytes,omitempty"`
 }
 
 // ContentExtensions are the project extensions a package was built with: what it pushes beyond

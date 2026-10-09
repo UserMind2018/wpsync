@@ -33,6 +33,13 @@ final class ContentSql implements ContentStore
 
     private const META = ['postmeta' => 'post_id', 'termmeta' => 'term_id'];
 
+    /**
+     * So lange wartet eine Transaktion des Kanals höchstens auf eine Sperre (statt der 50 Sekunden,
+     * die der Server sonst vorgibt): hält jemand eine der Zeilen, endet der Push nach dieser Zeit
+     * mit content_failed, statt Request und PHP-Worker festzuhalten.
+     */
+    public const LOCK_WAIT_SECONDS = 10;
+
     /** @var object $wpdb */
     private $db;
     /** @var array<string, string> Tabelle ohne Präfix → voller Name */
@@ -394,6 +401,10 @@ final class ContentSql implements ContentStore
         $this->mark = bin2hex(random_bytes(8));
         try {
             $this->exec((string) $this->db->prepare('SET @wpsync_tx = %s', $this->mark));
+            // Ein Versuch: kennt der Server die Variable nicht oder gibt er sie nicht her, gilt seine Wartezeit.
+            $this->quiet(function (): void {
+                $this->db->query('SET SESSION innodb_lock_wait_timeout = ' . self::LOCK_WAIT_SECONDS);
+            });
             $this->exec('START TRANSACTION');
             try {
                 $result = $do();
@@ -417,6 +428,10 @@ final class ContentSql implements ContentStore
             $this->mark = null;
             $this->quiet(function (): void {
                 $this->db->query('SET @wpsync_tx = NULL');
+            });
+            // Was der Request danach fragt (Nacharbeiten, Plugins), wartet wieder wie von der Site vorgesehen.
+            $this->quiet(function (): void {
+                $this->db->query('SET SESSION innodb_lock_wait_timeout = DEFAULT');
             });
         }
     }

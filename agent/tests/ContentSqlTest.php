@@ -221,6 +221,19 @@ final class ContentSqlTest extends TestCase
         return $db;
     }
 
+    /**
+     * Die Abfragen einer Verbindung ohne das Setzen und Zurückstellen der Wartezeit auf Sperren
+     * (testATransactionBoundsItsLockWait) – was übrig bleibt, ist der Ablauf der Transaktion.
+     *
+     * @return list<string>
+     */
+    private function flow(FakeWpdb $db): array
+    {
+        return array_values(array_filter($db->queries, static function (string $sql): bool {
+            return strpos($sql, 'SET SESSION innodb_lock_wait_timeout') !== 0;
+        }));
+    }
+
     private function mark(FakeWpdb $db): string
     {
         $this->assertSame(1, preg_match("/^SET @wpsync_tx = '([a-f0-9]{16})'\\z/", $db->queries[0], $m), $db->queries[0]);
@@ -248,7 +261,7 @@ final class ContentSqlTest extends TestCase
             'COMMIT',
             'SELECT @wpsync_tx',
             'SET @wpsync_tx = NULL',
-        ], $this->db->queries, 'erst die Marke, dann die Transaktion; vor und nach dem COMMIT wird sie geprüft');
+        ], $this->flow($this->db), 'erst die Marke, dann die Transaktion; vor und nach dem COMMIT wird sie geprüft');
         $this->assertFalse($sql->alive());
 
         $this->db->queries = [];
@@ -260,7 +273,61 @@ final class ContentSqlTest extends TestCase
         } catch (\RuntimeException $e) {
             $this->assertSame('boom', $e->getMessage());
         }
-        $this->assertSame(['START TRANSACTION', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, 1));
+        $this->assertSame(['START TRANSACTION', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->flow($this->db), 1));
+    }
+
+    /**
+     * N1: eine Transaktion wartet höchstens LOCK_WAIT_SECONDS auf eine Sperre – nicht die 50 Sekunden
+     * des Servers, in denen der Request und der PHP-Worker hingen. Die Einstellung ist ein Versuch:
+     * lehnt der Server sie ab, läuft die Transaktion trotzdem. Läuft die Wartezeit ab, ist das der
+     * gewöhnliche Fehlerweg: ROLLBACK, content_failed, nichts geschrieben.
+     */
+    public function testATransactionBoundsItsLockWait(): void
+    {
+        $this->assertSame(10, ContentSql::LOCK_WAIT_SECONDS);
+        $this->db = $this->connection();
+        $sql      = $this->sql();
+        $sql->transaction(static function (): void {
+        });
+        $mark = $this->mark($this->db);
+        $this->assertSame([
+            "SET @wpsync_tx = '" . $mark . "'",
+            'SET SESSION innodb_lock_wait_timeout = 10',
+            'START TRANSACTION',
+            'SELECT @wpsync_tx',
+            'COMMIT',
+            'SELECT @wpsync_tx',
+            'SET @wpsync_tx = NULL',
+            'SET SESSION innodb_lock_wait_timeout = DEFAULT',
+        ], $this->db->queries);
+
+        // Der Server kennt die Variable nicht oder gibt sie nicht her: kein Abbruch.
+        $this->db = $this->connection();
+        $this->db->fail('/innodb_lock_wait_timeout/', 'Unknown system variable');
+        $sql = $this->sql();
+        $this->assertSame('ok', $sql->transaction(static function () use ($sql): string {
+            $sql->write('options', 'blogname', null);
+            return 'ok';
+        }));
+        $this->assertContains('COMMIT', $this->db->queries);
+        $this->assertSame([], $this->db->logged);
+
+        // Die Wartezeit läuft beim Lesen unter Sperre ab.
+        $this->db = $this->connection();
+        $this->db->fail('/FOR UPDATE\z/', 'Lock wait timeout exceeded; try restarting transaction');
+        $sql = $this->sql();
+        try {
+            $sql->transaction(static function () use ($sql): void {
+                $sql->read('posts', ['219'], true);
+                $sql->write('posts', '219', ['post_title' => 'nie']);
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertNotContains('COMMIT', $this->db->queries);
+        $this->assertSame([], preg_grep('/^(INSERT|UPDATE|DELETE)/', $this->db->queries), 'nichts geschrieben');
+        $this->assertSame(['ROLLBACK', 'SET @wpsync_tx = NULL', 'SET SESSION innodb_lock_wait_timeout = DEFAULT'], array_slice($this->db->queries, -3));
     }
 
     /** Jede schreibende Anweisung einer Transaktion trägt die Marke als Bedingung: auf einer neuen Verbindung schreibt sie nichts. */
@@ -321,7 +388,7 @@ final class ContentSqlTest extends TestCase
         }
         $this->assertFalse($alive);
         $this->assertNotContains('COMMIT', $this->db->queries);
-        $this->assertSame(['ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, -2));
+        $this->assertSame(['ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->flow($this->db), -2));
 
         // Zwischen Marke und START TRANSACTION verloren: die neue Verbindung hat eine Transaktion, aber keine Marke.
         $this->db = $this->connection('/^START TRANSACTION/');
@@ -348,7 +415,7 @@ final class ContentSqlTest extends TestCase
         } catch (ContentException $e) {
             $this->assertSame(ContentException::UNCLEAR, $e->reason());
         }
-        $this->assertSame(['COMMIT', 'SELECT @wpsync_tx', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, -3));
+        $this->assertSame(['COMMIT', 'SELECT @wpsync_tx', 'SET @wpsync_tx = NULL'], array_slice($this->flow($this->db), -3));
     }
 
     public function testAFailedWriteOrCommitEndsInRollback(): void
@@ -365,7 +432,7 @@ final class ContentSqlTest extends TestCase
             $this->assertSame(ContentException::FAILED, $e->reason());
             $this->assertStringNotContainsString('Lock wait', $e->getMessage(), 'was die Datenbank meldet, bleibt auf dem Server');
         }
-        $this->assertSame('ROLLBACK', $this->db->queries[count($this->db->queries) - 2]);
+        $this->assertSame('ROLLBACK', array_slice($this->flow($this->db), -2)[0]);
 
         $db2 = $this->connection();
         $db2->fail('/^COMMIT/', 'gone away');
@@ -374,7 +441,7 @@ final class ContentSqlTest extends TestCase
             });
             $this->fail('no exception');
         } catch (ContentException $e) {
-            $this->assertSame(['START TRANSACTION', 'SELECT @wpsync_tx', 'COMMIT', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($db2->queries, 1));
+            $this->assertSame(['START TRANSACTION', 'SELECT @wpsync_tx', 'COMMIT', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->flow($db2), 1));
         }
 
         foreach (['/^START TRANSACTION/', '/^SET @wpsync_tx = \'/'] as $failing) {

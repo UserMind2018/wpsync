@@ -44,14 +44,15 @@ final class ContentPackage
         $this->bytes = $bytes;
     }
 
-    /** @return array{max_rows: int, max_bytes: int, budget_seconds: int, id_headroom: int} was der Agent in einem Request annimmt */
+    /** @return array{max_rows: int, max_bytes: int, budget_seconds: int, id_headroom: int, max_state_bytes: int} was der Agent in einem Request annimmt */
     public static function limits(): array
     {
         return [
-            'max_rows'       => self::MAX_ROWS,
-            'max_bytes'      => self::MAX_BYTES,
-            'budget_seconds' => Budget::seconds((int) ini_get('max_execution_time')),
-            'id_headroom'    => ContentCheck::ID_HEADROOM,
+            'max_rows'         => self::MAX_ROWS,
+            'max_bytes'        => self::MAX_BYTES,
+            'budget_seconds'   => Budget::seconds((int) ini_get('max_execution_time')),
+            'id_headroom'      => ContentCheck::ID_HEADROOM,
+            'max_state_bytes'  => ContentCheck::$maxStateBytes,
         ];
     }
 

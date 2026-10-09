@@ -18,6 +18,14 @@ final class ContentCheck
     public const ID_HEADROOM = 1000000;
     /** Darüber ist eine ID in JSON und JavaScript keine genaue Zahl mehr (2^53 − 1). */
     public const MAX_ID = 9007199254740991;
+    /**
+     * So viele Bytes dürfen die Zustände des Ziels zusammen haben, die eine Prüfung liest – das
+     * Vorher-Abbild des Pushs. Das Paket selbst ist begrenzt, die Zeilen, die es trifft, nicht.
+     */
+    public const MAX_STATE_BYTES = 67108864;
+
+    /** @var int die geltende Grenze; nur Tests setzen sie herab */
+    public static $maxStateBytes = self::MAX_STATE_BYTES;
 
     /** Optionen, deren Wert die ID eines Beitrags ist (Studio §5.1, W7). */
     private const POST_OPTIONS = ['page_on_front', 'page_for_posts', 'site_icon', 'elementor_active_kit'];
@@ -147,7 +155,7 @@ final class ContentCheck
         }
     }
 
-    /** Liest den Zustand jedes Schlüssels und der Objekte, auf die das Paket verweist. */
+    /** Liest den Zustand jedes Schlüssels und der Objekte, auf die das Paket verweist – in der Summe begrenzt (N1). */
     private function load(bool $lock): void
     {
         $keys = array_fill_keys(ContentState::ORDER, []);
@@ -178,11 +186,39 @@ final class ContentCheck
         $keys['terms']       = array_merge($keys['terms'], $terms);
         $keys['options'][]   = 'stylesheet';
         $this->state         = [];
+        $bytes               = 0;
         foreach (ContentState::ORDER as $table) {
             $wanted              = array_values(array_unique(array_map('strval', $keys[$table])));
             $this->state[$table] = $wanted === [] ? [] : $this->target->store->read($table, $wanted, $lock);
+            // Nach jeder Tabelle: was bis hier gelesen ist, steht schon im Speicher des Requests.
+            $bytes += self::bytes($this->state[$table]);
+            if ($bytes > self::$maxStateBytes) {
+                throw new ContentException(
+                    ContentException::TOO_LARGE,
+                    'Die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen zu gross für einen Push – in mehreren Pushes übertragen.',
+                    [],
+                    ['limits' => ContentPackage::limits(), 'state_bytes' => $bytes]
+                );
+            }
         }
         $this->termTaxonomies = $this->target->store->taxonomies(array_map('strval', array_keys($this->state['terms'])));
+    }
+
+    /**
+     * Bytes der Werte gelesener Rohzustände.
+     *
+     * @param array<string, array<string, mixed>|null> $states
+     */
+    private static function bytes(array $states): int
+    {
+        $bytes = 0;
+        foreach ($states as $state) {
+            // Ein Paar oder eine Menge von Zuordnungen trägt values, eine Zeile ihre Spalten.
+            foreach (is_array($state['values'] ?? null) ? $state['values'] : (array) $state as $value) {
+                $bytes += is_string($value) ? strlen($value) : 0;
+            }
+        }
+        return $bytes;
     }
 
     /** Nr. 4: jede Zeile gegen die Listen des Agents; das Objekt kommt vom Ziel oder aus dem Paket. */

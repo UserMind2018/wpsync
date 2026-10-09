@@ -663,7 +663,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `package_invalid` | Form, Prüfsumme, Zeilenende, doppelter Schlüssel, Platzhalter in unbekannter Form, Sprung in den Papierkorb ohne `op: trash`, `row` eines `trash` mit anderem als `post_date` und `post_date_gmt`, eine Zeile für `_wp_trash_meta_status`, `_wp_trash_meta_time` oder `_wp_desired_post_slug` an einem Beitrag mit `op: trash` |
 | `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
 | `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
-| `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB) – in mehreren Pushes übertragen |
+| `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB), oder die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen grösser als `limits.max_state_bytes` (64 MB; `error.state_bytes` nennt die Summe) – in mehreren Pushes übertragen |
 | `engine_unsupported` | eine betroffene Tabelle ist nicht InnoDB, oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
 | `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
 | `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
@@ -772,6 +772,10 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
 - **Staging:** dieselben Abdrücke gelten auf der Kopie; der Agent schreibt nur in ihre Tabellen
   und setzt ihre Adressen ein. Nacharbeiten gibt es dort nur, soweit sie sich mit SQL und Dateien
   sagen lassen. `staging refresh` und `staging delete` verwerfen ein dort angewandtes Paket.
+- **Sperren:** Die Transaktion liest jede betroffene Zeile mit Sperre. Sie wartet dabei höchstens
+  10 Sekunden auf eine Sperre, die jemand anderes hält (`innodb_lock_wait_timeout` der Sitzung,
+  soweit der Server es zulässt; danach gilt wieder der Wert der Site). Läuft die Zeit ab, endet
+  der Push mit `content_failed` – nichts ist geschrieben, Code und Uploads gehen zurück.
 - **Grenzen:** Kein Multisite, nur InnoDB, eine Datenbankverbindung: Lesen unter Sperre und
   Schreiben müssen auf demselben Server landen. Mit Drop-ins, die Abfragen auf mehrere Server
   verteilen, ist das nicht garantiert – HyperDB und LudicrousDB lehnt der Agent ab

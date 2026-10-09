@@ -57,6 +57,24 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertTrue($result['changes']['rewrite']);
     }
 
+    /** N1: sind die Vorher-Zustände zu gross, wird nichts geschrieben – auch kein before.json. */
+    public function testNothingIsWrittenWhenTheStatesAreTooLarge(): void
+    {
+        $old = $this->store->data;
+        \WpSync\ContentCheck::$maxStateBytes = 100;
+        try {
+            $this->apply($this->rows());
+            $this->fail('no exception');
+        } catch (\WpSync\ContentException $e) {
+            $this->assertSame('package_too_large', $e->reason());
+        } finally {
+            \WpSync\ContentCheck::$maxStateBytes = \WpSync\ContentCheck::MAX_STATE_BYTES;
+        }
+        $this->assertSame($old, $this->store->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+        $this->assertFileDoesNotExist($this->dir . '/before.json');
+    }
+
     /** Hilfsprüfung: ein anderer Öffner landet im neuen Beitrag. */
     private function applyAuthor(): string
     {

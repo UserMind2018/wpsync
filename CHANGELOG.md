@@ -142,6 +142,12 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Begin und im `plan`-Ereignis, `units[].extensions` an der Einheit `content` in
   `wpsync pushes --json` (ohne `--json` hinter der Einheit) und in der Liste der Pushes im
   WP-Admin. Das Feld fehlt, wenn das Paket keine nennt
+- Agent: Eine Transaktion des Inhaltskanals wartet höchstens 10 Sekunden auf eine fremde Sperre
+  (`SET SESSION innodb_lock_wait_timeout`, ein Versuch; danach wieder der Wert der Site) – läuft
+  die Zeit ab, endet der Push mit `content_failed`, nichts ist geschrieben. Und was die Prüfung
+  vom Ziel liest (das Vorher-Abbild), ist in der Summe auf `limits.max_state_bytes` (64 MB)
+  begrenzt, im Probelauf wie beim Anwenden: sonst `package_too_large` mit `error.state_bytes`,
+  bevor etwas geschrieben wird
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

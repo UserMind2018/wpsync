@@ -417,6 +417,35 @@ final class ContentCheckTest extends TestCase
         $this->check([ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => ['5:0']])], [], $target)->run();
     }
 
+    /**
+     * N1: was die Prüfung vom Ziel liest – die Vorher-Zustände, die später in before.json stehen –,
+     * ist in der Summe begrenzt: ein kleines Paket kann sonst Zeilen beliebiger Grösse treffen und
+     * den Speicher des Requests füllen. Im Probelauf dieselbe Ablehnung, und nichts wird geschrieben.
+     */
+    public function testTheStatesReadFromTheTargetAreBounded(): void
+    {
+        $this->assertSame(67108864, ContentCheck::MAX_STATE_BYTES);
+        $this->store->data['postmeta']["219\0_elementor_data"] = ['values' => [str_repeat('x', 3000)]];
+        $rows = [
+            $this->updatePost(),
+            ContentFixtures::row('update', 'postmeta', "219\0_elementor_data", $this->h('postmeta', "219\0_elementor_data"), ['values' => ['[]']]),
+        ];
+        $this->check($rows)->run();
+        ContentCheck::$maxStateBytes = 2000;
+        try {
+            $e = $this->refused('package_too_large', $rows);
+            $this->assertSame(413, $e->status());
+            $data = $e->toArray();
+            $this->assertSame(2000, $data['limits']['max_state_bytes']);
+            $this->assertGreaterThan(3000, $data['state_bytes']);
+            $this->assertArrayNotHasKey('keys', $data);
+            $this->assertSame(2000, ContentPackage::limits()['max_state_bytes']);
+        } finally {
+            ContentCheck::$maxStateBytes = ContentCheck::MAX_STATE_BYTES;
+        }
+        $this->assertSame(ContentCheck::MAX_STATE_BYTES, ContentPackage::limits()['max_state_bytes']);
+    }
+
     /** AC-151: der Konflikt nennt alle abweichenden Schlüssel, nicht nur den ersten. */
     public function testConflictNamesEveryKey(): void
     {
