@@ -461,7 +461,10 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
   Commit, vor dem Tausch – der mitgeschickte Kopf entscheidet nichts.
 - **Wer.** Nur in einem Push-Fenster, das ein Benutzer mit dem Recht `activate_plugins` im WP-Admin
   geöffnet hat – ein per WP-CLI geöffnetes Fenster oder ein Öffner ohne das Recht ergibt
-  `plugins_not_allowed`. Keine Multisite (`plugins_unsupported`).
+  `plugins_not_allowed`. Keine Multisite (`plugins_unsupported`). Dasselbe Recht braucht, wer einen
+  **bestätigten** Push zurücknimmt, der Plugins geschaltet hat – der Öffner des Fensters bei
+  `wpsync rollback`, der angemeldete Benutzer auf der Admin-Seite (dort fehlt der Knopf sonst). Ein
+  unbestätigter Push geht immer zurück: das ist der Notfallweg, den auch `rescue.php` geht.
 - **Der Rückweg ist Pflicht.** Ein Plugin, das beim Laden wirft, legt WordPress lahm – zurückdrehen
   lässt sich das nur über die Datenbank, ohne WordPress. Ein Satz mit `--activate` oder
   `--deactivate` geht deshalb nur raus, wenn `rescue.php` den Umschlag hat

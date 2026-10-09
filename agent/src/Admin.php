@@ -66,7 +66,7 @@ final class Admin
                 self::closeWindow($keyId);
                 self::notice('success', 'Push-Fenster geschlossen.');
             } elseif ($action === 'rollback' && isset($_POST['push_id'])) {
-                $result = Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST['push_id'])));
+                $result = Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST['push_id'])), get_current_user_id());
                 if ($result instanceof \WP_Error) {
                     self::notice('error', $result->get_error_message());
                 } else {
@@ -170,7 +170,9 @@ final class Admin
                             </td>
                             <td><?php echo esc_html((self::STATUS[$push['status']] ?? $push['status']) . ($push['forced'] ? ' (--force)' : '')); ?></td>
                             <td>
-                                <?php if (!$push['pruned'] && in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) : ?>
+                                <?php if (!$push['pruned'] && in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true) && !self::mayRollBack($push, get_current_user_id())) : ?>
+                                    <em>Zurückrollen schaltet Plugins – nur mit dem Recht „Plugins aktivieren“.</em>
+                                <?php elseif (!$push['pruned'] && in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) : ?>
                                     <form method="post">
                                         <?php wp_nonce_field('wpsync_admin'); ?>
                                         <input type="hidden" name="wpsync_action" value="rollback">
@@ -202,6 +204,18 @@ final class Admin
         }
         Store::setPushUntil($keyId, PushWindow::until($seconds, time()), $userId > 0 ? $userId : null);
         return true;
+    }
+
+    /**
+     * Darf dieser Benutzer den Push auf der Admin-Seite zurückrollen? Die Seite verlangt manage_options;
+     * nimmt die Rücknahme eines bestätigten Pushs Plugins aus der Liste oder bringt sie welche zurück,
+     * braucht er dazu activate_plugins (Security-Review P4 S1) – sonst bietet die Seite den Knopf nicht an.
+     *
+     * @param array<string, mixed> $push
+     */
+    public static function mayRollBack(array $push, int $userId): bool
+    {
+        return !Push::switchesBack($push) || PushPlugins::allowed($userId);
     }
 
     public static function closeWindow(string $keyId): void

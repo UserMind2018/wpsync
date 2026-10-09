@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use WpSync\Admin;
 use WpSync\Push;
+use WpSync\PushPlugins;
 use WpSync\PushRescue;
 use WpSync\Store;
 
@@ -262,5 +263,82 @@ final class PushPluginsRollbackTest extends PushPluginsFlowCase
         $this->assertSame(['ok' => true, 'status' => 'rolled_back'], $this->ok(Push::rollback(['push_id' => $id], self::KEY))->data);
         $this->assertSame($stands, $this->liveDb->data);
         $this->assertSame([], $this->liveDb->log);
+    }
+
+    /**
+     * Security-Review P4 S1: A12 gilt auch für die Rücknahme eines BESTÄTIGTEN Pushs, der die Liste
+     * geändert hat – sie schaltet Plugins in beide Richtungen. Ohne Öffner mit activate_plugins: 403,
+     * kein Byte der Liste ändert sich, Code und Push bleiben.
+     */
+    public function testRollingBackAConfirmedPushNeedsAnOpenerWhoMaySwitchPlugins(): void
+    {
+        $id = $this->pushed();
+        $this->ok(Push::confirm(['push_id' => $id], self::KEY));
+        $stands            = $this->liveDb->data;
+        $this->liveDb->log = [];
+
+        foreach ([null, 8] as $opener) { // ein per WP-CLI geöffnetes Fenster; ein Öffner ohne das Recht
+            Store::$opener = $opener;
+            $error = $this->assertRefused('wpsync_plugins_not_allowed', 403, Push::rollback(['push_id' => $id], self::KEY));
+            $this->assertStringContainsString('activate_plugins', $error->message);
+        }
+        $this->assertSame($stands, $this->liveDb->data, 'die Liste Byte für Byte wie zuvor');
+        $this->assertSame([], $this->liveDb->log);
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame('confirmed', Store::getPush($id)['status']);
+
+        Store::$opener = 7;
+        $data = $this->ok(Push::rollback(['push_id' => $id], self::KEY))->data;
+        $this->assertSame(['deactivated' => ['kunde/kunde.php'], 'reactivated' => ['old/old.php']], $data['plugins']);
+    }
+
+    /** S1: der UNBESTÄTIGTE Push bleibt ausgenommen – der Notfallweg fragt nicht nach dem Öffner (wie rescue.php). */
+    public function testAnUnconfirmedPushGoesBackWithoutAnOpener(): void
+    {
+        $old = $this->liveDb->data;
+        $id  = $this->pushed();
+        Store::$opener    = null;
+        PushPlugins::$can = static function (): bool {
+            return false;
+        };
+        $data = $this->ok(Push::rollback(['push_id' => $id], self::KEY))->data;
+        $this->assertSame(['deactivated' => ['kunde/kunde.php'], 'reactivated' => ['old/old.php']], $data['plugins']);
+        $this->assertSame($old, $this->liveDb->data);
+    }
+
+    /** S1: ein bestätigter Push, der an der Liste nichts geändert hat, schaltet bei der Rücknahme auch nichts – kein Recht nötig. */
+    public function testAConfirmedPushWithoutADeltaNeedsNoOpener(): void
+    {
+        $units = ['plugins/akismet' => ['akismet.php' => "<?php\n/* Plugin Name: Akismet\n * Version: 5.3 */\n"]];
+        list($id, $commit) = $this->pushSet($units, $this->wish(['plugins/akismet'], [], $units));
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $id], self::KEY));
+        Store::$opener = null;
+        $this->assertSame('rolled_back', $this->ok(Push::rollback(['push_id' => $id], self::KEY))->data['status']);
+    }
+
+    /** S1: die Admin-Seite – wer den Knopf drückt, braucht activate_plugins; sonst wird er gar nicht angeboten. */
+    public function testTheAdminPageRollsAConfirmedPluginPushBackOnlyForWhoMaySwitchPlugins(): void
+    {
+        $id = $this->pushed();
+        $this->ok(Push::confirm(['push_id' => $id], self::KEY));
+        $stands = $this->liveDb->data;
+        $push   = Store::getPush($id);
+
+        $this->assertFalse(Admin::mayRollBack($push, 8));
+        $this->assertFalse(Admin::mayRollBack($push, 0));
+        $this->assertTrue(Admin::mayRollBack($push, 7));
+        $this->assertRefused('wpsync_plugins_not_allowed', 403, Push::rollbackPush($id, 8));
+        $this->assertRefused('wpsync_plugins_not_allowed', 403, Push::rollbackPush($id), 'ohne Angabe: niemand');
+        $this->assertSame($stands, $this->liveDb->data);
+        $this->assertSame('rolled_back', $this->ok(Push::rollbackPush($id, 7))->data['status']);
+
+        // Ein unbestätigter Push und ein Push ohne Plugin-Zustand: wie bisher jeder Administrator der Seite.
+        $open = $this->pushed();
+        $this->assertTrue(Admin::mayRollBack(Store::getPush($open), 8));
+        $this->assertSame('rolled_back', $this->ok(Push::rollbackPush($open, 8))->data['status']);
+        $source = (string) file_get_contents(__DIR__ . '/../src/Admin.php');
+        $this->assertStringContainsString('self::mayRollBack($push, get_current_user_id())', $source, 'der Knopf hängt an derselben Regel');
+        $this->assertStringContainsString('Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST[\'push_id\'])), get_current_user_id())', $source);
     }
 }

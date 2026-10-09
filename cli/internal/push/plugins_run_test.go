@@ -802,3 +802,18 @@ func TestRunToStagingNamesTheSwitchesForLive(t *testing.T) {
 		t.Errorf("output misses %q:\n%s", want, out)
 	}
 }
+
+// Security-Review P4 S1: lehnt der Agent die Rücknahme eines bestätigten Pushs ab, weil der Öffner des
+// Fensters keine Plugins schalten darf, ist das plugins_not_allowed (Exit 1) – nie der Umweg über rescue.php.
+func TestRollbackRefusedForWantOfTheRightToSwitchPlugins(t *testing.T) {
+	f, o, _, out := pluginPushed(t)
+	f.rollback, f.rbCode = 403, "wpsync_plugins_not_allowed"
+	err := Rollback(o, testID)
+	var pe *PluginsError
+	if !errors.As(err, &pe) || pe.Reason != "plugins_not_allowed" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "rollback" {
+		t.Errorf("routes = %s", got)
+	}
+}

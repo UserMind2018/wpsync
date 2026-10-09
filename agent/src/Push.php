@@ -1003,15 +1003,21 @@ final class Push
                 403
             );
         }
-        return self::rollbackPush($push['push_id']);
+        // Wer das Fenster geöffnet hat, verantwortet auch, was die Rücknahme an der Liste der Plugins schaltet (A12).
+        return self::rollbackPush($push['push_id'], Store::pushOpener($keyId));
     }
 
     /**
      * Ohne Fensterprüfung – auch für die Admin-Seite, deren Administratoren vertrauenswürdig sind.
      *
+     * @param int|null $actor wer die Rücknahme verantwortet: der Öffner des Push-Fensters bzw. der Benutzer der
+     *        Admin-Seite. Nimmt die Rücknahme eines BESTÄTIGTEN Pushs Plugins aus der Liste oder bringt sie welche
+     *        zurück, braucht er das Recht activate_plugins (Spec Content-Push P4 A12; Security-Review P4 S1) – wie
+     *        beim Push selbst. Ein unbestätigter Push bleibt davon ausgenommen: das ist der Notfallweg, den auch
+     *        rescue.php geht. null: niemand
      * @return \WP_REST_Response|\WP_Error
      */
-    public static function rollbackPush(string $pushId)
+    public static function rollbackPush(string $pushId, ?int $actor = null)
     {
         self::sync();
         $push = Store::getPush($pushId);
@@ -1024,6 +1030,9 @@ final class Push
         if ($push['status'] !== PushRescue::ROLLED_BACK) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 return self::error('wpsync_push_state', 'Für diesen Push gibt es keinen Snapshot (Status ' . $push['status'] . ').', 409);
+            }
+            if (self::switchesBack($push) && !PushPlugins::allowed($actor)) {
+                return PushPlugins::refuse(ContentException::PLUGINS_NOT_ALLOWED, PushPlugins::ROLLBACK_NOT_ALLOWED_TEXT)->toError();
             }
             $dirs = self::dirs($push['target']);
             if ($dirs instanceof \WP_Error) {
@@ -1042,6 +1051,27 @@ final class Push
             }
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
+    }
+
+    /**
+     * Schaltet die Rücknahme dieses Pushs Plugins, und zwar ausserhalb des Notfallwegs? Ja für einen
+     * bestätigten Push, dessen Commit an der Liste etwas geändert hat (Einheit plugins des Protokolls:
+     * activated, deactivated). Für einen unbestätigten Push fragt niemand nach dem Recht (S1).
+     *
+     * @param array<string, mixed> $push
+     */
+    public static function switchesBack(array $push): bool
+    {
+        if (($push['status'] ?? '') !== PushRescue::CONFIRMED) {
+            return false;
+        }
+        foreach ((array) ($push['units'] ?? []) as $unit) {
+            if (is_array($unit) && ($unit['path'] ?? '') === PushPlugins::UNIT
+                && ((array) ($unit['activated'] ?? []) !== [] || (array) ($unit['deactivated'] ?? []) !== [])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

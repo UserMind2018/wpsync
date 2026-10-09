@@ -42,6 +42,7 @@ final class PushPlugins
 
     public const NOT_ALLOWED_TEXT = 'Plugins schaltet ein Push nur, wenn ein Benutzer mit dem Recht activate_plugins das Push-Fenster im WP-Admin geöffnet hat – nicht per WP-CLI.';
     public const NO_ENVELOPE_TEXT = 'Ein Push, der Plugins schaltet, braucht die Notfall-Rücknahme ohne WordPress: ohne Umschlag (rescue.sealed) wird nichts getauscht.';
+    public const ROLLBACK_NOT_ALLOWED_TEXT = 'Die Rücknahme dieses bestätigten Pushs schaltet Plugins: das geht nur, wenn ein Benutzer mit dem Recht activate_plugins das Push-Fenster im WP-Admin geöffnet hat oder ihn dort selbst zurückrollt – nicht per WP-CLI.';
 
     /** @var array{php: string, wp: string, multisite: bool}|null für Tests: das Ziel anstelle von site() */
     public static $site = null;

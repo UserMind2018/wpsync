@@ -23,6 +23,9 @@ Agent ≥ 0.9.0 wie bisher.
   Commit vor dem Tausch, an der gebauten Datei
 - Nur in einem Push-Fenster, das ein Benutzer mit `activate_plugins` im WP-Admin geöffnet hat
   (`plugins_not_allowed` sonst); nie `plugins/wpsync-agent`, kein Theme, nicht `mu-plugins` (Exit 2)
+- Die Rücknahme eines **bestätigten** Pushs, der Plugins geschaltet hat, braucht dasselbe Recht
+  (`plugins_not_allowed` sonst; auf der Admin-Seite fehlt der Knopf); ein unbestätigter Push geht
+  immer zurück
 - Rücknahme der Liste als **Delta** des authentisierten Vorher-Abbilds – über den Agent und über
   `rescue.php` ohne WordPress; fremde Änderungen an der Liste bleiben und sperren nichts
 - Der Health-Check prüft zusätzlich `wp-admin/admin-ajax.php` (Plugins im Admin-Kontext)

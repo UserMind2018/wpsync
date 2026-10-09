@@ -216,7 +216,7 @@ func Rollback(o Options, pushID string) error {
 		if errors.As(err, &apiErr) && apiErr.Code != "" && apiErr.Status < 500 {
 			// The agent answered and refused: superseded, pruned, not ours – or rows of the push changed
 			// since (changed_since_push): then nothing is taken back, and never through rescue.php.
-			return contentError(agentError(target, err))
+			return pluginsError(contentError(agentError(target, err)))
 		}
 		// WordPress does not answer – the reason this script exists.
 		if jerr != nil {
