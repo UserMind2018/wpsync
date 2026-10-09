@@ -78,6 +78,9 @@ type Failure struct {
 	Reason string `json:"reason,omitempty"`
 	// Path: with reason not_readable the file or folder, relative to the docroot.
 	Path string `json:"path,omitempty"`
+	// SkippedNew: with reason nothing_to_push the local units that are new and were not named
+	// (Spec Content-Push §10, S7); left out when there are none.
+	SkippedNew []string `json:"skipped_new,omitempty"`
 	// Device and AdminURL: with exit 40 whose push window it is (as far as pair stored it) and
 	// where an administrator opens it (Spec Container-Push C8).
 	Device   string `json:"device,omitempty"`
@@ -137,6 +140,10 @@ func Classify(err error) Failure {
 	if f.Reason == "not_readable" && errors.As(err, &unreadable) {
 		f.Path = unreadable.Path
 	}
+	var skipped *push.SkippedNewError
+	if f.Reason == "nothing_to_push" && errors.As(err, &skipped) {
+		f.SkippedNew = append([]string{}, skipped.Units...)
+	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
 		f.Device, f.AdminURL = window.Device, window.AdminURL
@@ -181,6 +188,10 @@ func reason(err error, exit int) string {
 		return "local_changed"
 	case errors.Is(err, push.ErrTargetMismatch):
 		return "target_mismatch"
+	case errors.Is(err, push.ErrUploadExists), code == "wpsync_upload_exists":
+		return "upload_exists"
+	case errors.Is(err, push.ErrUploadTypeBlocked), code == "wpsync_upload_type_blocked":
+		return "upload_type_blocked"
 	}
 	return ""
 }
@@ -208,7 +219,7 @@ func classify(err error) int {
 		return ExitUnknown
 	case errors.Is(err, syscall.ENOSPC):
 		return ExitDiskFull
-	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging):
+	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging), errors.Is(err, push.ErrAgentNoUploads):
 		return ExitAgentOutdated
 	case errors.As(err, &postSetup):
 		return ExitPostSetupFailed

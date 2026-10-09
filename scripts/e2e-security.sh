@@ -169,10 +169,29 @@ check AC-50 "ohne Fenster entsteht kein Push" "$(pushes "1=1")" 0
 
 check AC-59 "der Agent selbst ist keine Einheit" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/wpsync-agent main.php)")")" 400
 check AC-59 "Einheit mit .. abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/../x main.php)")")" 400
-check AC-59 "uploads ist keine Einheit" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit uploads/2026 main.php)")")" 400
+# „uploads“ allein ist ab Agent 0.6.0 eine Einheit (AC-142 unten), ein Unterordner nie.
+check AC-59 "uploads/2026 ist keine Einheit" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit uploads/2026 main.php)")")" 400
 check AC-59 "Datei mit .. abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit plugins/sec-push ../x.php)")")" 400
 check AC-59 "Mail-Riegel in mu-plugins abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit mu-plugins 00-local-mailguard.php)")")" 400
 check AC-59 "wpsync-Datei in mu-plugins abgelehnt" "$(pcode /wpsync/v1/push/begin "$(begin true "$(unit mu-plugins wpsync-loader.php)")")" 400
+
+echo "== P1/AC-142: Uploads – Dateityp- und Pfadsperre"
+uunit() { printf '{"path":"uploads","base":{},"files":{"%s":{"size":%d,"sha256":"%s","mtime":1700000000}}}' "$1" "${#CONTENT}" "$SHA"; }
+ucode() { signed /wpsync/v1/push/begin "$(begin "$1" "$(uunit "$2")")" | field '["code"]'; } # ucode <dry> <pfad>
+for name in 2026/10/x.php 2026/10/x.PHP 2026/10/x.phtml 2026/10/x.phar 2026/10/x.php7 2026/10/x.pht \
+  2026/10/bild.php.jpg .htaccess 2026/10/.htaccess .user.ini 2026/10/.versteckt.jpg 2026/10/x.svg 2026/10/x.exe 2026/10/x.html; do
+  check AC-142 "$name abgelehnt" "$(ucode true "$name")" wpsync_upload_type_blocked
+done
+check AC-142 "erlaubter Typ im Probelauf" "$(pcode /wpsync/v1/push/begin "$(begin true "$(uunit 2026/10/bild.jpg)")")" 200
+check AC-142 "Pfad mit .. abgelehnt" "$(ucode true ../x.jpg)" wpsync_upload_path
+check AC-142 "Pfad in einen Push-Arbeitsordner abgelehnt" "$(ucode true wpsync-push-0123456789abcdef/a.jpg)" wpsync_upload_path
+window "$KEY" "time() + 900"
+res="$(signed /wpsync/v1/push/begin "$(begin false "$(uunit 2026/10/e2e-sec-bild.jpg)")")"
+PUSH="$(printf %s "$res" | field '["push_id"]')"
+check AC-142 "PHP-Inhalt als .jpg beim Upload abgelehnt" "$(signed /wpsync/v1/push/upload "$(upload 2026/10/e2e-sec-bild.jpg "$B64")" | field '["code"]')" wpsync_upload_type_blocked
+check AC-142 "Commit ohne Datei bricht ab" "$(pcode /wpsync/v1/push/commit "$(byid)")" 409
+check AC-142 "nichts unter uploads" "$([ -e "$WPC/uploads/2026/10/e2e-sec-bild.jpg" ] && echo da || echo weg)" weg
+window "$KEY" 0
 
 window "$KEY" "time() + 900"
 res="$(signed /wpsync/v1/push/begin "$(begin false "$(unit plugins/sec-push main.php)")")"

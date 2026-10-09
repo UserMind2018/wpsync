@@ -119,11 +119,27 @@ final class Push
         self::sync();
         self::prune($now);
 
-        $plans      = [];
-        $conflicted = [];
-        $readonly   = [];
-        $bytes      = 0;
+        $plans       = [];
+        $conflicted  = [];
+        $readonly    = [];
+        $upConflicts = [];
+        $bytes       = 0;
         foreach ($units as $unit) {
+            if ($unit['path'] === PushUploads::UNIT) {
+                $upPlan = self::uploadsPlan($target, $content, $unit);
+                if ($upPlan instanceof \WP_Error) {
+                    return $upPlan;
+                }
+                $plans[]     = $upPlan;
+                $upConflicts = $upPlan['conflicts'];
+                if (!$upPlan['writable']) {
+                    $readonly[] = $unit['path'];
+                }
+                foreach ($upPlan['need'] as $rel) {
+                    $bytes += $unit['files'][$rel]['size'];
+                }
+                continue;
+            }
             $dir = $content . '/' . $unit['path'];
             if (!self::confined($target, $content, $dir)) {
                 return self::error('wpsync_push_unit', 'Einheit liegt nicht im wp-content des Ziels: ' . $unit['path'], 400);
@@ -179,6 +195,13 @@ final class Push
         if ($pending !== null) {
             return self::error('wpsync_push_pending', 'Push ' . $pending['push_id'] . ' ist getauscht, aber nicht bestätigt.', 409);
         }
+        // Ein Push ersetzt nie eine Datei unter uploads – auch nicht mit force (Spec Content-Push §8.2, W3).
+        if ($upConflicts !== []) {
+            $shown = array_map(static function (string $rel): string {
+                return self::printable($rel);
+            }, array_slice($upConflicts, 0, 10));
+            return self::error('wpsync_upload_exists', 'Auf dem Ziel liegt am selben Pfad eine andere Datei: ' . implode(', ', $shown), 409);
+        }
         if ($conflicted !== [] && empty($params['force'])) {
             return self::error('wpsync_push_conflict', 'Auf dem Server seit dem letzten Pull geändert: ' . implode(', ', $conflicted), 409);
         }
@@ -191,7 +214,11 @@ final class Push
         }
         $work = self::workDir($content);
         foreach ($units as $unit) {
-            if (!PushSwap::probe($work, dirname($content . '/' . $unit['path']))) {
+            // uploads: die Dateien kommen in den Ordner selbst – fehlt er, nach wp-content.
+            $parent = $unit['path'] === PushUploads::UNIT && is_dir($content . '/' . PushUploads::UNIT)
+                ? $content . '/' . PushUploads::UNIT
+                : dirname($content . '/' . $unit['path']);
+            if (!PushSwap::probe($work, $parent)) {
                 return self::error('wpsync_push_perms', 'Verzeichnisse lassen sich nicht umbenennen (Rechte oder anderes Dateisystem): ' . dirname($unit['path']), 409);
             }
         }
@@ -209,7 +236,7 @@ final class Push
                 'path'        => $unit['path'],
                 'files'       => $unit['files'],
                 'need'        => $plans[$i]['need'],
-                'carried'     => $plans[$i]['exists'] ? PushManifest::carried($dir, $unit['path']) : [],
+                'carried'     => $plans[$i]['exists'] && $unit['path'] !== PushUploads::UNIT ? PushManifest::carried($dir, $unit['path']) : [],
                 'exists'      => $plans[$i]['exists'],
                 'old_version' => $plans[$i]['version'],
             ];
@@ -239,6 +266,7 @@ final class Push
                 'forced'  => empty($params['force']) ? 0 : 1,
                 'units'   => (string) wp_json_encode($summary),
                 'created' => $now,
+                'opened_by' => Store::pushOpener($keyId),
             ]);
         if (!$stored) {
             PushSwap::remove($work . '/' . $pushId);
@@ -308,6 +336,11 @@ final class Push
                 @unlink($to);
                 return self::error('wpsync_push_hash', 'Inhalt passt nicht zum Manifest: ' . $rel, 400);
             }
+            // Erst jetzt liegt der Inhalt vor: er muss zur Endung passen (Spec Content-Push §8.3).
+            if ($unit['path'] === PushUploads::UNIT && !PushUploads::allowedContent($to, $rel)) {
+                @unlink($to);
+                return self::error('wpsync_upload_type_blocked', 'Inhalt passt nicht zum Dateityp: ' . self::printable($rel), 400);
+            }
             touch($to, (int) $want['mtime']);
             $received++;
         }
@@ -343,6 +376,15 @@ final class Push
         try {
             for (; $u < count($plan['units']); $u++, $i = 0) {
                 $unit = $plan['units'][$u];
+                if ($unit['path'] === PushUploads::UNIT) {
+                    // Kein neues Verzeichnis: jede Datei kommt einzeln an ihren Platz, nach rescue.json.
+                    foreach ($unit['need'] as $rel) {
+                        if (!is_file($base . '/stage/' . $u . '/' . $rel)) {
+                            throw new \RuntimeException('not uploaded: uploads/' . self::printable((string) $rel));
+                        }
+                    }
+                    continue;
+                }
                 if ($i === 0) {
                     foreach ($unit['need'] as $rel) {
                         if (!is_file($base . '/stage/' . $u . '/' . $rel)) {
@@ -359,6 +401,18 @@ final class Push
             }
             // Der Cursor kommt vom Client: vor dem Tausch muss jede Manifest-Datei wirklich liegen.
             foreach ($plan['units'] as $n => $unit) {
+                if ($unit['path'] === PushUploads::UNIT) {
+                    if (!self::confined($target, $content, $content . '/' . PushUploads::UNIT) || PushUploads::layout($target, $content) !== true) {
+                        throw new \RuntimeException('uploads outside its target');
+                    }
+                    foreach ($unit['need'] as $rel) {
+                        $staged = $base . '/stage/' . $n . '/' . $rel;
+                        if (!is_file($staged) || (int) filesize($staged) !== (int) $unit['files'][$rel]['size']) {
+                            throw new \RuntimeException('not uploaded: uploads/' . self::printable((string) $rel));
+                        }
+                    }
+                    continue;
+                }
                 // Und jede Einheit noch im wp-content ihres Ziels: nie Live bei einem Staging-Push, nie umgekehrt.
                 if (!PushUnits::valid((string) $unit['path']) || !self::confined($target, $content, $content . '/' . $unit['path'])) {
                     throw new \RuntimeException('unit outside its target: ' . self::printable((string) $unit['path']));
@@ -380,22 +434,50 @@ final class Push
             return self::error('wpsync_push_build', 'Push abgebrochen, nichts getauscht: ' . $e->getMessage(), 409);
         }
 
-        $pairs = [];
+        $pairs   = [];
+        $sources = []; // new/<n> je Paar – die Einheit uploads hat keins, die Indizes laufen auseinander
+        $upIndex = null;
         foreach ($plan['units'] as $n => $unit) {
-            $pairs[] = [
+            if ($unit['path'] === PushUploads::UNIT) {
+                $upIndex = $n;
+                continue;
+            }
+            $pairs[]   = [
                 'unit'     => $unit['path'],
                 'target'   => $content . '/' . $unit['path'],
                 'snapshot' => $unit['exists'] ? $base . '/old/' . $n : null,
                 'discard'  => $base . '/discard/' . $n,
             ];
+            $sources[] = $base . '/new/' . $n;
+        }
+        // Uploads vor dem Code (Spec Content-Push §1, AC-144). Liegt eine Zieldatei inzwischen da,
+        // bricht der Satz ab, bevor irgendetwas angelegt oder getauscht ist.
+        $uploads = ['added' => [], 'dirs' => []];
+        if ($upIndex !== null) {
+            try {
+                $uploads = PushUploads::prepare($content, $plan['units'][$upIndex]['files'], $plan['units'][$upIndex]['need']);
+            } catch (\RuntimeException $e) {
+                self::discard($pushId, self::FAILED);
+                return self::uploadFailure($e);
+            }
         }
         wp_mkdir_p($base . '/old');
-        // Vor dem ersten rename: stirbt PHP mitten im Tausch, kann rescue.php zurücktauschen.
-        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED);
+        // Vor dem ersten rename: stirbt PHP mitten im Anlegen oder Tausch, kann rescue.php zurücknehmen.
+        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads);
+        if ($upIndex !== null) {
+            $placed = [];
+            try {
+                PushUploads::place($content, $base . '/stage/' . $upIndex, $uploads, $placed);
+            } catch (\RuntimeException $e) {
+                PushRescue::removeUploads($content, ['added' => $placed, 'dirs' => $uploads['dirs']]);
+                self::discard($pushId, self::FAILED);
+                return self::uploadFailure($e);
+            }
+        }
         $swapped = [];
         try {
-            foreach ($pairs as $n => $pair) {
-                PushSwap::swap($pair['target'], $base . '/new/' . $n, $pair['snapshot']);
+            foreach ($pairs as $k => $pair) {
+                PushSwap::swap($pair['target'], $sources[$k], $pair['snapshot']);
                 $swapped[] = $pair;
             }
         } catch (\RuntimeException $e) {
@@ -403,6 +485,7 @@ final class Push
                 wp_mkdir_p(dirname($pair['discard']));
                 PushSwap::restore($pair['target'], $pair['snapshot'], $pair['discard']);
             }
+            PushRescue::removeUploads($content, $uploads); // der Satz bleibt ganz: ohne Code keine Uploads
             PushSwap::resetCaches();
             self::discard($pushId, self::FAILED);
             return self::error('wpsync_push_swap', 'Tausch fehlgeschlagen, der alte Stand liegt wieder an seinem Platz: ' . $e->getMessage(), 500);
@@ -414,6 +497,11 @@ final class Push
         $stamps  = [];
         $summary = [];
         foreach ($plan['units'] as $unit) {
+            if ($unit['path'] === PushUploads::UNIT) {
+                $stamps[PushUploads::UNIT] = (object) PushUploads::stamps($content, $uploads);
+                $summary[]                 = ['path' => PushUploads::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => count($unit['files']), 'uploaded' => count($unit['need'])];
+                continue;
+            }
             $dir                   = $content . '/' . $unit['path'];
             $stamps[$unit['path']] = (object) PushManifest::stamps($dir, $unit['path']);
             $summary[]             = [
@@ -521,6 +609,10 @@ final class Push
             self::finishRollback($pushId);
             self::touchStub(time()); // wie bei confirm (R5)
             self::scheduleTidy();
+            // Seit dem Push geänderte Uploads bleiben liegen und werden genannt (Spec Content-Push §8.4).
+            if (isset($body['warnings'])) {
+                return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []]);
+            }
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
     }
@@ -748,6 +840,41 @@ final class Push
     }
 
     /**
+     * Plan der Einheit uploads (Spec Content-Push §8.2, §8.3): Ziel, Layout und Dateityp, dann je
+     * Datei need, same oder conflicts. Kein Verzeichnistausch, deshalb weder Stempel noch Version.
+     *
+     * @param array{path: string, files: array<string, array{size: int, sha256: string, mtime: int}>, base: array<string, mixed>} $unit
+     * @return array<string, mixed>|\WP_Error
+     */
+    private static function uploadsPlan(string $target, string $content, array $unit)
+    {
+        $dir = $content . '/' . PushUploads::UNIT;
+        if (!self::confined($target, $content, $dir)) {
+            return self::error('wpsync_push_unit', 'Einheit liegt nicht im wp-content des Ziels: uploads', 400);
+        }
+        $layout = PushUploads::layout($target, $content);
+        if ($layout instanceof \WP_Error) {
+            return $layout;
+        }
+        foreach (array_keys($unit['files']) as $rel) {
+            $rel = (string) $rel;
+            if (PushUploads::blockedName($rel) || !PushUploads::allowedName($rel)) {
+                return self::error('wpsync_upload_type_blocked', 'Dateityp für Uploads nicht erlaubt: ' . self::printable($rel), 400);
+            }
+        }
+        $state = PushUploads::plan($content, $unit['files']);
+        return [
+            'path'      => PushUploads::UNIT,
+            'exists'    => is_dir($dir),
+            'version'   => '',
+            'conflicts' => $state['conflicts'],
+            'need'      => $state['need'],
+            'same'      => $state['same'],
+            'writable'  => is_dir($dir) ? is_writable($dir) : is_writable($content),
+        ];
+    }
+
+    /**
      * @param mixed $raw
      * @return list<array{path: string, files: array<string, array{size: int, sha256: string, mtime: int}>, base: array<string, mixed>}>|\WP_Error
      */
@@ -764,10 +891,18 @@ final class Push
                 return self::error('wpsync_push_unit', 'Einheit nicht erlaubt: ' . self::printable($path), 400);
             }
             $seen[strtolower($path)] = true;
+            $uploads = $path === PushUploads::UNIT;
+            if ($uploads && count((array) ($unit['files'] ?? [])) > PushUploads::MAX_FILES) {
+                return self::error('wpsync_push_units', 'Zu viele Uploads in einem Push – höchstens ' . PushUploads::MAX_FILES . '.', 400);
+            }
             $files = [];
             foreach ((array) ($unit['files'] ?? []) as $rel => $file) {
-                $rel = (string) $rel;
-                $ok  = PushUnits::validFile($path, $rel) && is_array($file)
+                $rel   = (string) $rel;
+                $valid = $uploads ? PushUploads::validFile($rel) : PushUnits::validFile($path, $rel);
+                if ($uploads && !$valid) {
+                    return self::error('wpsync_upload_path', 'Upload-Pfad nicht erlaubt: ' . self::printable($rel), 400);
+                }
+                $ok = $valid && is_array($file)
                     && is_int($file['size'] ?? null) && $file['size'] >= 0 && $file['size'] <= Excludes::MAX_FILE_BYTES
                     && is_string($file['sha256'] ?? null) && preg_match('/^[a-f0-9]{64}\z/', $file['sha256']) === 1
                     && is_int($file['mtime'] ?? null) && $file['mtime'] > 0;
@@ -1027,6 +1162,14 @@ final class Push
             $active = array_merge($active, array_keys((array) get_site_option('active_sitewide_plugins', [])));
         }
         return $active;
+    }
+
+    /** Uploads liessen sich nicht anlegen: nichts getauscht, der Push ist verworfen. */
+    private static function uploadFailure(\RuntimeException $e): \WP_Error
+    {
+        return $e->getCode() === PushUploads::EXISTS
+            ? self::error('wpsync_upload_exists', 'Auf dem Ziel liegt inzwischen etwas am selben Pfad, nichts getauscht: ' . self::printable($e->getMessage()), 409)
+            : self::error('wpsync_upload_place', 'Uploads liessen sich nicht anlegen, nichts getauscht: ' . self::printable($e->getMessage()), 500);
     }
 
     private static function windowClosed(): \WP_Error

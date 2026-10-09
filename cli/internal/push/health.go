@@ -186,16 +186,61 @@ func Worse(before, after []Probe) []string {
 		if i >= len(before) {
 			break
 		}
-		b := before[i]
-		switch {
-		case a.Status == 0 && b.Status != 0:
-			out = append(out, fmt.Sprintf("%s antwortet nicht mehr (vorher HTTP %d)", agentapi.Printable(a.URL), b.Status))
-		case a.Status >= 500 && b.Status != 0 && b.Status < 500:
-			out = append(out, fmt.Sprintf("%s liefert HTTP %d (vorher %d)", agentapi.Printable(a.URL), a.Status, b.Status))
-		case a.Marker && !b.Marker:
-			out = append(out, fmt.Sprintf("%s zeigt eine Fehlermeldung von WordPress oder PHP", agentapi.Printable(a.URL)))
-		case a.Empty && !b.Empty && a.Status != 0:
-			out = append(out, fmt.Sprintf("%s ist eine leere Seite", agentapi.Printable(a.URL)))
+		if why := worsened(before[i], a); why != "" {
+			out = append(out, why)
+		}
+	}
+	return out
+}
+
+// worsened says why page a is worse than b, "" if it is not – the one rule of Worse and WorsePages.
+func worsened(b, a Probe) string {
+	switch {
+	case a.Status == 0 && b.Status != 0:
+		return fmt.Sprintf("%s antwortet nicht mehr (vorher HTTP %d)", agentapi.Printable(a.URL), b.Status)
+	case a.Status >= 500 && b.Status != 0 && b.Status < 500:
+		return fmt.Sprintf("%s liefert HTTP %d (vorher %d)", agentapi.Printable(a.URL), a.Status, b.Status)
+	case a.Marker && !b.Marker:
+		return fmt.Sprintf("%s zeigt eine Fehlermeldung von WordPress oder PHP", agentapi.Printable(a.URL))
+	case a.Empty && !b.Empty && a.Status != 0:
+		return fmt.Sprintf("%s ist eine leere Seite", agentapi.Printable(a.URL))
+	}
+	return ""
+}
+
+// HealthFinding is one page that got worse after the swap, for the result (Spec Content-Push
+// §7.4, S5). URL is the page as requested; Before and After are Probe.Finding.
+type HealthFinding struct {
+	URL    string `json:"url"`
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
+
+// Finding is the short description of a probe: "HTTP 200", "HTTP 500, Fehlermeldung von
+// WordPress oder PHP", "HTTP 200, leere Seite" or "keine Antwort".
+func (p Probe) Finding() string {
+	if p.Status == 0 {
+		return "keine Antwort"
+	}
+	s := fmt.Sprintf("HTTP %d", p.Status)
+	if p.Marker {
+		s += ", Fehlermeldung von WordPress oder PHP"
+	}
+	if p.Empty {
+		s += ", leere Seite"
+	}
+	return s
+}
+
+// WorsePages lists the pages that got worse with their state before and after; nil if none.
+func WorsePages(before, after []Probe) []HealthFinding {
+	var out []HealthFinding
+	for i, a := range after {
+		if i >= len(before) {
+			break
+		}
+		if worsened(before[i], a) != "" {
+			out = append(out, HealthFinding{URL: a.URL, Before: before[i].Finding(), After: a.Finding()})
 		}
 	}
 	return out

@@ -38,8 +38,8 @@ func unreadablePath(unit, rel string) string {
 
 // unitSteps lists the directories from docroot down to the unit, relative to docroot.
 func unitSteps(unit string) []string {
-	if unit == muPlugins {
-		return []string{".", "wp-content", "wp-content/" + muPlugins}
+	if unit == muPlugins || unit == UploadsUnit {
+		return []string{".", "wp-content", "wp-content/" + unit}
 	}
 	kind := filepath.Dir(unit)
 	return []string{".", "wp-content", "wp-content/" + kind, "wp-content/" + unit}

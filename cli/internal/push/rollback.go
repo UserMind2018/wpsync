@@ -51,7 +51,7 @@ func Pushes(o Options) error {
 		}
 		var units []string
 		for _, u := range r.Units {
-			if ValidUnit(u.Path) {
+			if ValidUnit(u.Path) || u.Path == UploadsUnit {
 				units = append(units, u.Path)
 			} else {
 				units = append(units, agentapi.Printable(u.Path))
@@ -125,6 +125,9 @@ func Rollback(o Options, pushID string) error {
 			units = append(units, unit)
 		}
 		sort.Strings(units)
+		if len(j.Uploads) > 0 {
+			units = append(units, UploadsUnit)
+		}
 	case target == "" && (o.Target != "" || o.Report != nil):
 		// A push from another machine: only the agent knows where it went.
 		target, units = recorded(o, pushID)
@@ -136,7 +139,8 @@ func Rollback(o Options, pushID string) error {
 		return &TargetError{PushID: pushID, Is: target, Want: o.Target}
 	}
 
-	if err := o.Client.PushRollback(pushID); err != nil {
+	notes, err := o.Client.PushRollbackNotes(pushID)
+	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_window" {
 			return fmt.Errorf("Push %s: %w", pushID, ErrRollbackWindow) // never around the window through rescue.php
@@ -155,16 +159,18 @@ func Rollback(o Options, pushID string) error {
 				"rescue.php wird nicht aufgerufen; im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, pushID, o.Site.URL, agentapi.Printable(j.RescueURL))
 		}
 		fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php")
-		if rerr := RescueRollback(o.HTTP, j.RescueURL, pushID, RescueKey(o.Secret, pushID, j.Salt)); rerr != nil {
+		var rerr error
+		if notes, rerr = RescueRollbackNotes(o.HTTP, j.RescueURL, pushID, RescueKey(o.Secret, pushID, j.Salt)); rerr != nil {
 			return fmt.Errorf("Rollback über rescue.php fehlgeschlagen: %w", rerr)
 		}
 	}
 	fmt.Fprintf(o.Out, "✓ Push %s ist zurückgerollt.\n", pushID)
+	printKept(o.Out, notes.Kept)
 	if o.Report != nil {
 		if units == nil {
 			units = []string{}
 		}
-		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units}
+		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings}
 	}
 
 	if target == TargetStaging {
@@ -183,6 +189,7 @@ func Rollback(o Options, pushID string) error {
 		return fmt.Errorf("load baseline: %w", err)
 	}
 	Revert(base, j)
+	RevertUploads(base, j, notes.Kept)
 	if err := baseline.Save(siteDir, base); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
@@ -240,7 +247,7 @@ func recorded(o Options, pushID string) (target string, units []string) {
 			continue
 		}
 		for _, u := range r.Units {
-			if ValidUnit(u.Path) {
+			if ValidUnit(u.Path) || u.Path == UploadsUnit {
 				units = append(units, u.Path)
 			}
 		}

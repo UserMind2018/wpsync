@@ -89,3 +89,39 @@ func TestUnsettledCommitAfterSIGTERMIsPending(t *testing.T) {
 		t.Errorf("Classify = %+v, want exit 42", f)
 	}
 }
+
+// Spec Content-Push §8, §10: die Uploads-Fälle bei Exit 1, Exit 11 für einen Agent ohne Uploads.
+func TestUploadCasesHaveAReason(t *testing.T) {
+	cases := []struct {
+		err    error
+		reason string
+	}{
+		{&push.UploadExistsError{Paths: []string{"2026/10/a.png"}}, "upload_exists"},
+		{fmt.Errorf("%w: %w", push.ErrUploadExists, &agentapi.APIError{Status: 409, Code: "wpsync_upload_exists"}), "upload_exists"},
+		{&agentapi.APIError{Status: 409, Code: "wpsync_upload_exists"}, "upload_exists"},
+		{&push.UploadTypeError{Path: "2026/10/x.php"}, "upload_type_blocked"},
+		{&agentapi.APIError{Status: 400, Code: "wpsync_upload_type_blocked"}, "upload_type_blocked"},
+		{push.ErrUploadsThere, "nothing_to_push"},
+	}
+	for _, c := range cases {
+		f := Classify(c.err)
+		if f.Exit != ExitUnknown || f.Reason != c.reason {
+			t.Errorf("Classify(%v) = %d %q, want 1 %q", c.err, f.Exit, f.Reason, c.reason)
+		}
+	}
+	if f := Classify(fmt.Errorf("%w: %w", push.ErrAgentNoUploads, &agentapi.APIError{Status: 400, Code: "wpsync_push_unit"})); f.Exit != ExitAgentOutdated {
+		t.Errorf("no uploads: %+v", f)
+	}
+}
+
+// S7: bei nothing_to_push nennt das Fehlerobjekt die übersprungenen neuen Einheiten.
+func TestNothingToPushNamesTheSkippedUnits(t *testing.T) {
+	data, _ := json.Marshal(Classify(Hint(&push.SkippedNewError{Units: []string{"plugins/neu", "themes/neu"}}, "nichts gepusht")))
+	if !strings.Contains(string(data), `"reason":"nothing_to_push","skipped_new":["plugins/neu","themes/neu"]`) {
+		t.Errorf("failure = %s", data)
+	}
+	data, _ = json.Marshal(Classify(push.ErrNothing))
+	if strings.Contains(string(data), "skipped_new") {
+		t.Errorf("without skipped units the field is left out: %s", data)
+	}
+}

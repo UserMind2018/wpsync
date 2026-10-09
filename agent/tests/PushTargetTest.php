@@ -458,4 +458,15 @@ final class PushTargetTest extends TestCase
         }, $ids));
         $this->assertSame(['push_id', 'device', 'target'], array_slice(array_keys(Push::index()->data['pushes'][0]), 0, 3));
     }
+
+    /** AC-145: der Begin schreibt den Öffner des Fensters ins Protokoll – auch bei reinen Code-Pushs. */
+    public function testBeginRecordsWhoOpenedTheWindow(): void
+    {
+        Store::$opener = 7;
+        $this->begin('live', 'new', ['dry' => true]);
+        $this->assertSame([], Store::$pushes, 'the dry run records nothing');
+        $id = (string) $this->begin('live', 'new')->data['push_id'];
+        $this->assertSame(7, Store::getPush($id)['opened_by']);
+        $this->assertSame(7, Push::index()->data['pushes'][0]['opened_by']);
+    }
 }

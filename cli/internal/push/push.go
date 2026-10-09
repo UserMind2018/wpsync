@@ -47,6 +47,7 @@ type Options struct {
 	Docroot string
 
 	Units              []string // empty: every unit with local changes
+	Uploads            []string // --uploads: new files relative to wp-content/uploads/ (Spec Content-Push §8)
 	Force              bool     // overwrite although the server changed since the last pull
 	Yes                bool     // do not ask before pushing
 	AllowVersionChange bool     // with Yes: accept a changed plugin or theme version
@@ -93,6 +94,9 @@ type Result struct {
 	RescueURL string `json:"rescue_url,omitempty"`
 	// Warnings name what failed without failing the push or rollback; omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
+	// Health names every page that got worse after the swap, when the push was taken back for it
+	// (Spec Content-Push §7.4, S5); omitted otherwise.
+	Health []HealthFinding `json:"health,omitempty"`
 }
 
 // WarningSnapshotFailed: the push (or rollback) is done, baseline and journal are written, only the
@@ -173,6 +177,7 @@ type RolledBackError struct {
 	PushID     string
 	Reasons    []string // what got worse after the swap
 	StillWorse []string // what is still worse after the rollback; normally empty
+	Warnings   []string // what the rollback reports beyond its status, e.g. upload_changed_since_push
 }
 
 func (e *RolledBackError) Error() string {
@@ -389,7 +394,7 @@ func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) 
 // planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
 // skipped are local units new to the baseline that were not named (U14), missing the units of the
 // baseline that are gone locally and stay on the site (Spec Container-Push C7).
-func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string) map[string]any {
+func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string, up *agentapi.PushUnitPlan) map[string]any {
 	list := make([]map[string]any, len(units))
 	for i, u := range units {
 		p := plan.Units[i]
@@ -402,8 +407,12 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, m
 			"old_version": p.Version, "new_version": u.Version, "conflicts": conflicts, "writable": p.Writable,
 		}
 	}
-	return map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list,
+	ev := map[string]any{"target": target, "window_open": plan.WindowOpen, "units": list,
 		"skipped_new": append([]string{}, skipped...), "missing_locally": append([]string{}, missing...)}
+	if up != nil { // only with --uploads: plans of pushes without stay as they were
+		ev["uploads"] = map[string]any{"need": nonNil(up.Need), "same": nonNil(up.Same), "conflicts": nonNil(up.Conflicts)}
+	}
+	return ev
 }
 
 // lock takes the site lock shared with pull (Nach-Review M-1): one pull, push or rollback per site –
@@ -516,7 +525,16 @@ func Run(o Options) error {
 		}
 		units = kept
 	}
-	if len(units) == 0 {
+	// The unit uploads comes from the list of --uploads, never from the scan (Spec Content-Push §8).
+	var up *Unit
+	if len(o.Uploads) > 0 {
+		u, err := uploadsUnit(docroot, o.Uploads)
+		if err != nil {
+			return err
+		}
+		up = &u
+	}
+	if len(units) == 0 && up == nil {
 		if len(skipped) > 0 {
 			return &SkippedNewError{Units: skipped}
 		}
@@ -552,10 +570,23 @@ func Run(o Options) error {
 		names[i] = units[i].Path
 	}
 	report.Units = names
+	want := len(units) // units the agent answers for: the code units, then uploads
+	if up != nil {
+		if err := up.Hash(docroot); err != nil {
+			return err
+		}
+		req.Units = append(req.Units, up.Request())
+		report.Units = append(append([]string{}, names...), UploadsUnit)
+		want++
+	}
 
 	plan, err := o.Client.PushBegin(req)
 	if err != nil {
-		return agentError(target, err)
+		var apiErr *agentapi.APIError
+		if up != nil && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_unit" {
+			return fmt.Errorf("%w: %w", ErrAgentNoUploads, err) // an agent before 0.6.0 refuses the unit
+		}
+		return uploadError(agentError(target, err))
 	}
 	if !AtLeast(plan.AgentVersion, MinAgent) {
 		return ErrAgentTooOld
@@ -563,14 +594,23 @@ func Run(o Options) error {
 	if target == TargetStaging && !AtLeast(plan.AgentVersion, staging.MinAgent) {
 		return ErrAgentNoStaging
 	}
+	if up != nil && !AtLeast(plan.AgentVersion, MinAgentUploads) {
+		return ErrAgentNoUploads
+	}
 	if err := answeredFor(target, plan.Target); err != nil {
 		return err
 	}
 	if plan.Pending != nil {
 		return &PendingError{PushID: plan.Pending.PushID, Device: plan.Pending.Device}
 	}
-	if len(plan.Units) != len(units) {
+	if len(plan.Units) != want {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
+	}
+	var upPlan *agentapi.PushUnitPlan
+	if up != nil {
+		if upPlan = &plan.Units[len(units)]; upPlan.Path != UploadsUnit {
+			return errors.New("der Agent hat die Uploads nicht beantwortet")
+		}
 	}
 	if target == TargetStaging {
 		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
@@ -583,12 +623,23 @@ func Run(o Options) error {
 				"    Bewusst --force, oder die Kopie neu von Live holen: wpsync staging refresh %s --code\n", u.Path, o.Site.Name)
 		}
 	}
-	o.event("plan", planEvent(units, plan, target, skipped, deleted))
+	if upPlan != nil {
+		printUploads(o.Out, up, upPlan)
+		readonly = readonly || !upPlan.Writable
+	}
+	o.event("plan", planEvent(units, plan, target, skipped, deleted, upPlan))
 	if readonly {
 		return ErrNotWritable
 	}
+	// A file below uploads is never replaced, --force or not (Spec Content-Push §8.2, W3).
+	if upPlan != nil && len(upPlan.Conflicts) > 0 {
+		return &UploadExistsError{Paths: upPlan.Conflicts}
+	}
 	if conflict && !o.Force {
 		return ErrConflict
+	}
+	if len(units) == 0 && len(upPlan.Need) == 0 {
+		return ErrUploadsThere // no code, and every upload is there already
 	}
 	if o.DryRun {
 		report.Status = "dry_run"
@@ -617,7 +668,7 @@ func Run(o Options) error {
 		} else {
 			where = "nach " + where
 		}
-		if !o.Confirm(fmt.Sprintf("%d Einheit(en) %s pushen?", len(units), where)) {
+		if !o.Confirm(fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan), where)) {
 			return ErrAborted
 		}
 	}
@@ -637,13 +688,13 @@ func Run(o Options) error {
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
 	if err != nil {
-		return agentError(target, err)
+		return uploadError(agentError(target, err))
 	}
 	// Before the first byte travels: the push the agent created must be the one asked for.
 	if err := answeredFor(target, begin.Target); err != nil {
 		return err
 	}
-	if len(begin.Units) != len(units) {
+	if len(begin.Units) != want {
 		return errors.New("der Agent hat nicht jede Einheit beantwortet")
 	}
 	expires := func(err error) error {
@@ -660,6 +711,9 @@ func Run(o Options) error {
 	}
 	journal := NewJournal(begin.PushID, rescueURL, begin.Rescue.Salt, base, names)
 	journal.Target = target
+	if up != nil {
+		journal.NoteUploads(base, begin.Units[len(units)].Need)
+	}
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
@@ -672,6 +726,16 @@ func Run(o Options) error {
 			return fmt.Errorf("Upload abgebrochen, auf der Site wurde nichts geändert: %w", err)
 		}
 		o.event("upload", map[string]any{"unit": units[i].Path, "files": len(begin.Units[i].Need)})
+	}
+	if up != nil {
+		if err := o.interrupted(); err != nil {
+			return expires(err)
+		}
+		need := begin.Units[len(units)].Need
+		if err := upload(o, begin.PushID, len(units), docroot, up, need); err != nil {
+			return fmt.Errorf("Upload abgebrochen, auf der Site wurde nichts geändert: %w", err)
+		}
+		o.event("upload", map[string]any{"unit": UploadsUnit, "files": len(need)})
 	}
 	if err := o.interrupted(); err != nil {
 		return expires(err)
@@ -689,7 +753,7 @@ func Run(o Options) error {
 	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code != "" {
-			return agentError(target, err) // the agent refused and left the site as it was
+			return uploadError(agentError(target, err)) // the agent refused and left the site as it was
 		}
 		report.Status = "committed" // unknown; the worse case
 		if done.Err() != nil {
@@ -715,6 +779,7 @@ func Run(o Options) error {
 	}
 	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
 	if len(worse) > 0 {
+		report.Health = WorsePages(before, after)
 		return rolledBack(report, rollbackNow(done, o, acc, journal, urls, before, worse))
 	}
 	if err := o.Client.PushConfirm(begin.PushID); err != nil {
@@ -741,11 +806,16 @@ func Run(o Options) error {
 			}
 			fmt.Fprintf(o.Out, "  ! nicht in die Kopie übernommen: %s%s\n", file, why)
 		}
+		next := strings.Join(names, " ")
+		if up != nil {
+			next = strings.TrimSpace(next + " --uploads <liste>")
+		}
 		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
-			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, strings.Join(names, " "))
+			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, next)
 		return nil
 	}
 	Apply(base, stamps)
+	ApplyUploads(base, stamps[UploadsUnit])
 	if err := baseline.Save(siteDir, base); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
@@ -949,6 +1019,7 @@ func rolledBack(report *Result, err error) error {
 	var rolled *RolledBackError
 	if errors.As(err, &rolled) {
 		report.Status = "rolled_back"
+		report.Warnings = append(report.Warnings, rolled.Warnings...)
 	}
 	return err
 }
@@ -973,7 +1044,8 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 		fmt.Fprintf(o.Out, "  ! %s\n", r)
 	}
 	fmt.Fprintln(o.Out, "  rolle zurück …")
-	if err := RescueRollback(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt)); err != nil {
+	notes, err := RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt))
+	if err != nil {
 		where := "live und die Site"
 		if j.target() == TargetStaging {
 			where = "auf Staging und die Kopie"
@@ -987,7 +1059,8 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 		fmt.Fprintln(o.Out, "  nach SIGTERM nicht mehr nachgeprüft, ob die Site wieder heil ist")
 		still = nil
 	}
-	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still}
+	printKept(o.Out, notes.Kept)
+	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings}
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay

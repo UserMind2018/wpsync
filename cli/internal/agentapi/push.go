@@ -1,6 +1,9 @@
 package agentapi
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 // PushStamp identifies a file version on the server, as the baseline stores it.
 type PushStamp struct {
@@ -42,7 +45,10 @@ type PushUnitPlan struct {
 	Version   string   `json:"version"`
 	Conflicts []string `json:"conflicts"` // changed on the server since the client's baseline
 	Need      []string `json:"need"`      // files the server does not have in this version
-	Writable  bool     `json:"writable"`
+	// Same: unit uploads only (agent 0.6.0) – files the target already has with this content.
+	// For uploads, Conflicts are files with other content at the same path (Spec Content-Push §8.2).
+	Same     []string `json:"same"`
+	Writable bool     `json:"writable"`
 }
 
 // PushPending is a push that was swapped in but never confirmed.
@@ -108,6 +114,8 @@ type PushRecord struct {
 	Created   int64            `json:"created"`
 	Committed *int64           `json:"committed"`
 	Finished  *int64           `json:"finished"`
+	// OpenedBy: the WordPress user who had opened the push window at begin (agent 0.6.0); nil without.
+	OpenedBy *int64 `json:"opened_by,omitempty"`
 }
 
 // PushBegin checks a push and, unless req.Dry, creates it.
@@ -154,10 +162,46 @@ func (c *Client) PushConfirm(pushID string) error {
 	return c.PostJSON("/wpsync/v1/push/confirm", map[string]any{"push_id": pushID}, &res)
 }
 
+// RollbackNotes is what a rollback reports beyond its status (agent 0.6.0): warnings such as
+// upload_changed_since_push and the uploads it left in place, relative to wp-content/uploads/.
+type RollbackNotes struct {
+	Warnings []string `json:"warnings"`
+	Kept     []string `json:"kept"`
+}
+
+var warningRe = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
+
+// Clean keeps only warnings that look like the agent's codes and at most 100 kept paths: both
+// come from the site. Empty lists stay nil.
+func (n RollbackNotes) Clean() RollbackNotes {
+	var out RollbackNotes
+	for _, w := range n.Warnings {
+		if warningRe.MatchString(w) {
+			out.Warnings = append(out.Warnings, w)
+		}
+	}
+	for _, k := range n.Kept {
+		if len(out.Kept) == 100 {
+			break
+		}
+		out.Kept = append(out.Kept, k)
+	}
+	return out
+}
+
+// PushRollbackNotes restores the snapshot through WordPress and returns the agent's notes.
+func (c *Client) PushRollbackNotes(pushID string) (RollbackNotes, error) {
+	var res RollbackNotes
+	if err := c.PostJSON("/wpsync/v1/push/rollback", map[string]any{"push_id": pushID}, &res); err != nil {
+		return RollbackNotes{}, err
+	}
+	return res.Clean(), nil
+}
+
 // PushRollback restores the snapshot through WordPress.
 func (c *Client) PushRollback(pushID string) error {
-	var res struct{}
-	return c.PostJSON("/wpsync/v1/push/rollback", map[string]any{"push_id": pushID}, &res)
+	_, err := c.PushRollbackNotes(pushID)
+	return err
 }
 
 // PushList returns the latest pushes, newest first.

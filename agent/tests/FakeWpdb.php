@@ -62,6 +62,11 @@ final class FakeWpdb
         return addcslashes($text, '_%\\');
     }
 
+    public function get_charset_collate(): string
+    {
+        return '';
+    }
+
     /** @param mixed $value */
     public function _real_escape($value): string
     {

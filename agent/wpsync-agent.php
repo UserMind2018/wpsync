@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       wpsync Agent
  * Description:       Signierte Schnittstelle für wpsync: pull (Live → Lokal), push von Code im Push-Fenster und Staging-Kopie auf dem Server.
- * Version:           0.5.1
+ * Version:           0.6.0
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -18,12 +18,12 @@ if (defined('WPSYNC_STAGING')) {
     return;
 }
 
-const WPSYNC_VERSION = '0.5.1';
+const WPSYNC_VERSION = '0.6.0';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
-    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
+    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'StagingReplace', 'StagingConfig', 'StagingAccess', 'StagingHosts',
     'StagingFiles', 'StagingDb', 'Staging', 'Rest', 'Admin',
 ] as $wpsync_class) {

@@ -20,6 +20,8 @@ final class PushRescue
     public const ID           = '/^p_[0-9]{8}_[a-f0-9]{12}\z/';
     /** Ordner einer Staging-Kopie im Webroot – wie StagingGuard::DIR_RE, das rescue.php nicht lädt. */
     public const STAGING_DIR  = '/^wpsync-staging-[a-f0-9]{12}\z/';
+    /** Warnung der Rücknahme: eine hinzugefügte Datei wurde seit dem Push geändert und bleibt (§8.4). */
+    public const UPLOAD_CHANGED = 'upload_changed_since_push';
 
     public static function newId(int $now): string
     {
@@ -39,13 +41,16 @@ final class PushRescue
 
     /**
      * @param list<array{unit: string, target: string, snapshot: string|null, discard: string}> $pairs
+     * @param array{added?: list<array{path: string, sha256: string}>, dirs?: list<string>}  $uploads Einheit
+     *        uploads (Spec Content-Push §8.4): Dateien relativ zu uploads/, angelegte Ordner relativ zu wp-content
      */
-    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status): void
+    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = []): void
     {
         self::save($workDir, [
             'push_id'       => $pushId,
             'key_hash'      => $keyHash,
             'pairs'         => $pairs,
+            'uploads'       => $uploads + ['added' => [], 'dirs' => []],
             'status'        => $status,
             'superseded_by' => null,
             'attempts'      => 0,
@@ -215,6 +220,8 @@ final class PushRescue
         if ($failed !== []) {
             return [500, ['ok' => false, 'error' => 'restore failed', 'units' => $failed]];
         }
+        // Uploads nach dem Code (Spec Content-Push §1, AC-144): nur, was der Push hinzugefügt hat.
+        $kept             = self::removeUploads($contentDir, is_array($record['uploads'] ?? null) ? $record['uploads'] : []);
         $record['status'] = self::ROLLED_BACK;
         self::save($workDir, $record);
         foreach (self::others($workDir, $pushId) as $other) {
@@ -223,7 +230,85 @@ final class PushRescue
                 self::save($workDir, $other);
             }
         }
-        return [200, ['ok' => true, 'status' => self::ROLLED_BACK]];
+        $body = ['ok' => true, 'status' => self::ROLLED_BACK];
+        if ($kept !== []) {
+            $body['warnings'] = [self::UPLOAD_CHANGED];
+            $body['kept']     = $kept;
+        }
+        return [200, $body];
+    }
+
+    /**
+     * Nimmt die Uploads eines Pushs zurück (Spec Content-Push §8.4) – auch für rescue.php, ohne
+     * WordPress. Löscht nur Dateien, deren sha256 noch dem hinzugefügten entspricht, und vom Push
+     * angelegte Ordner, wenn sie leer sind. Pfade ausserhalb von uploads/ oder mit einem Symlink
+     * auf dem Weg fasst es nie an.
+     *
+     * @param array<string, mixed> $uploads ['added' => [['path' => …, 'sha256' => …]], 'dirs' => […]]
+     * @return list<string> Dateien relativ zu uploads/, die seither geändert sind (oder sich nicht
+     *                      löschen liessen) und liegen bleiben
+     */
+    public static function removeUploads(string $contentDir, array $uploads): array
+    {
+        clearstatcache(true);
+        $root = rtrim(str_replace('\\', '/', (string) realpath($contentDir)), '/');
+        if ($root === '') {
+            return [];
+        }
+        $kept = [];
+        foreach ((array) ($uploads['added'] ?? []) as $file) {
+            $rel  = is_array($file) && is_string($file['path'] ?? null) ? $file['path'] : '';
+            $sha  = is_array($file) && is_string($file['sha256'] ?? null) ? $file['sha256'] : '';
+            $full = $root . '/uploads/' . $rel;
+            if (!self::uploadPath($rel) || !self::plainWay($root, 'uploads/' . $rel) || !self::confined($root, $full)) {
+                continue;
+            }
+            if (!file_exists($full)) {
+                continue; // nie angelegt – der Commit brach vorher ab
+            }
+            $same = is_file($full) && $sha !== '' && hash_equals($sha, (string) hash_file('sha256', $full));
+            if (!$same || !@unlink($full)) {
+                $kept[] = $rel;
+            }
+        }
+        foreach (array_reverse((array) ($uploads['dirs'] ?? [])) as $dir) {
+            if (!is_string($dir) || ($dir !== 'uploads' && (strpos($dir, 'uploads/') !== 0 || !self::uploadPath(substr($dir, 8))))) {
+                continue;
+            }
+            $full = $root . '/' . $dir;
+            if (self::plainWay($root, $dir) && self::confined($root, $full) && is_dir($full)) {
+                @rmdir($full); // nur, wenn leer
+            }
+        }
+        clearstatcache(true);
+        return $kept;
+    }
+
+    /** Pfad relativ zu uploads/, wie ihn der Agent in rescue.json schreibt. */
+    private static function uploadPath(string $rel): bool
+    {
+        if ($rel === '' || strlen($rel) > 1024 || strpbrk($rel, "\\\0") !== false) {
+            return false;
+        }
+        foreach (explode('/', $rel) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Kein Symlink auf dem Weg von wp-content zu $rel, $rel selbst eingeschlossen. */
+    private static function plainWay(string $root, string $rel): bool
+    {
+        $path = $root;
+        foreach (explode('/', $rel) as $segment) {
+            $path .= '/' . $segment;
+            if (is_link($path)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

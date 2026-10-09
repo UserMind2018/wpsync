@@ -56,6 +56,7 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync push <site> code [einheit…]   lokal geänderte Plugins/Themes/mu-plugins auf die Site bringen
                                        (braucht ein offenes Push-Fenster; --dry-run, --force, --yes;
                                        --to staging: auf die Staging-Kopie, Baseline bleibt;
+                                       --uploads <liste>: neue Dateien unter wp-content/uploads;
                                        lokal neue Einheiten nur, wenn sie genannt werden)
   wpsync pushes <site>                 Protokoll der Pushes (--confirm <id>: hängenden Push bestätigen)
   wpsync rollback <site> [push-id]     letzten Live-Push bzw. einen bestimmten zurücknehmen (--to staging)
@@ -837,13 +838,14 @@ func (a *app) pushOptions(name string, mode *pushMode) (push.Options, *sites.Sit
 }
 
 func (a *app) cmdPush(args []string) error {
-	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
 	allowVersion := fs.Bool("allow-version-change", false, "mit --yes: geänderte Plugin-/Theme-Version akzeptieren")
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was gepusht würde")
 	to := fs.String("to", push.TargetLive, "Ziel: live oder staging")
+	uploads := fs.String("uploads", "", "Datei mit neuen Uploads: ein Pfad je Zeile relativ zu wp-content/uploads/ (# Kommentar)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	mode := addPushMode(fs)
 	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
@@ -867,6 +869,13 @@ func (a *app) cmdPush(args []string) error {
 	}
 	opts.Ctx = a.ctx // SIGTERM stops the push before the swap (C12)
 	opts.Units = positional[2:]
+	if *uploads != "" {
+		list, err := push.ReadUploadList(*uploads)
+		if err != nil {
+			return cliout.Usage(err)
+		}
+		opts.Uploads = list
+	}
 	opts.Force, opts.Yes, opts.AllowVersionChange, opts.DryRun = *force, *yes, *allowVersion, *dryRun
 	opts.Target = *to // as typed: the push package refuses what it does not know
 	var res push.Result
@@ -985,6 +994,21 @@ func pushHint(err error, site *sites.Site) error {
 		return nil
 	case errors.Is(err, push.ErrNoBaseline):
 		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("für %s gibt es noch keinen Pull – zuerst wpsync pull %s", site.Name, site.Name))
+	case errors.Is(err, push.ErrAgentNoUploads):
+		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgentUploads, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kennt noch keine Uploads – Agent %s installieren", site.URL, push.MinAgentUploads))
+	case errors.Is(err, push.ErrUploadsThere):
+		return err
+	case errors.Is(err, push.ErrUploadExists):
+		return cliout.Hint(err, fmt.Sprintf("%v – ein Push ersetzt nie eine Datei unter uploads, auch nicht mit --force; nichts übertragen. Die Datei lokal umbenennen oder aus der Liste nehmen", err))
+	case errors.Is(err, push.ErrUploadTypeBlocked):
+		why := err.Error()
+		if errors.As(err, &apiErr) {
+			why = agentText(apiErr.Message)
+		}
+		return cliout.Hint(err, why+" – PHP, .htaccess, .user.ini, versteckte Dateien, aktive Typen (SVG, HTML, XML, JavaScript), Typen, die WordPress auf der Site nicht erlaubt, und Namen, die WordPress umbenennen würde (Leerzeichen, Sonderzeichen, mittlere Endungen), gehen nie als Upload auf die Site")
+	case errors.Is(err, push.ErrUploadMissing):
+		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("%v – die Liste von --uploads nennt Dateien relativ zu wp-content/uploads/ der lokalen Site", err))
 	case errors.As(err, &skipped):
 		return cliout.Hint(err, fmt.Sprintf("nichts gepusht – lokal neu sind nur %s; neue Einheiten gehen nur mit ausdrücklicher Nennung auf die Site: wpsync push %s code <einheit>",
 			strings.Join(skipped.Units, ", "), site.Name))
@@ -1028,7 +1052,7 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
-	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_")):
+	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_")):
 		return cliout.Hint(err, agentText(apiErr.Message))
 	}
 	return explain(err, site)

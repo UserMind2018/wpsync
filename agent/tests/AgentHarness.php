@@ -138,6 +138,22 @@ namespace {
         return $GLOBALS['wpsync_options'][$name] ?? $default;
     }
 
+    /**
+     * @param mixed $value
+     * @param mixed $autoload
+     */
+    function update_option(string $name, $value, $autoload = null): bool
+    {
+        $GLOBALS['wpsync_options'][$name] = $value;
+        return true;
+    }
+
+    function delete_option(string $name): bool
+    {
+        unset($GLOBALS['wpsync_options'][$name]);
+        return true;
+    }
+
     function wp_normalize_path(string $path): string
     {
         return str_replace('\\', '/', $path);
