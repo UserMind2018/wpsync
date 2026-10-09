@@ -59,7 +59,8 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 ### Geändert
 - Listen des Agents für Inhalte in Version 2 (`list_version`): mehr Sperrwörter für
   Meta-Schlüssel und Optionen (`passwd`, `credential`, `apikey`, `api-key`, `webhook`, `oauth`;
-  als ganzes Namensglied `pass`, `pwd`, `auth`, `salt`, `sk`, `private`), Prüfung auch in
+  als ganzes Namensglied – zwischen `_ - . :`, Ziffern oder an einer camelCase-Grenze – `pass`,
+  `pwd`, `auth`, `salt`, `sk`, `private`), Objekt-IDs höchstens 18 Stellen, Prüfung auch in
   Kleinschreibung, feste Liste von Beitragstypen, die keine Projekt-Erweiterung freigibt. `p` und
   `why` in `content export` folgen den neuen Listen
 - Jeder Pull ersetzt auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON); `staging create`

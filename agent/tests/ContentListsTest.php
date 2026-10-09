@@ -238,4 +238,36 @@ final class ContentListsTest extends TestCase
         $this->assertFalse(ContentLists::option('Blogname', 'wp_', 'hello-child'), 'die Whitelist gilt bytegenau');
         $this->assertSame(2, ContentLists::VERSION);
     }
+
+    /**
+     * Die kurzen Sperrwörter gelten als Namensglied auch an einer camelCase-Grenze und neben
+     * Ziffern (smtpPass, auth2, pass1) – übliche Schlüssel bleiben pushbar.
+     */
+    public function testSegmentsAlsoEndAtCamelCaseAndDigits(): void
+    {
+        foreach (['smtpPass', 'auth2', 'pass1', 'SMTPPass', 'userPwd', 'oAuth2Sk', 'db2pass', 'my_authKey', 'privateNote', 'pw1salt'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+            $this->assertSame('meta_word', ContentLists::blocked('postmeta', "5\0" . $key, ['post_type' => 'page']), $key);
+            $this->assertTrue(ContentLists::metaKey($key, ['meta_exceptions' => [$key]]), $key . ' lässt sich je Projekt ausnehmen');
+        }
+        foreach (['options_smtpPass', 'options_auth2', '_options_pass1'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        $usual = [
+            'author', 'passage', 'compass', 'skill', 'basalt', 'privates', 'authorName', 'postAuthor', 'passageText', 'skillLevel2',
+            '_menu_item_type', '_menu_item_object_id', '_menu_item_menu_item_parent', '_menu_item_classes', '_menu_item_url', '_menu_item_target',
+            '_elementor_data', '_elementor_page_settings', '_elementor_version', '_wp_page_template', '_thumbnail_id', '_yoast_wpseo_title',
+            '_yoast_wpseo_metadesc', 'rank_math_title', '_wp_attachment_metadata', '_wp_attached_file', '_wp_attachment_image_alt',
+            '_wp_desired_post_slug', 'footnotes', 'field_5f3a1b2c9d8e7', '_oembed_0123456789abcdef0123456789abcdef', 'h1Title', 'col2Width',
+        ];
+        foreach ($usual as $key) {
+            $this->assertTrue(ContentLists::metaKey($key), $key);
+        }
+        foreach (ContentLists::OPTIONS as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['theme_mods_hello-child', 'theme_mods_twentytwentyfour', 'elementor_experiment-container', 'elementor_experiment-e_font_icon_svg', 'options_footer_text2', '_options_footer_text'] as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', $name === 'theme_mods_twentytwentyfour' ? 'twentytwentyfour' : 'hello-child'), $name);
+        }
+    }
 }

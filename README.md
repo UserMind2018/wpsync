@@ -540,7 +540,7 @@ Zeilen.
 | `post_type` | der Beitragstyp steht nicht auf der Liste (auch für Meta und Zuordnungen des Beitrags) |
 | `taxonomy` | die Taxonomie steht nicht auf der Liste |
 | `meta_key` | Meta-Schlüssel fest gesperrt |
-| `meta_word` | Meta-Schlüssel nur über die Wortlisten gesperrt (Teilstring wie `token`, oder ein ganzes Namensglied wie `auth` in `_auth_code`) – per Projekt-Erweiterung ausnehmbar |
+| `meta_word` | Meta-Schlüssel nur über die Wortlisten gesperrt (Teilstring wie `token`, oder ein ganzes Namensglied wie `auth` in `_auth_code`, `auth2` oder `oAuth`) – per Projekt-Erweiterung ausnehmbar |
 | `option` | die Option ist gesperrt oder steht nicht auf der Liste |
 | `no_object` | der Beitrag bzw. Term zur Zeile fehlt lokal (verwaiste Meta-Zeile oder Zuordnung) |
 | `unnormalizable` | der Wert liess sich nicht normalisieren; `h` ist `null` |

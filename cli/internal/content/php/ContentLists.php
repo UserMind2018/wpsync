@@ -43,8 +43,9 @@ final class ContentLists
     /** Teilstrings, gross/klein egal; nur hiervon kann ein Projekt einzelne Schlüssel ausnehmen (W11). */
     public const BLOCKED_META_WORDS = ['license', 'api_key', 'token', 'secret', 'password', 'passwd', 'credential', 'apikey', 'api-key', 'webhook', 'oauth'];
     /**
-     * Kurze Wörter, die nur als ganzes Namensglied sperren (zwischen _ - . : oder am Rand): „auth“
-     * trifft _auth_code, nicht author; „pass“ trifft smtp_pass, nicht passage. Für Meta und Optionen.
+     * Kurze Wörter, die nur als ganzes Namensglied sperren (zwischen _ - . :, Ziffern, einer
+     * camelCase-Grenze oder am Rand): „auth“ trifft _auth_code, auth2 und oAuth, nicht author; „pass“
+     * trifft smtp_pass und smtpPass, nicht passage. Für Meta und Optionen.
      */
     public const BLOCKED_SEGMENTS = ['pass', 'pwd', 'auth', 'salt', 'sk', 'private'];
     /** Meta-Schlüssel und Optionsnamen, die ein Paket nennen darf (Schutz vor Alias über die Kollation). */
@@ -312,10 +313,14 @@ final class ContentLists
         return self::$anonymizedMeta;
     }
 
-    /** Trägt der Name eines der kurzen Sperrwörter als ganzes Glied? */
+    /**
+     * Trägt der Name eines der kurzen Sperrwörter als ganzes Glied? Glieder enden an _ - . :, an
+     * Ziffern und an einer camelCase-Grenze (smtpPass, SMTPPass, auth2).
+     */
     private static function hasSegment(string $name): bool
     {
-        return array_intersect(preg_split('/[_\-.:]+/', strtolower($name)) ?: [], self::BLOCKED_SEGMENTS) !== [];
+        $parts = preg_split('/[_\-.:0-9]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/', $name) ?: [];
+        return array_intersect(array_map('strtolower', $parts), self::BLOCKED_SEGMENTS) !== [];
     }
 
     /** @param list<string> $words */
