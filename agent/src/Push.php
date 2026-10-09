@@ -619,6 +619,8 @@ final class Push
     /**
      * Die Inhalte liessen sich nicht anwenden – die Datenbank hat nichts davon behalten. Der Satz
      * bleibt ganz (§7.3 Nr. 6): Code und Uploads werden zurückgetauscht, der Push ist gescheitert.
+     * Ausnahme unrestored: eine einzelne Zeile steht nicht mehr auf ihrem Stand davor – dann bleibt
+     * der Arbeitsordner samt Vorher-Abbild liegen.
      */
     private static function contentFailed(ContentException $e, string $content, string $work, string $pushId): \WP_Error
     {
@@ -627,6 +629,14 @@ final class Push
         if ($status !== 200) {
             // Der Push bleibt getauscht und unbestätigt: die CLI nennt den Ausweg (Exit 42).
             return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen, und der Code liess sich nicht zurücktauschen – wpsync rollback ' . $pushId . '.', 409);
+        }
+        if (!empty($e->toArray()['unrestored'])) {
+            // Eine Zeile liess sich nicht zurücksetzen: das Vorher-Abbild ist der einzige Beleg für ihren
+            // Stand davor. Der Push ist gescheitert, sein Arbeitsordner bleibt liegen – prune() und
+            // pruneOrphans() fassen ihn nicht an, solange seine Zeile nicht als aufgeräumt gilt.
+            Store::updatePush($pushId, ['status' => self::FAILED, 'finished' => time()]);
+            self::release($pushId);
+            return $e->toError();
         }
         self::discard($pushId, self::FAILED);
         return $e->toError();

@@ -190,6 +190,11 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 - Agent: Unmittelbar vor dem Anlegen neuer Beiträge prüft der Agent, dass es den Benutzer, der
   das Push-Fenster geöffnet hat, noch gibt – sonst `author_unknown`, nichts wird geschrieben
   (bisher wäre ein gelöschter Benutzer Autor geworden)
+- Agent: Endet ein Inhalts-Push mit `content_failed` und `unrestored: true` (eine Zeile liess
+  sich nach einem Verbindungsverlust nicht zurücksetzen), bleibt sein Arbeitsordner samt
+  Vorher-Abbild liegen: der Push steht als `failed` und nicht aufgeräumt im Protokoll, und das
+  Aufräumen fasst ihn nicht an. Die Meldung nennt die Zeile und dass sie von Hand zu prüfen
+  ist; die CLI sagt dasselbe statt „nichts wurde übertragen“
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

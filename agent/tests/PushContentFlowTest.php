@@ -491,6 +491,48 @@ final class PushContentFlowTest extends TestCase
         $this->assertArrayNotHasKey('keys', $error->data);
     }
 
+    /**
+     * H4: liess sich nach einem Verbindungsverlust eine Zeile nicht auf ihren Stand davor
+     * zurücksetzen, ist das Vorher-Abbild der einzige Beleg für diesen Stand. Der Arbeitsordner
+     * des Pushs bleibt deshalb liegen – der Push ist gescheitert, aber nicht aufgeräumt –, und
+     * die Meldung nennt die Zeile.
+     */
+    public function testAnUnrestoredRowKeepsTheBeforeImage(): void
+    {
+        $this->liveDb->loseAtWrite = 1;
+        $this->liveDb->failWrite   = 2; // das Zurückschreiben des einen Schlüssels
+        list($id, $commit)         = $this->push($this->stage($this->rows()), 'new');
+        $error                     = $this->assertRefused('wpsync_content_content_failed', 500, $commit);
+        $this->assertSame([['table' => 'posts', 'key' => '219']], $error->data['keys']);
+        $this->assertTrue($error->data['unrestored']);
+        $this->assertStringContainsString('posts 219', $error->message);
+        $this->assertStringContainsString('von Hand', $error->message);
+        $this->assertSame('Neu', $this->liveDb->data['posts']['219']['post_title'], 'die eine Zeile steht auf dem neuen Stand');
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'), 'der Code ist zurück');
+
+        $dir  = $this->work($this->live) . '/' . $id;
+        $push = Store::getPush($id);
+        $this->assertSame(['failed', false], [$push['status'], $push['pruned']], 'gescheitert, aber mit Rest sichtbar');
+        $this->assertNotNull($push['finished']);
+        $this->assertNull(Store::getState('push_lock'), 'der nächste Push ist nicht gesperrt');
+        $this->assertFileExists($dir . '/content/before.json');
+        $before = \WpSync\ContentImage::get($dir . '/content', 'before.json');
+        $this->assertSame('posts', $before['keys'][0]['t']);
+        $this->assertSame(base64_encode('Seite 219'), $before['keys'][0]['state']['post_title'], 'der Stand davor ist dort nachzulesen');
+
+        // Aufräumen lässt ihn liegen wie einen unbestätigten – auch viel später.
+        touch($dir, time() - 400 * 86400);
+        Push::prune(time() + 400 * 86400);
+        $this->assertFileExists($dir . '/content/before.json');
+        $this->assertFalse(Store::getPush($id)['pruned']);
+
+        // Und er steht keinem neuen Push im Weg.
+        $this->liveDb->loseAtWrite = null;
+        $this->liveDb->failWrite   = null;
+        $next                      = $this->begin($this->stage([ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => 'Später'])]));
+        $this->assertInstanceOf(\WP_REST_Response::class, $next, $next instanceof \WP_Error ? $next->code . ' ' . $next->message : '');
+    }
+
     /** AC-151: ändert sich eine Zeile zwischen Begin und Commit, fällt das unter Sperre auf – nichts bleibt getauscht. */
     public function testConflictUnderLockAtCommit(): void
     {

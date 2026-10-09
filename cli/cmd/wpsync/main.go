@@ -1045,6 +1045,11 @@ func pushHint(err error, site *sites.Site) error {
 		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentContentPush, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch keine Inhalte pushen – Agent %s installieren", site.URL, agentapi.MinAgentContentPush))
 	case errors.As(err, &refused):
+		if refused.Reason == "content_failed" && len(refused.Keys) > 0 {
+			// Only an unrestored row gives content_failed a key: the transaction lost its connection and
+			// one write could not be taken back.
+			return cliout.Hint(err, fmt.Sprintf("%v – die genannte Zeile auf der Site von Hand prüfen; das Vorher-Abbild des Pushs liegt dafür weiter im Arbeitsordner auf dem Server", err))
+		}
 		return cliout.Hint(err, fmt.Sprintf("%v%s", err, contentNext(refused.Reason, site)))
 	case errors.Is(err, push.ErrNoBaseline):
 		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("für %s gibt es noch keinen Pull – zuerst wpsync pull %s", site.Name, site.Name))

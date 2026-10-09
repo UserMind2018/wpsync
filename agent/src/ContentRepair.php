@@ -38,9 +38,11 @@ final class ContentRepair
                 });
             }
         } catch (\Throwable $e) {
+            // Der Schlüssel steht in der Meldung (nie ein Wert): diese eine Zeile muss jemand ansehen.
             return new ContentException(
                 ContentException::FAILED,
-                'Die Verbindung zur Datenbank ging während der Transaktion verloren, und eine Zeile liess sich nicht auf ihren Stand davor zurücksetzen – bitte auf der Site prüfen.',
+                'Die Verbindung zur Datenbank ging während der Transaktion verloren, und die Zeile ' . $table . ' ' . str_replace("\0", ' ', $key)
+                . ' liess sich nicht auf ihren Stand davor zurücksetzen – sie ist auf der Site von Hand zu prüfen. Das Vorher-Abbild des Pushs bleibt dafür auf dem Server liegen.',
                 [ContentException::key($table, $key)],
                 ['unrestored' => true]
             );

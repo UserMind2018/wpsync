@@ -54,6 +54,8 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"content_blocked", &push.ContentError{Reason: "blocked_row", Message: "1 Zeile(n) stehen auf der Sperrliste"}, cliout.ExitUnknown, "nichts wurde übertragen"},
 		{"content_author", &push.ContentError{Reason: "author_unknown", Message: "Neue Beiträge brauchen einen Autor"}, cliout.ExitUnknown, "wp-admin/tools.php?page=wpsync"},
 		{"content_changed", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "changed_since_push", Message: "Seit dem Push geändert"}), cliout.ExitUnknown, "auch Code und Uploads nicht"},
+		{"content_unrestored", &push.ContentError{Reason: "content_failed", Message: "die Zeile posts 219 liess sich nicht zurücksetzen", Keys: []agentapi.ContentKey{{Table: "posts", Key: "219"}}}, cliout.ExitUnknown, "von Hand prüfen"},
+		{"content_failed", &push.ContentError{Reason: "content_failed", Message: "Die Datenbank hat einen Schreibzugriff abgelehnt"}, cliout.ExitUnknown, "nichts wurde übertragen"},
 		{"content_image", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "before_image_invalid", Message: "Das Vorher-Abbild lässt sich nicht öffnen"}), cliout.ExitUnknown, "WPSYNC_KEY oder die Salts"},
 		{"content_stage", &agentapi.APIError{Status: 409, Code: "wpsync_content_offset", Message: "Stück passt nicht an das Paket."}, cliout.ExitUnknown, "Stück passt nicht"},
 		{"content_left", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Warnings: []string{push.WarningContentNotRolledBack}}, cliout.ExitPushRolledBack, "wpsync rollback kunde p_20261005_0123456789ab"},

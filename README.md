@@ -684,7 +684,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `upload_missing` | eine Datei eines Attachments (`_wp_attached_file`, aus `_wp_attachment_metadata` `file`, `sizes.*.file`, `original_image`, aus `_wp_attachment_backup_sizes` `file` jedes Eintrags – die Schlüssel in jeder Gross-/Kleinschreibung) liegt weder auf dem Ziel noch in `--uploads`; `error.paths` nennt sie. Geprüft wird der Wert, wie er geschrieben wird; ein Pfad, der nicht unter `uploads` liegen darf, ist `blocked_row` |
 | `author_unknown` | das Paket legt Beiträge an, das Push-Fenster wurde aber nicht im WP-Admin geöffnet – der Benutzer, der es öffnet, wird ihr Autor – oder diesen Benutzer gibt es beim Anwenden nicht mehr. Erst beim echten Push, nicht im Probelauf |
 | `package_missing` | das Paket liegt nicht (mehr) auf der Site |
-| `content_failed` | Datenbank oder Dateisystem haben versagt; nichts wurde übernommen |
+| `content_failed` | Datenbank oder Dateisystem haben versagt; nichts wurde übernommen. Einzige Ausnahme: nennt der Fehler eine Zeile (`error.keys`, in der Antwort des Agents `unrestored: true`), ging die Verbindung mitten in der Transaktion verloren, und genau diese Zeile liess sich nicht auf ihren Stand davor zurücksetzen – sie ist von Hand zu prüfen. Der Arbeitsordner dieses Pushs bleibt dann mit dem Vorher-Abbild auf dem Server liegen (Status `failed`, nicht aufgeräumt) |
 | `changed_since_push` | nur bei `rollback`: siehe unten |
 | `before_image_invalid` | nur bei `rollback`: das Vorher-Abbild des Pushs lässt sich nicht öffnen, wurde verändert oder passt nicht zu dem, was der Push geschrieben hat – nichts wird zurückgenommen |
 
@@ -1037,7 +1037,9 @@ abbilden lässt, sofern das Profil sie kopiert.
   die Fehlernummer der Datenbank. Die Transaktion trägt eine Sitzungsmarke: baut WordPress eine
   verlorene Datenbankverbindung mittendrin neu auf, schreibt keine weitere Anweisung (jede ist an
   die Marke gebunden), es gibt keinen `COMMIT`, und der Push endet mit `content_failed`. Liess
-  sich dabei eine einzelne Zeile nicht auf ihren Stand davor zurücksetzen, nennt `error.keys` sie.
+  sich dabei eine einzelne Zeile nicht auf ihren Stand davor zurücksetzen, nennen `error.keys` und
+  die Meldung sie, und der Arbeitsordner des Pushs bleibt samt Vorher-Abbild liegen, bis jemand
+  die Zeile geprüft hat.
 - **Inhalts-Manifest:** `/content/manifest` ist signiert wie jeder Request, liest nur und
   braucht kein Push-Fenster. Die Inhalte verlassen den Server dort nur als Fingerabdruck, ohne
   Werte, im Umfang des Pull-Profils (abgewählte Tabellen und Beitragstypen fehlen) und ohne
