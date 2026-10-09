@@ -341,4 +341,70 @@ final class PushPluginsRollbackTest extends PushPluginsFlowCase
         $this->assertStringContainsString('self::mayRollBack($push, get_current_user_id())', $source, 'der Knopf hängt an derselben Regel');
         $this->assertStringContainsString('Push::rollbackPush(sanitize_text_field((string) wp_unslash($_POST[\'push_id\'])), get_current_user_id())', $source);
     }
+
+    /**
+     * Security-Review P4 S2: ein späterer, noch stehender Push, der dieselbe Einheit TAUSCHT, sperrt die
+     * Rücknahme eines älteren, der sie GESCHALTET hat – sonst aktivierte die Rücknahme Code, den niemand
+     * als aktiven geprüft hat. Nach der Rücknahme des späteren geht der ältere wieder.
+     */
+    public function testALaterCodePushBlocksTheRollbackOfAnEarlierSwitch(): void
+    {
+        list($a, $commit) = $this->pushSet([], $this->wish([], ['plugins/old']));
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $a], self::KEY));
+        list($b, $commit) = $this->pushSet(['plugins/old' => ['old.php' => "<?php\n/* Plugin Name: Altes Plugin\n * Version: 4.0 */\n"]]);
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $b], self::KEY));
+        $this->assertSame($b, $this->rescue($this->live, $a)['superseded_by']);
+
+        $error = $this->assertRefused('wpsync_push_rollback', 409, Push::rollback(['push_id' => $a], self::KEY));
+        $this->assertStringContainsString($b, $error->message);
+        $this->assertSame(['akismet/akismet.php'], $this->active($this->liveDb), 'old ist nicht mit dem ungeprüften Code wieder aktiv');
+
+        $this->ok(Push::rollback(['push_id' => $b], self::KEY));
+        $data = $this->ok(Push::rollback(['push_id' => $a], self::KEY))->data;
+        $this->assertSame(['deactivated' => [], 'reactivated' => ['old/old.php']], $data['plugins']);
+        $this->assertSame(self::OLD, file_get_contents($this->live . '/plugins/old/old.php'));
+    }
+
+    /**
+     * S2, Szenario des Reviews: A aktiviert X mit neuem Code, B schaltet X ohne Einheit wieder ab. Ohne die
+     * Sperre ginge erst A zurück (Code alt, Liste unverändert) und dann B – X wäre aktiv, mit dem alten Code.
+     */
+    public function testALaterSwitchBlocksTheRollbackOfAnEarlierPushOfTheSameUnit(): void
+    {
+        $units = ['plugins/kunde' => ['kunde.php' => self::KUNDE]];
+        list($a, $commit) = $this->pushSet($units, $this->wish(['plugins/kunde'], [], $units));
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $a], self::KEY));
+        list($b, $commit) = $this->pushSet([], $this->wish([], ['plugins/kunde']));
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $b], self::KEY));
+        $this->assertSame(self::ACTIVE, $this->active($this->liveDb));
+
+        $this->assertRefused('wpsync_push_rollback', 409, Push::rollback(['push_id' => $a], self::KEY));
+        $this->assertFileExists($this->live . '/plugins/kunde/kunde.php', 'der Code von A steht noch');
+
+        $data = $this->ok(Push::rollback(['push_id' => $b], self::KEY))->data;
+        $this->assertSame(['deactivated' => [], 'reactivated' => ['kunde/kunde.php']], $data['plugins']);
+        $data = $this->ok(Push::rollback(['push_id' => $a], self::KEY))->data;
+        $this->assertSame(['deactivated' => ['kunde/kunde.php'], 'reactivated' => []], $data['plugins']);
+        $this->assertSame(self::ACTIVE, $this->active($this->liveDb));
+        $this->assertDirectoryDoesNotExist($this->live . '/plugins/kunde');
+    }
+
+    /** S2: zwei Sätze, die verschiedene Plugins schalten, sperren einander nicht – und ein Push ohne Plugin-Zustand trägt kein Feld switched. */
+    public function testPushesOfOtherUnitsDoNotBlock(): void
+    {
+        list($a, $commit) = $this->pushSet([], $this->wish([], ['plugins/old']));
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $a], self::KEY));
+        $this->assertSame(['plugins/old'], $this->rescue($this->live, $a)['switched']);
+        list($b, $commit) = $this->pushSet(['plugins/x' => ['main.php' => 'new']]);
+        $this->ok($commit);
+        $this->ok(Push::confirm(['push_id' => $b], self::KEY));
+        $this->assertArrayNotHasKey('switched', $this->rescue($this->live, $b));
+        $this->assertNull($this->rescue($this->live, $a)['superseded_by']);
+        $this->ok(Push::rollback(['push_id' => $a], self::KEY));
+    }
 }

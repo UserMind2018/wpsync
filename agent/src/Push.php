@@ -682,7 +682,7 @@ final class Push
         wp_mkdir_p($base . '/old');
         // Vor dem ersten rename: stirbt PHP mitten im Anlegen oder Tausch, kann rescue.php zurücknehmen.
         // Der DB-Anteil – Paket oder Plugin-Zustand – steht hier schon als „pending“, lange vor START TRANSACTION.
-        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha, $wish !== null);
+        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha, $wish !== null, $wish === null ? [] : array_merge($wish['activate'], $wish['deactivate']));
         if ($upIndex !== null) {
             $placed = [];
             try {
@@ -709,7 +709,8 @@ final class Push
             self::discard($pushId, self::FAILED);
             return self::error('wpsync_push_swap', 'Tausch fehlgeschlagen, der alte Stand liegt wieder an seinem Platz: ' . $e->getMessage(), 500);
         }
-        PushRescue::supersede($work, $pushId, array_column($pairs, 'unit'));
+        // Überholt wird, wer dieselbe Einheit getauscht ODER geschaltet hat (S2) – auch von einem Satz ohne Paare.
+        PushRescue::supersede($work, $pushId, array_values(array_unique(array_merge(array_column($pairs, 'unit'), $wish === null ? [] : array_merge($wish['activate'], $wish['deactivate'])))));
         PushSwap::resetCaches();
         PushSwap::remove($base . '/stage');
 

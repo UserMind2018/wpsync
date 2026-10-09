@@ -352,4 +352,35 @@ final class PushRescuePluginsTest extends ContentRollbackPluginsCase
         $this->assertSame(['deactivated' => ['kunde/kunde.php'], 'reactivated' => []], $body['plugins']);
         $this->assertSame(['fremd/fremd.php', 'old/old.php'], $this->active());
     }
+
+    /**
+     * Security-Review P4 S2 über rescue.php: der unbestätigte Push hat X nur geschaltet (kein Paar), ein
+     * späterer hat X getauscht – rescue.php lehnt die Rücknahme ab, bevor es Sperre, Umschlag oder Datenbank anfasst.
+     */
+    public function testRescueRefusesAPushWhoseSwitchedUnitALaterPushSwapped(): void
+    {
+        $this->pushed([], ['old']);
+        $record             = $this->record();
+        $record['switched'] = ['plugins/old'];
+        file_put_contents(PushRescue::file($this->work, self::ID), (string) json_encode($record));
+        $later = 'p_20261009_ba9876543210';
+        mkdir($this->work . '/' . $later, 0777, true);
+        PushRescue::write($this->work, $later, hash('sha256', 'x'), [['unit' => 'plugins/old', 'target' => $this->content . '/plugins/old', 'snapshot' => null, 'discard' => $this->work . '/' . $later . '/discard/0']], PushRescue::COMMITTED);
+        PushRescue::supersede($this->work, $later, ['plugins/old']);
+        $this->assertSame($later, $this->record()['superseded_by']);
+
+        $stands = $this->store->data;
+        $this->assertSame([409, ['ok' => false, 'error' => 'superseded', 'by' => $later]], $this->rescue());
+        $this->assertSame($stands, $this->store->data);
+        $this->assertSame(0, $this->connected);
+
+        // Ein späterer Push, der die Einheit nur schaltet, überholt ebenso; einer mit anderen Einheiten nicht.
+        PushRescue::setStatus($this->work, $later, PushRescue::ROLLED_BACK);
+        $third = 'p_20261009_cccccccccccc';
+        mkdir($this->work . '/' . $third, 0777, true);
+        PushRescue::write($this->work, $third, hash('sha256', 'y'), [], PushRescue::COMMITTED, [], null, true, ['plugins/anderes']);
+        PushRescue::supersede($this->work, $third, PushRescue::unitsOf((array) PushRescue::read($this->work, $third)));
+        $this->assertSame($later, $this->record()['superseded_by'], 'unverändert – und der zurückgerollte spätere sperrt nicht mehr');
+        $this->assertSame(200, $this->rescue()[0]);
+    }
 }

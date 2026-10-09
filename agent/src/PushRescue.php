@@ -128,8 +128,12 @@ final class PushRescue
      * „pending“, bevor die Transaktion beginnt. sha256 ist null ohne Paket. content.plugins ({added, removed})
      * steht nur zur Auskunft da – für plugins_not_restored –; geschrieben wird nie daraus, die Rücknahme
      * liest allein das authentisierte Vorher-Abbild. Der Commit trägt die Einträge nach dem COMMIT ein.
+     *
+     * @param list<string> $switched Einheiten plugins/<slug>, die der Push schaltet (activate und deactivate): sie
+     *        zählen für „überholt“ wie die getauschten (unitsOf(), Security-Review P4 S2). Das Feld fehlt ohne
+     *        Plugin-Zustand – der Datensatz ist dann Byte für Byte wie vor P4
      */
-    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = [], ?string $contentSha = null, bool $plugins = false): void
+    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = [], ?string $contentSha = null, bool $plugins = false, array $switched = []): void
     {
         $content = null;
         if ($contentSha !== null || $plugins) {
@@ -138,7 +142,7 @@ final class PushRescue
                 $content['plugins'] = ['added' => [], 'removed' => []];
             }
         }
-        self::save($workDir, [
+        self::save($workDir, ($switched === [] ? [] : ['switched' => array_values($switched)]) + [
             'push_id'       => $pushId,
             'key_hash'      => $keyHash,
             'pairs'         => $pairs,
@@ -295,6 +299,31 @@ final class PushRescue
     }
 
     /**
+     * Die Einheiten, die ein Push angefasst hat: die getauschten (pairs) und die, deren Plugin er ein- oder
+     * ausgeschaltet hat (switched, P4). Ein Satz nur aus --deactivate hat keine Paare – ohne das zweite
+     * überholte er nie und würde nie überholt, und eine Rücknahme aktivierte Code, den ein späterer Push
+     * gebracht hat (Security-Review P4 S2). rescue.json ist nicht authentisiert: nur Namen in ihrer Form.
+     *
+     * @param array<string, mixed> $record
+     * @return list<string>
+     */
+    public static function unitsOf(array $record): array
+    {
+        $units = [];
+        foreach ((array) ($record['pairs'] ?? []) as $pair) {
+            if (is_array($pair) && is_string($pair['unit'] ?? null)) {
+                $units[$pair['unit']] = true;
+            }
+        }
+        foreach (is_array($record['switched'] ?? null) ? $record['switched'] : [] as $unit) {
+            if (is_string($unit) && preg_match('#^plugins/[A-Za-z0-9][A-Za-z0-9._-]*\z#', $unit) === 1) {
+                $units[$unit] = true;
+            }
+        }
+        return array_map('strval', array_keys($units));
+    }
+
+    /**
      * Ältere, noch aktive Pushes derselben Einheiten lassen sich erst wieder zurückrollen, wenn
      * dieser hier zurückgerollt ist (U6). Jeder ihrer Datensätze wird nur unter seiner eigenen
      * Sperre geändert (amend()) – nie neben seiner Rücknahme oder seiner Bestätigung.
@@ -306,7 +335,7 @@ final class PushRescue
         foreach (self::others($workDir, $pushId) as $seen) {
             self::amend($workDir, (string) $seen['push_id'], static function (array $record) use ($pushId, $units): ?array {
                 $active = in_array($record['status'], [self::COMMITTED, self::CONFIRMED], true) && $record['superseded_by'] === null;
-                $shared = array_intersect($units, array_column($record['pairs'], 'unit')) !== [];
+                $shared = array_intersect($units, self::unitsOf($record)) !== [];
                 if (!$active || !$shared) {
                     return null;
                 }

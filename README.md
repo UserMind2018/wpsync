@@ -483,6 +483,9 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
   Plugin-Zustand hat einen Datenbank-Anteil, auch ohne `--content`: Die Rücknahme geht zuerst über
   den Agent und erst ohne Antwort über `rescue.php`; lehnt der Agent ab (etwa weil eine Zeile des
   Pakets seit dem Push geändert wurde), bleibt der Satz ganz.
+  Ein späterer, noch stehender Push, der dieselbe Einheit **tauscht oder schaltet**, sperrt die
+  Rücknahme des älteren („Zuerst den späteren Push … zurückrollen“): sonst aktivierte die Rücknahme
+  Code, den ein anderer Push gebracht und niemand als aktiven geprüft hat.
 - **Staging.** `--to staging` schreibt nur die Tabelle der Kopie. Plugins, die die Kopie bewusst
   abschaltet (Mail, Cache, Backup …), werden dort nicht aktiviert (`skipped`,
   `disabled_on_staging`) – und was ein solches voraussetzt, ebenfalls nicht (`requires_skipped`);
