@@ -1403,6 +1403,10 @@ func rolledBack(report *Result, err error) error {
 		// are still what was applied.
 		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
 			report.Content, report.Plugins = nil, nil
+			// The post actions of the commit describe a state that is gone. What stays are those of the
+			// rollback: the agent's – or none through rescue.php, which runs none (the agent catches up
+			// on them once WordPress loads again; they then stand in the push log).
+			report.PostActions = nil
 		}
 		if rolled.PostActions != nil {
 			report.PostActions = rolled.PostActions

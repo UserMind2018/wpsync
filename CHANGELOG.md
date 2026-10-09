@@ -63,6 +63,8 @@ Agent ≥ 0.9.0 wie bisher.
 - Die CLI liest eine JSON-Antwort des Agents nur noch bis 256 MiB (nach dem Entpacken gezählt);
   darüber bricht der Befehl mit einem klaren Fehler ab. Dateien, Tabellen und das Inhalts-Manifest
   werden weiter gestreamt
+- Nach einer Rücknahme über `rescue.php` trägt das Ergebnis kein `post_actions` mehr (bisher standen
+  dort die Nacharbeiten des Commits)
 - Die Rückfrage vor einem Push nennt die Plugins, die abgeschaltet werden, beim Namen; ohne Terminal
   (Container-Modus, `--json`) gilt wie bisher `--yes`
 - Der Plan nennt eine neue Einheit aus `--activate` nicht mehr „bleibt auf der Site inaktiv“; der

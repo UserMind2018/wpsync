@@ -1061,8 +1061,14 @@ func rescueDBNext(reason string, site *sites.Site) string {
 func pluginsNext(e *push.PluginsError, site *sites.Site) string {
 	switch e.Reason {
 	case "plugins_invalid":
+		if len(e.Plugins) > 0 {
+			return "; nichts wurde getauscht" // the message names unit and reason already
+		}
 		return " – aktivieren lässt sich nur ein Plugin, dessen Einheit im selben Push liegt und das genau einer Hauptdatei mit dem Kopf „Plugin Name:“ direkt im Ordner hat; nichts wurde getauscht"
 	case "plugins_requirements":
+		if len(e.Plugins) > 0 {
+			return "; nichts wurde getauscht"
+		}
 		return " – PHP-Version, WordPress-Version oder vorausgesetzte Plugins des Ziels passen nicht zum Satz; nichts wurde getauscht"
 	case "plugins_not_allowed":
 		return fmt.Sprintf(" – Plugins schaltet ein Push nur in einem Fenster, das ein Administrator mit dem Recht activate_plugins geöffnet hat: %s/wp-admin/tools.php?page=wpsync", site.URL)

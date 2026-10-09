@@ -219,7 +219,8 @@ func TestRunStopsOnARefusalOfThePluginState(t *testing.T) {
 	if !errors.As(err, &pe) || pe.Reason != "plugins_requirements" || !reflect.DeepEqual(pe.Plugins, refused) {
 		t.Fatalf("err = %v\n%s", err, out)
 	}
-	if !strings.Contains(err.Error(), "plugins/kunde (requires_php: verlangt \"8.2\", vorhanden \"8.0\")") {
+	// Eine Meldung, einmal gesagt: was es ist, je Einheit warum – ohne den Sammeltext des Agents daneben.
+	if err.Error() != `Plugin-Zustand abgelehnt: plugins/kunde braucht PHP "8.2", das Ziel hat "8.0" (plugins_requirements)` {
 		t.Errorf("message = %q", err)
 	}
 	if got := strings.Join(f.routes, " "); got != "begin" {
@@ -928,5 +929,72 @@ func TestRunWarnsWhenTheAdminPageIsNotChecked(t *testing.T) {
 	}
 	if WarningAdminCheckSkipped != "admin_check_skipped" {
 		t.Errorf("warning = %s", WarningAdminCheckSkipped)
+	}
+}
+
+// Nach einer Rücknahme über rescue.php trägt das Ergebnis keine post_actions: die des Commits gelten nicht
+// mehr, und die der Rücknahme holt der Agent erst nach, wenn WordPress wieder lädt. Über den Agent bleiben
+// es die Nacharbeiten der Rücknahme.
+func TestRunDropsThePostActionsOfTheCommitAfterARescueRollback(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken, f.rollback = true, 500
+	f.rescueBody = `{"ok":true,"status":"rolled_back","content":{"state":"rolled_back","cache":"none"},"plugins":{"deactivated":["kunde/kunde.php"],"reactivated":[]}}`
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	var report Result
+	o.Report = &report
+	var rolled *RolledBackError
+	if err := Run(o); !errors.As(err, &rolled) || rolled.Via != "rescue" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if report.PostActions != nil {
+		t.Errorf("post actions of the commit in the result of a rollback: %+v", report.PostActions)
+	}
+	if raw, _ := json.Marshal(report); strings.Contains(string(raw), "post_actions") {
+		t.Errorf("json = %s", raw)
+	}
+
+	f = newFakeSite(t)
+	f.adminBroken = true
+	f.rbBody = `{"ok":true,"plugins":{"deactivated":["kunde/kunde.php"],"reactivated":[]},"post_actions":[{"step":"rewrite_rules","ok":true}]}`
+	o, _, out = pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	o.Report = &report
+	if err := Run(o); !errors.As(err, &rolled) || rolled.Via != "agent" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if len(report.PostActions) != 1 || report.PostActions[0].Step != "rewrite_rules" {
+		t.Errorf("post actions = %+v", report.PostActions)
+	}
+}
+
+// Die Meldung einer Ablehnung nennt je Einheit den Grund in Worten – einmal, ohne den Sammeltext des Agents
+// und ohne denselben Hinweis ein zweites Mal dahinter (im E2E als doppelt aufgefallen).
+func TestPluginsErrorSaysEachReasonOnce(t *testing.T) {
+	e := &PluginsError{Reason: "plugins_requirements", Message: "Voraussetzungen nicht erfüllt: plugins/alt – PHP- oder WordPress-Version, ein fehlendes Plugin oder ein aktives Plugin, das dieses voraussetzt.",
+		Plugins: []agentapi.PluginRefusal{
+			{Unit: "plugins/alt", Why: "required_by", Needs: "plugins/addon"},
+			{Unit: "plugins/neu", Why: "requires_wp", Needs: "7.0", Has: "6.5.2"},
+			{Unit: "plugins/neu", Why: "requires_plugins", Needs: "woo-commerce"},
+		}}
+	want := `Plugin-Zustand abgelehnt: plugins/alt wird von "plugins/addon" vorausgesetzt; plugins/neu braucht WordPress "7.0", das Ziel hat "6.5.2"; plugins/neu setzt "woo-commerce" voraus, das auf dem Ziel nicht aktiv ist (plugins_requirements)`
+	if e.Error() != want {
+		t.Errorf("message = %s", e.Error())
+	}
+	for why, text := range map[string]string{
+		"no_plugin_file": "plugins/x hat keine PHP-Datei mit „Plugin Name:“ direkt im Ordner",
+		"ambiguous":      "plugins/x hat mehrere PHP-Dateien mit „Plugin Name:“ direkt im Ordner",
+		"unit_missing":   "plugins/x liegt nicht im Satz dieses Pushs",
+		"file_name":      "plugins/x: der Name der Hauptdatei ist nicht zulässig",
+		"neuer_grund":    "plugins/x (neuer_grund)",
+	} {
+		got := (&PluginsError{Reason: "plugins_invalid", Plugins: []agentapi.PluginRefusal{{Unit: "plugins/x", Why: why}}}).Error()
+		if got != "Plugin-Zustand abgelehnt: "+text+" (plugins_invalid)" {
+			t.Errorf("%s: %s", why, got)
+		}
+	}
+	// Ohne Einheiten spricht der Agent.
+	if got := (&PluginsError{Reason: "plugins_unsupported", Message: "Auf einer Multisite schaltet wpsync keine Plugins."}).Error(); got != "Auf einer Multisite schaltet wpsync keine Plugins. (plugins_unsupported)" {
+		t.Errorf("message = %s", got)
 	}
 }

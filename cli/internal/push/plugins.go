@@ -230,36 +230,53 @@ type PluginsError struct {
 }
 
 func (e *PluginsError) Error() string {
+	// With the units at hand the CLI says it itself, once: the agent's text sums the same reasons up.
+	if len(e.Plugins) > 0 {
+		var shown []string
+		for i, p := range e.Plugins {
+			if i == 5 {
+				shown = append(shown, fmt.Sprintf("und %d weitere", len(e.Plugins)-5))
+				break
+			}
+			shown = append(shown, refusalText(p))
+		}
+		return fmt.Sprintf("Plugin-Zustand abgelehnt: %s (%s)", strings.Join(shown, "; "), e.Reason)
+	}
 	msg := e.Message
 	if msg == "" {
 		msg = "Plugin-Zustand abgelehnt"
-	}
-	var shown []string
-	for i, p := range e.Plugins {
-		if i == 5 {
-			shown = append(shown, fmt.Sprintf("und %d weitere", len(e.Plugins)-5))
-			break
-		}
-		s := p.Unit
-		if p.Why != "" {
-			s += " (" + p.Why
-			if p.Needs != "" {
-				s += ": verlangt " + agentapi.Printable(p.Needs)
-				if p.Has != "" {
-					s += ", vorhanden " + agentapi.Printable(p.Has)
-				}
-			}
-			s += ")"
-		}
-		shown = append(shown, s)
-	}
-	if len(shown) > 0 {
-		msg += " – " + strings.Join(shown, ", ")
 	}
 	if e.Detail != "" {
 		return fmt.Sprintf("%s (%s: %s)", msg, e.Reason, e.Detail)
 	}
 	return fmt.Sprintf("%s (%s)", msg, e.Reason)
+}
+
+// refusalText says in words why the agent refuses one unit. Needs and Has are the site's words:
+// quoted. An unknown reason is named as it is.
+func refusalText(p agentapi.PluginRefusal) string {
+	needs, has := agentapi.Printable(p.Needs), agentapi.Printable(p.Has)
+	switch p.Why {
+	case "requires_php":
+		return fmt.Sprintf("%s braucht PHP %s, das Ziel hat %s", p.Unit, needs, has)
+	case "requires_wp":
+		return fmt.Sprintf("%s braucht WordPress %s, das Ziel hat %s", p.Unit, needs, has)
+	case "requires_plugins":
+		return fmt.Sprintf("%s setzt %s voraus, das auf dem Ziel nicht aktiv ist", p.Unit, needs)
+	case "required_by":
+		return fmt.Sprintf("%s wird von %s vorausgesetzt", p.Unit, needs)
+	case "no_plugin_file":
+		return p.Unit + " hat keine PHP-Datei mit „Plugin Name:“ direkt im Ordner"
+	case "ambiguous":
+		return p.Unit + " hat mehrere PHP-Dateien mit „Plugin Name:“ direkt im Ordner"
+	case "unit_missing":
+		return p.Unit + " liegt nicht im Satz dieses Pushs"
+	case "file_name":
+		return p.Unit + ": der Name der Hauptdatei ist nicht zulässig"
+	case "":
+		return p.Unit
+	}
+	return p.Unit + " (" + p.Why + ")"
 }
 
 func (e *PluginsError) Unwrap() error { return e.Err }

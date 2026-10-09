@@ -60,6 +60,8 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"no_plugins", fmt.Errorf("%w: %w", push.ErrAgentNoPlugins, &agentapi.APIError{Status: 400, Code: "wpsync_push_units"}), cliout.ExitAgentOutdated, "kann mit einem Push noch keine Plugins schalten – Agent 0.9.0 installieren"},
 		{"plugins_invalid", &push.PluginsError{Reason: "plugins_invalid", Message: "Keine Hauptdatei"}, cliout.ExitUnknown, "genau einer Hauptdatei"},
 		{"plugins_requirements", &push.PluginsError{Reason: "plugins_requirements", Message: "Voraussetzungen nicht erfüllt"}, cliout.ExitUnknown, "nichts wurde getauscht"},
+		{"plugins_requirements_units", &push.PluginsError{Reason: "plugins_requirements", Message: "Voraussetzungen nicht erfüllt: …", Plugins: []agentapi.PluginRefusal{{Unit: "plugins/alt", Why: "required_by", Needs: "plugins/addon"}}}, cliout.ExitUnknown,
+			`Plugin-Zustand abgelehnt: plugins/alt wird von "plugins/addon" vorausgesetzt (plugins_requirements); nichts wurde getauscht`},
 		{"plugins_not_allowed", &push.PluginsError{Reason: "plugins_not_allowed", Message: "Plugins schaltet ein Push nur mit Öffner"}, cliout.ExitUnknown, "activate_plugins"},
 		{"plugins_unsupported", &push.PluginsError{Reason: "plugins_unsupported", Message: "Multisite"}, cliout.ExitUnknown, "Multisite"},
 		{"plugins_failed", &push.PluginsError{Reason: "plugins_failed", Message: "active_plugins nicht lesbar"}, cliout.ExitUnknown, "zurückgetauscht"},
