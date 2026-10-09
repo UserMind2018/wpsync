@@ -99,4 +99,75 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->expectException(ContentException::class);
         ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
     }
+
+    /** @return array<string, array{0: int}> */
+    public static function lostWrites(): array
+    {
+        return ['erster' => [1], 'mittendrin' => [6], 'eingefügter Beitrag' => [12], 'letzter' => [14]];
+    }
+
+    /**
+     * Wie beim Anwenden: verliert die Rücknahme ihre Verbindung, bleibt der Satz ganz – der eine
+     * Schlüssel, dessen Schreibzugriff für sich lief, geht auf den gepushten Stand zurück.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('lostWrites')]
+    public function testALostConnectionWhileRollingBackKeepsThePushedState(int $n): void
+    {
+        $this->apply($this->rows());
+        $pushed                   = $this->store->data;
+        $this->store->log         = [];
+        $this->store->loseAtWrite = 14 + $n; // das Anwenden hat 14-mal geschrieben
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+            $this->assertSame([], $e->keys());
+        }
+        $this->assertSame(self::sorted($pushed), self::sorted($this->store->data));
+        $log  = $this->store->log;
+        $lost = (int) array_search('lost', $log, true);
+        $this->assertSame(1, preg_match('/^(?:write|delete) (.+)\z/s', $log[$lost + 1], $m));
+        $this->assertSame(['rollback', 'begin'], array_slice($log, $lost + 2, 2));
+        $repair = array_slice($log, $lost + 4);
+        $this->assertCount(2, $repair, implode(', ', $repair));
+        $this->assertMatchesRegularExpression('/^(write|delete) ' . preg_quote($m[1], '/') . '\z/', $repair[0]);
+    }
+
+    public function testALostConnectionBeforeTheFirstWriteOfARollback(): void
+    {
+        $this->apply($this->rows());
+        $pushed                  = $this->store->data;
+        $this->store->log        = [];
+        $this->store->beforeLock = static function (ContentMemory $store): void {
+            $store->lose();
+        };
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertSame($pushed, $this->store->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+    }
+
+    public function testALostConnectionAtTheCommitOfARollbackIsLookedUp(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $pushed                    = $this->store->data;
+        $this->store->loseAtCommit = 'discarded';
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertSame($pushed, $this->store->data);
+
+        $this->store->loseAtCommit = 'landed';
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
 }

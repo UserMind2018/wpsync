@@ -10,6 +10,12 @@ defined('ABSPATH') || exit;
  * $wpdb->prepare(), Bezeichner stehen in Backticks und stammen nie aus dem Paket: Spaltennamen
  * kommen aus der Datenbank selbst (SELECT *) oder aus den festen Listen. Meta-Schlüssel und
  * Taxonomien werden bytegenau verglichen (BINARY), wie Manifest und Export sie gruppieren.
+ *
+ * Eine Transaktion trägt eine Sitzungsmarke (@wpsync_tx): $wpdb baut eine verlorene Verbindung
+ * von selbst neu auf und wiederholt die Abfrage – die Transaktion und ihre Sperren sind dann weg,
+ * und was folgt, liefe einzeln im Autocommit. Die neue Verbindung kennt die Marke nicht. alive()
+ * fragt sie ab, und jede schreibende Anweisung in einer Transaktion trägt sie als Bedingung: auf
+ * einer neuen Verbindung schreibt sie nichts.
  */
 final class ContentSql implements ContentStore
 {
@@ -24,6 +30,8 @@ final class ContentSql implements ContentStore
     private $db;
     /** @var array<string, string> Tabelle ohne Präfix → voller Name */
     private $tables;
+    /** @var string|null Marke der laufenden Transaktion; null ausserhalb */
+    private $mark = null;
 
     /**
      * @param object                $db     $wpdb der Site
@@ -157,7 +165,7 @@ final class ContentSql implements ContentStore
             ? $this->db->prepare(' WHERE `option_name` = %s AND BINARY `option_name` = %s', $key, $key)
             : $this->db->prepare(' WHERE `' . $column . '` = %d', $key);
         if ($state === null) {
-            $this->exec('DELETE FROM ' . $this->quoted($table) . $where);
+            $this->exec('DELETE FROM ' . $this->quoted($table) . $where . $this->guard());
             return;
         }
         unset($state['option_id']); // vergibt die Datenbank
@@ -177,11 +185,11 @@ final class ContentSql implements ContentStore
         }
         if ($exists) {
             if ($sets !== []) {
-                $this->exec('UPDATE ' . $this->quoted($table) . ' SET ' . implode(', ', $sets) . $where);
+                $this->exec('UPDATE ' . $this->quoted($table) . ' SET ' . implode(', ', $sets) . $where . $this->guard());
             }
             return;
         }
-        $this->exec('INSERT INTO ' . $this->quoted($table) . ' (' . implode(', ', $names) . ') VALUES (' . implode(', ', $values) . ')');
+        $this->insert($table, implode(', ', $names), implode(', ', $values));
     }
 
     public function taxonomies(array $termIds): array
@@ -201,14 +209,14 @@ final class ContentSql implements ContentStore
     {
         switch ($table) {
             case 'posts':
-                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `post_id` = %d', $key));
-                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `object_id` = %d', $key));
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `post_id` = %d', $key) . $this->guard());
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `object_id` = %d', $key) . $this->guard());
                 return;
             case 'terms':
-                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('termmeta') . ' WHERE `term_id` = %d', $key));
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('termmeta') . ' WHERE `term_id` = %d', $key) . $this->guard());
                 return;
             case 'term_taxonomy':
-                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `term_taxonomy_id` = %d', $key));
+                $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('term_relationships') . ' WHERE `term_taxonomy_id` = %d', $key) . $this->guard());
                 return;
         }
         throw new \InvalidArgumentException('nothing hangs on ' . $table);
@@ -219,27 +227,69 @@ final class ContentSql implements ContentStore
         foreach (array_chunk(array_values(array_unique(array_map('strval', $termTaxonomyIds))), self::CHUNK) as $chunk) {
             $sql = 'UPDATE ' . $this->quoted('term_taxonomy') . ' x SET x.`count` = (SELECT COUNT(*) FROM ' . $this->quoted('term_relationships')
                 . ' r WHERE r.`term_taxonomy_id` = x.`term_taxonomy_id`) WHERE x.`term_taxonomy_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ')';
-            $this->exec($this->db->prepare($sql, ...$chunk));
+            $this->exec($this->db->prepare($sql, ...$chunk) . $this->guard());
         }
     }
 
     public function dropMeta(string $metaKey): void
     {
         // Erst über den Index, dann bytegenau.
-        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `meta_key` = %s AND BINARY `meta_key` = %s', $metaKey, $metaKey));
+        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted('postmeta') . ' WHERE `meta_key` = %s AND BINARY `meta_key` = %s', $metaKey, $metaKey) . $this->guard());
     }
 
     public function transaction(callable $do)
     {
-        $this->exec('START TRANSACTION');
+        // Erst die Marke, dann die Transaktion: baut $wpdb die Verbindung dazwischen oder danach neu
+        // auf, hat die neue entweder beides oder keine Marke – nie eine Marke ohne Transaktion.
+        $this->mark = bin2hex(random_bytes(8));
         try {
-            $result = $do();
-            $this->exec('COMMIT');
-        } catch (\Throwable $e) {
-            $this->db->query('ROLLBACK');
-            throw $e;
+            $this->exec((string) $this->db->prepare('SET @wpsync_tx = %s', $this->mark));
+            $this->exec('START TRANSACTION');
+            try {
+                $result = $do();
+                if (!$this->alive()) {
+                    throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging während der Transaktion verloren – nichts wurde übernommen.');
+                }
+                $this->exec('COMMIT');
+            } catch (\Throwable $e) {
+                $this->db->query('ROLLBACK');
+                throw $e;
+            }
+            // Ging die Verbindung im COMMIT selbst verloren, hat $wpdb ihn auf einer neuen wiederholt –
+            // dort war er leer. Ob der erste ankam, weiss hier niemand: der Aufrufer sieht nach.
+            if (!$this->alive()) {
+                throw new ContentException(ContentException::UNCLEAR, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren.');
+            }
+            return $result;
+        } finally {
+            $this->mark = null;
+            $this->db->query('SET @wpsync_tx = NULL');
         }
-        return $result;
+    }
+
+    public function alive(): bool
+    {
+        return $this->mark !== null && (string) $this->db->get_var('SELECT @wpsync_tx') === $this->mark;
+    }
+
+    /** Bedingung jeder schreibenden Anweisung in einer Transaktion: nur auf der Verbindung, die sie begann. */
+    private function guard(): string
+    {
+        return $this->mark === null ? '' : (string) $this->db->prepare(' AND @wpsync_tx = %s', $this->mark);
+    }
+
+    /**
+     * INSERT einer Zeile; in einer Transaktion als INSERT … SELECT mit der Marke als Bedingung.
+     *
+     * @param string $columns Bezeichner in Backticks, mit Komma getrennt
+     * @param string $values  fertige Literale, mit Komma getrennt
+     */
+    private function insert(string $table, string $columns, string $values): void
+    {
+        $head = 'INSERT INTO ' . $this->quoted($table) . ' (' . $columns . ') ';
+        $this->exec($this->mark === null
+            ? $head . 'VALUES (' . $values . ')'
+            : $head . 'SELECT ' . $values . ' FROM DUAL WHERE ' . substr($this->guard(), 5));
     }
 
     /**
@@ -298,12 +348,9 @@ final class ContentSql implements ContentStore
     {
         $column = self::META[$table];
         list($object, $name) = ContentState::split($key);
-        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted($table) . ' WHERE `' . $column . '` = %d AND BINARY `meta_key` = %s', $object, $name));
+        $this->exec($this->db->prepare('DELETE FROM ' . $this->quoted($table) . ' WHERE `' . $column . '` = %d AND BINARY `meta_key` = %s', $object, $name) . $this->guard());
         foreach ((array) ($state['values'] ?? []) as $value) {
-            $this->exec(
-                'INSERT INTO ' . $this->quoted($table) . ' (`' . $column . '`, `meta_key`, `meta_value`) VALUES ('
-                . $this->db->prepare('%d, %s', $object, $name) . ', ' . $this->literal($value) . ')'
-            );
+            $this->insert($table, '`' . $column . '`, `meta_key`, `meta_value`', $this->db->prepare('%d, %s', $object, $name) . ', ' . $this->literal($value));
         }
     }
 
@@ -316,15 +363,10 @@ final class ContentSql implements ContentStore
             . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`object_id` = %d AND BINARY x.`taxonomy` = %s',
             $object,
             $taxonomy
-        ));
+        ) . $this->guard());
         foreach ((array) ($state['values'] ?? []) as $entry) {
             $parts = explode(':', (string) $entry);
-            $this->exec($this->db->prepare(
-                'INSERT INTO ' . $this->quoted('term_relationships') . ' (`object_id`, `term_taxonomy_id`, `term_order`) VALUES (%d, %d, %d)',
-                $object,
-                $parts[0],
-                $parts[1] ?? 0
-            ));
+            $this->insert('term_relationships', '`object_id`, `term_taxonomy_id`, `term_order`', (string) $this->db->prepare('%d, %d, %d', $object, $parts[0], $parts[1] ?? 0));
         }
     }
 

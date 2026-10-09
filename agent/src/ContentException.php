@@ -35,6 +35,13 @@ final class ContentException extends \RuntimeException
     /** Datenbank oder Dateisystem haben versagt – nichts wurde geschrieben. */
     public const FAILED           = 'content_failed';
 
+    /**
+     * Nur zwischen ContentStore::transaction() und seinem Aufrufer: die Verbindung ging im COMMIT
+     * verloren, ob er ankam, ist offen. Der Aufrufer sieht nach und macht daraus Erfolg oder
+     * content_failed – dieser Grund verlässt den Agent nie.
+     */
+    public const UNCLEAR          = 'commit_unclear';
+
     /** Mehr Schlüssel nennt keine Antwort; total sagt, wie viele es sind. */
     public const MAX_KEYS = 200;
 

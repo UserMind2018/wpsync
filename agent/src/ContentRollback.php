@@ -31,43 +31,82 @@ final class ContentRollback
         }
         $after   = self::keys($dir . '/' . ContentApply::AFTER, false);
         $changes = is_array($after) ? json_decode((string) file_get_contents($dir . '/' . ContentApply::AFTER), true)['changes'] ?? null : null;
-        return $target->store->transaction(static function () use ($target, $before, $after, $changes): array {
-            $byTable = array_fill_keys(ContentState::ORDER, []);
+        $store = $target->store;
+        $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
+        try {
+            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, &$lost): array {
+                $byTable = array_fill_keys(ContentState::ORDER, []);
+                foreach ($before as $entry) {
+                    $byTable[$entry['t']][] = $entry['k'];
+                }
+                $now = [];
+                foreach ($byTable as $table => $keys) {
+                    $now[$table] = $keys === [] ? [] : $store->read($table, $keys, true);
+                }
+                $untouched = true;
+                $changed   = [];
+                foreach ($before as $i => $entry) {
+                    $table   = $entry['t'];
+                    $key     = $entry['k'];
+                    $current = self::fingerprint($target, $table, $key, $now[$table][$key] ?? null);
+                    if ($current !== self::fingerprint($target, $table, $key, $entry['state'])) {
+                        $untouched = false;
+                    }
+                    $pushed = $after === null ? null : ($after[$i] ?? null);
+                    if ($pushed === null || $pushed['t'] !== $table || $pushed['k'] !== $key || $current !== ($pushed['h'] ?? 'absent')) {
+                        $changed[] = ContentException::key($table, $key);
+                    }
+                }
+                // Was unter Sperre gelesen wurde, gilt nur auf der Verbindung der Transaktion.
+                if (!$store->alive()) {
+                    throw ContentRepair::lost();
+                }
+                if ($untouched) {
+                    return ['state' => self::NOTHING, 'changes' => null];
+                }
+                if ($changed !== []) {
+                    throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
+                }
+                foreach (array_reverse($before) as $entry) {
+                    $table = $entry['t'];
+                    $key   = $entry['k'];
+                    try {
+                        if ($entry['state'] === null && isset(ContentState::PK[$table])) {
+                            $store->purge($table, $key); // was am eingefügten Objekt hängt, geht mit
+                        }
+                        $store->write($table, $key, $entry['state']);
+                    } catch (ContentException $e) {
+                        if (!$store->alive()) {
+                            $lost = [$table, $key, $now[$table][$key] ?? null];
+                        }
+                        throw $e;
+                    }
+                    if (!$store->alive()) {
+                        $lost = [$table, $key, $now[$table][$key] ?? null];
+                        throw ContentRepair::lost();
+                    }
+                }
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null];
+            });
+        } catch (ContentException $e) {
+            if ($lost !== null) {
+                // Der Satz bleibt ganz: der eine Schlüssel geht zurück auf den gepushten Stand.
+                throw ContentRepair::repair($target, $lost[0], $lost[1], $lost[2]);
+            }
+            if ($e->reason() !== ContentException::UNCLEAR) {
+                throw $e;
+            }
+            // Die Verbindung ging im COMMIT verloren: er ist ganz angekommen oder gar nicht.
+            $prints = [];
             foreach ($before as $entry) {
-                $byTable[$entry['t']][] = $entry['k'];
+                $print    = self::fingerprint($target, $entry['t'], $entry['k'], $entry['state']);
+                $prints[] = ['t' => $entry['t'], 'k' => $entry['k'], 'h' => $print === 'absent' ? null : $print];
             }
-            $now = [];
-            foreach ($byTable as $table => $keys) {
-                $now[$table] = $keys === [] ? [] : $target->store->read($table, $keys, true);
+            if (ContentRepair::settled($target, $prints)) {
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null];
             }
-            $untouched = true;
-            $changed   = [];
-            foreach ($before as $i => $entry) {
-                $table   = $entry['t'];
-                $key     = $entry['k'];
-                $current = self::fingerprint($target, $table, $key, $now[$table][$key] ?? null);
-                if ($current !== self::fingerprint($target, $table, $key, $entry['state'])) {
-                    $untouched = false;
-                }
-                $pushed = $after === null ? null : ($after[$i] ?? null);
-                if ($pushed === null || $pushed['t'] !== $table || $pushed['k'] !== $key || $current !== ($pushed['h'] ?? 'absent')) {
-                    $changed[] = ContentException::key($table, $key);
-                }
-            }
-            if ($untouched) {
-                return ['state' => self::NOTHING, 'changes' => null];
-            }
-            if ($changed !== []) {
-                throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
-            }
-            foreach (array_reverse($before) as $entry) {
-                if ($entry['state'] === null && isset(ContentState::PK[$entry['t']])) {
-                    $target->store->purge($entry['t'], $entry['k']); // was am eingefügten Objekt hängt, geht mit
-                }
-                $target->store->write($entry['t'], $entry['k'], $entry['state']);
-            }
-            return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null];
-        });
+            throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren – nichts wurde zurückgenommen.');
+        }
     }
 
     /**

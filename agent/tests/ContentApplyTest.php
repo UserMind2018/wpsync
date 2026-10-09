@@ -226,4 +226,95 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertSame([], $result['after']);
         $this->assertArrayNotHasKey("220\0_wp_trash_meta_status", $this->store->data['postmeta']);
     }
+
+    /** @return array<string, array{0: int}> der wievielte Schreibzugriff die Verbindung verliert: update, trash, insert, Paar, Option */
+    public static function lostWrites(): array
+    {
+        return ['update posts' => [1], 'trash' => [2], 'insert term_taxonomy' => [5], 'postmeta' => [6], 'letzter' => [14]];
+    }
+
+    /**
+     * Baut $wpdb die Verbindung mitten in der Transaktion neu auf, hat der Server alles davor
+     * verworfen, und der eine Schreibzugriff danach lief für sich: kein COMMIT, genau dieser
+     * Schlüssel geht auf seinen Stand davor zurück, content_failed.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('lostWrites')]
+    public function testALostConnectionWhileWritingLeavesNothing(int $n): void
+    {
+        $old                      = $this->store->data;
+        $this->store->loseAtWrite = $n;
+        try {
+            $this->apply($this->rows());
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+            $this->assertSame([], $e->keys(), 'die Zeile steht wieder wie vorher');
+            $this->assertStringContainsString('Verbindung', $e->getMessage());
+        }
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+        $log  = $this->store->log;
+        $lost = (int) array_search('lost', $log, true);
+        $this->assertSame(1, preg_match('/^(?:write|delete) (.+)\z/s', $log[$lost + 1], $m), 'der Schreibzugriff, der für sich lief');
+        $this->assertSame(['rollback', 'begin'], array_slice($log, $lost + 2, 2), 'kein COMMIT, kein weiterer Schreibzugriff');
+        $repair = array_slice($log, $lost + 4);
+        $this->assertCount(2, $repair, implode(', ', $repair));
+        $this->assertMatchesRegularExpression('/^(write|delete) ' . preg_quote($m[1], '/') . '\z/', $repair[0], 'genau dieser eine Schlüssel wird zurückgeschrieben');
+        $this->assertSame('commit', $repair[1]);
+        $this->assertFileDoesNotExist($this->dir . '/after.json');
+    }
+
+    /** Geht die Verbindung zwischen dem Lesen unter Sperre und dem ersten Schreiben verloren, wird nichts geschrieben. */
+    public function testALostConnectionBeforeTheFirstWriteWritesNothing(): void
+    {
+        $old                     = $this->store->data;
+        $this->store->beforeLock = static function (ContentMemory $store): void {
+            $store->lose();
+        };
+        try {
+            $this->apply($this->rows());
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+            $this->assertSame([], $e->keys());
+        }
+        $this->assertSame($old, $this->store->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+        $this->assertFileDoesNotExist($this->dir . '/before.json');
+    }
+
+    /** Lässt sich der eine Schlüssel nicht zurückschreiben, nennt die Ablehnung ihn. */
+    public function testALostWriteThatCannotBeTakenBackIsNamed(): void
+    {
+        $this->store->loseAtWrite = 1;
+        $this->store->failWrite   = 2; // das Zurückschreiben
+        try {
+            $this->apply($this->rows());
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+            $this->assertSame([['table' => 'posts', 'key' => '219']], $e->keys());
+            $this->assertTrue($e->toArray()['unrestored']);
+        }
+        $this->assertSame('Neu', $this->store->data['posts']['219']['post_title'], 'der eine Schreibzugriff steht – und die Antwort sagt es');
+        $this->assertSame('Kunde', $this->store->data['options']['blogname']['option_value']);
+    }
+
+    /** Geht die Verbindung im COMMIT verloren, sieht der Agent nach: angekommen ist Erfolg, nicht angekommen content_failed. */
+    public function testALostConnectionAtCommitIsLookedUp(): void
+    {
+        $old                       = $this->store->data;
+        $this->store->loseAtCommit = 'discarded';
+        try {
+            $this->apply($this->rows());
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertSame($old, $this->store->data);
+
+        $this->store->loseAtCommit = 'landed';
+        $result                    = $this->apply($this->rows());
+        $this->assertSame(12, $result['rows']);
+        $this->assertSame('Neu', $this->store->data['posts']['219']['post_title']);
+    }
 }

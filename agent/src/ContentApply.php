@@ -27,32 +27,66 @@ final class ContentApply
      */
     public static function run(ContentPackage $package, ContentTarget $target, string $dir, ?int $author, int $now, string $nowLocal): array
     {
-        return $target->store->transaction(static function () use ($package, $target, $dir, $author, $now, $nowLocal): array {
-            $check = new ContentCheck($package, $target);
-            $check->run([], true); // die Uploads des Satzes liegen schon an ihrem Platz
-            $writes = self::writes($package, $check, $target, $author, $now, $nowLocal);
-            $wanted = [];
-            foreach ($package->rows() as $row) {
-                if ($row['row'] !== null) {
-                    $wanted[$row['table']][$row['key']] = ContentState::isSet($row['table']) && $row['row']['values'] === []
-                        ? 'absent'
-                        : ContentState::desired($row['table'], $row['key'], $row['row']);
+        $store = $target->store;
+        $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
+        $done  = null; // das Ergebnis, sobald alles geschrieben und zurückgelesen ist
+        try {
+            return $store->transaction(static function () use ($package, $target, $store, $dir, $author, $now, $nowLocal, &$lost, &$done): array {
+                $check = new ContentCheck($package, $target);
+                $check->run([], true); // die Uploads des Satzes liegen schon an ihrem Platz
+                $writes = self::writes($package, $check, $target, $author, $now, $nowLocal);
+                $wanted = [];
+                foreach ($package->rows() as $row) {
+                    if ($row['row'] !== null) {
+                        $wanted[$row['table']][$row['key']] = ContentState::isSet($row['table']) && $row['row']['values'] === []
+                            ? 'absent'
+                            : ContentState::desired($row['table'], $row['key'], $row['row']);
+                    }
                 }
+                $before = [];
+                foreach ($writes as $write) {
+                    list($table, $key) = $write;
+                    $before[] = ['t' => $table, 'k' => $key, 'state' => ContentState::encode($table, $check->state($table)[$key] ?? null)];
+                }
+                // Was unter Sperre gelesen wurde, gilt nur auf der Verbindung der Transaktion.
+                if (!$store->alive()) {
+                    throw ContentRepair::lost();
+                }
+                self::put($dir, self::BEFORE, ['keys' => $before]);
+                foreach ($writes as $write) {
+                    list($table, $key, $state) = $write;
+                    try {
+                        $store->write($table, $key, $state);
+                    } catch (ContentException $e) {
+                        if (!$store->alive()) {
+                            $lost = [$table, $key, $check->state($table)[$key] ?? null];
+                        }
+                        throw $e;
+                    }
+                    if (!$store->alive()) {
+                        $lost = [$table, $key, $check->state($table)[$key] ?? null];
+                        throw ContentRepair::lost();
+                    }
+                }
+                $after = self::verify($writes, $target, $wanted);
+                $out   = ['rows' => count($package->rows()), 'after' => $after, 'changes' => self::changes($writes, $check)];
+                self::put($dir, self::AFTER, ['keys' => $after, 'changes' => $out['changes']]);
+                $done = $out;
+                return $out;
+            });
+        } catch (ContentException $e) {
+            if ($lost !== null) {
+                throw ContentRepair::repair($target, $lost[0], $lost[1], $lost[2]);
             }
-            $before = [];
-            foreach ($writes as $write) {
-                list($table, $key) = $write;
-                $before[] = ['t' => $table, 'k' => $key, 'state' => ContentState::encode($table, $check->state($table)[$key] ?? null)];
+            if ($e->reason() !== ContentException::UNCLEAR) {
+                throw $e;
             }
-            self::put($dir, self::BEFORE, ['keys' => $before]);
-            foreach ($writes as $write) {
-                $target->store->write($write[0], $write[1], $write[2]);
+            // Die Verbindung ging im COMMIT verloren: er ist ganz angekommen oder gar nicht.
+            if ($done !== null && ContentRepair::settled($target, $done['after'])) {
+                return $done;
             }
-            $after = self::verify($writes, $target, $wanted);
-            $out   = ['rows' => count($package->rows()), 'after' => $after, 'changes' => self::changes($writes, $check)];
-            self::put($dir, self::AFTER, ['keys' => $after, 'changes' => $out['changes']]);
-            return $out;
-        });
+            throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren – nichts wurde übernommen.');
+        }
     }
 
     /**
@@ -133,6 +167,10 @@ final class ContentApply
         $now = [];
         foreach ($keys as $table => $list) {
             $now[$table] = $target->store->read($table, $list, false);
+        }
+        // Auf einer neuen Verbindung gelesen, stünde hier der alte Stand – das ist kein write_mismatch.
+        if (!$target->store->alive()) {
+            throw ContentRepair::lost();
         }
         $after = [];
         foreach ($writes as $write) {

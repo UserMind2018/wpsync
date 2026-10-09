@@ -83,10 +83,19 @@ interface ContentStore
 
     /**
      * Führt $do in einer Transaktion aus: COMMIT, wenn es zurückkehrt, ROLLBACK, wenn es wirft.
+     * Kein COMMIT, wenn die Transaktion nicht mehr lebt (alive()). Ging die Verbindung im COMMIT
+     * selbst verloren, wirft es ContentException::UNCLEAR.
      *
      * @param callable(): mixed $do
      * @return mixed was $do liefert
      * @throws ContentException
      */
     public function transaction(callable $do);
+
+    /**
+     * Läuft die Transaktion noch auf der Verbindung, auf der sie begann? false heisst: der Server
+     * hat alles verworfen, was sie bis dahin geschrieben hat; höchstens der eine Schreibzugriff
+     * unmittelbar davor lief ausserhalb und steht für sich. Ausserhalb einer Transaktion false.
+     */
+    public function alive(): bool;
 }

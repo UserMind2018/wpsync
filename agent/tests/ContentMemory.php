@@ -30,10 +30,21 @@ final class ContentMemory implements ContentStore
     public $beforeLock = null;
     /** @var (callable(string, string, array<string, mixed>): array<string, mixed>)|null verändert, was write() speichert – wie eine Spalte, die abschneidet */
     public $mangle = null;
+    /**
+     * @var int|null vor dem wievielten write() die Verbindung verloren geht (1 = dem ersten): was die
+     *               Transaktion bis dahin schrieb, ist weg, dieser eine Schreibzugriff steht für sich
+     */
+    public $loseAtWrite = null;
+    /** @var string|null die Verbindung geht im COMMIT verloren: 'landed' – er kam an, 'discarded' – er kam nicht an */
+    public $loseAtCommit = null;
     /** @var int */
     private $writes = 0;
     /** @var bool */
     private $open = false;
+    /** @var bool die laufende Transaktion hat ihre Verbindung verloren */
+    private $lost = false;
+    /** @var array<string, array<string, array<string, mixed>>> Stand zu Beginn der laufenden Transaktion */
+    private $snapshot = [];
 
     /** @param array<string, array<string, array<string, mixed>>> $data */
     public function __construct(array $data = [])
@@ -79,8 +90,12 @@ final class ContentMemory implements ContentStore
         if (!$this->open) {
             throw new \LogicException('write outside a transaction');
         }
-        if ($this->failWrite !== null && ++$this->writes === $this->failWrite) {
+        $this->writes++;
+        if ($this->failWrite !== null && $this->writes === $this->failWrite) {
             throw new ContentException(ContentException::FAILED, 'write failed');
+        }
+        if ($this->loseAtWrite !== null && $this->writes === $this->loseAtWrite) {
+            $this->lose();
         }
         if ($state === null) {
             unset($this->data[$table][$key]);
@@ -172,19 +187,48 @@ final class ContentMemory implements ContentStore
 
     public function transaction(callable $do)
     {
-        $snapshot    = $this->data;
-        $this->open  = true;
-        $this->log[] = 'begin';
+        $this->snapshot = $this->data;
+        $this->open     = true;
+        $this->lost     = false;
+        $this->log[]    = 'begin';
         try {
             $result = $do();
+            if ($this->lost) {
+                throw new ContentException(ContentException::FAILED, 'connection lost');
+            }
         } catch (\Throwable $e) {
-            $this->data  = $snapshot;
+            if (!$this->lost) {
+                $this->data = $this->snapshot; // nach einem Verlust hat der Server schon verworfen; was danach kam, steht
+            }
             $this->open  = false;
             $this->log[] = 'rollback';
             throw $e;
         }
-        $this->open  = false;
+        $this->open = false;
+        if ($this->loseAtCommit !== null) {
+            if ($this->loseAtCommit === 'discarded') {
+                $this->data = $this->snapshot;
+            }
+            $this->loseAtCommit = null;
+            $this->log[]        = 'commit?';
+            throw new ContentException(ContentException::UNCLEAR, 'connection lost at commit');
+        }
         $this->log[] = 'commit';
         return $result;
+    }
+
+    public function alive(): bool
+    {
+        return $this->open && !$this->lost;
+    }
+
+    /** Die Verbindung geht jetzt verloren: der Server verwirft, was die Transaktion geschrieben hat. */
+    public function lose(): void
+    {
+        if ($this->open && !$this->lost) {
+            $this->data  = $this->snapshot;
+            $this->lost  = true;
+            $this->log[] = 'lost';
+        }
     }
 }

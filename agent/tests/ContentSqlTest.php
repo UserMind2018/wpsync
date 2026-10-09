@@ -198,14 +198,58 @@ final class ContentSqlTest extends TestCase
         ], $this->db->queries);
     }
 
+    /**
+     * Eine Datenbank, die die Sitzungsmarke hält wie eine Verbindung: SELECT @wpsync_tx liefert, was
+     * SET zuletzt gesetzt hat. $lose: mit dieser Abfrage geht die Verbindung verloren – die neue
+     * kennt keine Marke.
+     */
+    private function connection(?string $lose = null): FakeWpdb
+    {
+        $db   = new FakeWpdb();
+        $mark = null;
+        $db->observer = static function (string $sql) use (&$mark, $lose): void {
+            if ($lose !== null && preg_match($lose, $sql) === 1) {
+                $mark = null;
+            }
+            if (preg_match("/^SET @wpsync_tx = (?:'([a-f0-9]+)'|NULL)\\z/", $sql, $m) === 1) {
+                $mark = $m[1] ?? null;
+            }
+        };
+        $db->answer('/^SELECT @wpsync_tx/', static function () use (&$mark) {
+            return $mark;
+        });
+        return $db;
+    }
+
+    private function mark(FakeWpdb $db): string
+    {
+        $this->assertSame(1, preg_match("/^SET @wpsync_tx = '([a-f0-9]{16})'\\z/", $db->queries[0], $m), $db->queries[0]);
+        return $m[1];
+    }
+
     public function testTransactionCommitsOrRollsBack(): void
     {
-        $sql = $this->sql();
+        $this->db = $this->connection();
+        $sql      = $this->sql();
+        $this->assertFalse($sql->alive(), 'ausserhalb einer Transaktion lebt keine');
+        $this->db->queries = [];
         $this->assertSame('fertig', $sql->transaction(function () use ($sql): string {
             $sql->write('options', 'blogname', null);
+            $this->assertTrue($sql->alive());
             return 'fertig';
         }));
-        $this->assertSame(['START TRANSACTION', "DELETE FROM `wp_options` WHERE `option_name` = 'blogname' AND BINARY `option_name` = 'blogname'", 'COMMIT'], $this->db->queries);
+        $mark = $this->mark($this->db);
+        $this->assertSame([
+            "SET @wpsync_tx = '" . $mark . "'",
+            'START TRANSACTION',
+            "DELETE FROM `wp_options` WHERE `option_name` = 'blogname' AND BINARY `option_name` = 'blogname' AND @wpsync_tx = '" . $mark . "'",
+            'SELECT @wpsync_tx',
+            'SELECT @wpsync_tx',
+            'COMMIT',
+            'SELECT @wpsync_tx',
+            'SET @wpsync_tx = NULL',
+        ], $this->db->queries, 'erst die Marke, dann die Transaktion; vor und nach dem COMMIT wird sie geprüft');
+        $this->assertFalse($sql->alive());
 
         $this->db->queries = [];
         try {
@@ -216,12 +260,101 @@ final class ContentSqlTest extends TestCase
         } catch (\RuntimeException $e) {
             $this->assertSame('boom', $e->getMessage());
         }
-        $this->assertSame(['START TRANSACTION', 'ROLLBACK'], $this->db->queries);
+        $this->assertSame(['START TRANSACTION', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, 1));
+    }
+
+    /** Jede schreibende Anweisung einer Transaktion trägt die Marke als Bedingung: auf einer neuen Verbindung schreibt sie nichts. */
+    public function testEveryWriteInATransactionIsBoundToItsConnection(): void
+    {
+        $this->db = $this->connection();
+        $this->db->answer('/^SELECT `ID` FROM `wp_posts` WHERE `ID` = 219/', [['ID' => '219']]);
+        $sql = $this->sql();
+        $sql->transaction(static function () use ($sql): void {
+            $sql->write('posts', '1000001', ['post_title' => 'Neu', 'post_excerpt' => null]);
+            $sql->write('posts', '219', ['post_title' => 'Alt']);
+            $sql->write('postmeta', "219\0_x", ['values' => ['a']]);
+            $sql->write('term_relationships', "219\0category", ['values' => ['3:0']]);
+            $sql->purge('posts', '1000001');
+            $sql->purge('terms', '7');
+            $sql->purge('term_taxonomy', '8');
+            $sql->recount(['3']);
+            $sql->dropMeta('_elementor_css');
+        });
+        $mark   = $this->mark($this->db);
+        $guard  = "@wpsync_tx = '" . $mark . "'";
+        $writes = array_values(array_filter($this->db->writes(), static function (string $sql): bool {
+            return preg_match('/^(SET|START|COMMIT)/', $sql) !== 1;
+        }));
+        $this->assertSame([
+            "INSERT INTO `wp_posts` (`post_title`, `post_excerpt`, `ID`) SELECT 'Neu', NULL, '1000001' FROM DUAL WHERE " . $guard,
+            "UPDATE `wp_posts` SET `post_title` = 'Alt' WHERE `ID` = 219 AND " . $guard,
+            "DELETE FROM `wp_postmeta` WHERE `post_id` = 219 AND BINARY `meta_key` = '_x' AND " . $guard,
+            "INSERT INTO `wp_postmeta` (`post_id`, `meta_key`, `meta_value`) SELECT 219, '_x', 'a' FROM DUAL WHERE " . $guard,
+            "DELETE r FROM `wp_term_relationships` r JOIN `wp_term_taxonomy` x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`object_id` = 219 AND BINARY x.`taxonomy` = 'category' AND " . $guard,
+            'INSERT INTO `wp_term_relationships` (`object_id`, `term_taxonomy_id`, `term_order`) SELECT 219, 3, 0 FROM DUAL WHERE ' . $guard,
+            'DELETE FROM `wp_postmeta` WHERE `post_id` = 1000001 AND ' . $guard,
+            'DELETE FROM `wp_term_relationships` WHERE `object_id` = 1000001 AND ' . $guard,
+            'DELETE FROM `wp_termmeta` WHERE `term_id` = 7 AND ' . $guard,
+            'DELETE FROM `wp_term_relationships` WHERE `term_taxonomy_id` = 8 AND ' . $guard,
+            'UPDATE `wp_term_taxonomy` x SET x.`count` = (SELECT COUNT(*) FROM `wp_term_relationships` r WHERE r.`term_taxonomy_id` = x.`term_taxonomy_id`) WHERE x.`term_taxonomy_id` IN (3) AND ' . $guard,
+            "DELETE FROM `wp_postmeta` WHERE `meta_key` = '_elementor_css' AND BINARY `meta_key` = '_elementor_css' AND " . $guard,
+        ], $writes);
+    }
+
+    /**
+     * $wpdb baut eine verlorene Verbindung neu auf und wiederholt die Abfrage: die neue Verbindung
+     * kennt die Marke nicht. Dann gibt es keinen COMMIT.
+     */
+    public function testATransactionThatLostItsConnectionNeverCommits(): void
+    {
+        $this->db = $this->connection('/^DELETE FROM `wp_options`/');
+        $sql      = $this->sql();
+        $alive    = null;
+        try {
+            $sql->transaction(static function () use ($sql, &$alive): void {
+                $sql->write('options', 'blogname', null);
+                $alive = $sql->alive();
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertFalse($alive);
+        $this->assertNotContains('COMMIT', $this->db->queries);
+        $this->assertSame(['ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, -2));
+
+        // Zwischen Marke und START TRANSACTION verloren: die neue Verbindung hat eine Transaktion, aber keine Marke.
+        $this->db = $this->connection('/^START TRANSACTION/');
+        $sql      = $this->sql();
+        try {
+            $sql->transaction(static function (): void {
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertNotContains('COMMIT', $this->db->queries);
+    }
+
+    /** Geht die Verbindung im COMMIT verloren, ist offen, ob er ankam – das sagt die Transaktion, statt zu raten. */
+    public function testALostConnectionAtCommitIsUnclear(): void
+    {
+        $this->db = $this->connection('/^COMMIT/');
+        try {
+            $this->sql()->transaction(static function (): string {
+                return 'fertig';
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::UNCLEAR, $e->reason());
+        }
+        $this->assertSame(['COMMIT', 'SELECT @wpsync_tx', 'SET @wpsync_tx = NULL'], array_slice($this->db->queries, -3));
     }
 
     public function testAFailedWriteOrCommitEndsInRollback(): void
     {
-        $sql = $this->sql();
+        $this->db = $this->connection();
+        $sql      = $this->sql();
         $this->db->fail('/^DELETE FROM `wp_options`/', 'Lock wait timeout exceeded');
         try {
             $sql->transaction(static function () use ($sql): void {
@@ -232,28 +365,30 @@ final class ContentSqlTest extends TestCase
             $this->assertSame(ContentException::FAILED, $e->reason());
             $this->assertStringNotContainsString('Lock wait', $e->getMessage(), 'was die Datenbank meldet, bleibt auf dem Server');
         }
-        $this->assertSame('ROLLBACK', $this->db->queries[count($this->db->queries) - 1]);
+        $this->assertSame('ROLLBACK', $this->db->queries[count($this->db->queries) - 2]);
 
-        $db2 = new FakeWpdb();
+        $db2 = $this->connection();
         $db2->fail('/^COMMIT/', 'gone away');
         try {
             (new ContentSql($db2, $this->tables()))->transaction(static function (): void {
             });
             $this->fail('no exception');
         } catch (ContentException $e) {
-            $this->assertSame(['START TRANSACTION', 'COMMIT', 'ROLLBACK'], $db2->queries);
+            $this->assertSame(['START TRANSACTION', 'SELECT @wpsync_tx', 'COMMIT', 'ROLLBACK', 'SET @wpsync_tx = NULL'], array_slice($db2->queries, 1));
         }
 
-        $db3 = new FakeWpdb();
-        $db3->fail('/^START TRANSACTION/', 'gone away');
-        $ran = false;
-        try {
-            (new ContentSql($db3, $this->tables()))->transaction(static function () use (&$ran): void {
-                $ran = true;
-            });
-            $this->fail('no exception');
-        } catch (ContentException $e) {
-            $this->assertFalse($ran, 'ohne Transaktion wird nichts geschrieben');
+        foreach (['/^START TRANSACTION/', '/^SET @wpsync_tx = \'/'] as $failing) {
+            $db3 = $this->connection();
+            $db3->fail($failing, 'gone away');
+            $ran = false;
+            try {
+                (new ContentSql($db3, $this->tables()))->transaction(static function () use (&$ran): void {
+                    $ran = true;
+                });
+                $this->fail('no exception');
+            } catch (ContentException $e) {
+                $this->assertFalse($ran, 'ohne Transaktion wird nichts geschrieben');
+            }
         }
     }
 
