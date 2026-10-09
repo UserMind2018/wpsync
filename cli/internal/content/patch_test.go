@@ -1,0 +1,174 @@
+package content
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/usermind/wpsync/internal/safefs"
+)
+
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+// patchSite writes a manifest and a baseline with three rows and returns the site folder.
+func patchSite(t *testing.T) string {
+	t.Helper()
+	siteDir := t.TempDir()
+	dir := filepath.Join(siteDir, ".wpsync", "content")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"head":{"canon_version":1}}
+{"t":"posts","k":"219","h":"h219"}
+{"t":"posts","k":"220","h":"h220"}
+{"t":"postmeta","k":"219\u0000_thumbnail_id","h":"hthumb"}
+{"t":"options","k":"blogname","h":"hblog"}
+`
+	baseline := `{"t":"posts","k":"219","h":"h219","row":{"post_title":"` + b64("Alt") + `","post_status":"` + b64("publish") + `"},"p":true}
+{"t":"posts","k":"220","h":"h220","row":{"post_title":"` + b64("Entwurf") + `","post_status":"` + b64("draft") + `"},"p":true}
+{"t":"postmeta","k":"219\u0000_thumbnail_id","h":"hthumb","row":{"values":["` + b64("300") + `"]},"p":true}
+{"t":"options","k":"blogname","h":"hblog","row":{"option_value":"` + b64("Kunde") + `"},"p":true}
+`
+	for name, text := range map[string]string{manifestName: manifest, baselineName: baseline} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return siteDir
+}
+
+func read(t *testing.T, siteDir, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(siteDir, ".wpsync", "content", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// lineOf returns the decoded line of a key in a JSON-Lines text, nil without one.
+func lineOf(t *testing.T, text, table, key string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && m["t"] == table && m["k"] == key {
+			return m
+		}
+	}
+	return nil
+}
+
+func str(s string) *string { return &s }
+
+func TestPatchBringsManifestAndBaselineToThePushedState(t *testing.T) {
+	siteDir := patchSite(t)
+	manifestBefore, baselineBefore := read(t, siteDir, manifestName), read(t, siteDir, baselineName)
+	newRow := json.RawMessage(`{"post_title":"` + b64("Neu") + `","post_status":"` + b64("publish") + `"}`)
+	changes := map[Key]Change{
+		{"posts", "219"}:                             {H: str("n219"), Row: newRow},                   // update
+		{"posts", "220"}:                             {H: str("n220"), Trash: true},                   // trash
+		{"postmeta", "219\x00_thumbnail_id"}:         {H: nil, Row: json.RawMessage(`{"values":[]}`)}, // pair deleted
+		{"posts", "1000001"}:                         {H: str("n1000001"), Row: newRow},               // insert
+		{"postmeta", "220\x00_wp_trash_meta_status"}: {H: str("ntrash")},                              // written by the agent
+	}
+	undo, err := Patch(siteDir, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, baseline := read(t, siteDir, manifestName), read(t, siteDir, baselineName)
+	if !strings.HasPrefix(manifest, `{"head":{"canon_version":1}}`+"\n") {
+		t.Errorf("the head line must stay first:\n%s", manifest)
+	}
+	for key, want := range map[string]string{"219": "n219", "220": "n220", "1000001": "n1000001"} {
+		if got := lineOf(t, manifest, "posts", key); got == nil || got["h"] != want {
+			t.Errorf("manifest posts %s = %v", key, got)
+		}
+	}
+	if lineOf(t, manifest, "postmeta", "219\x00_thumbnail_id") != nil || lineOf(t, baseline, "postmeta", "219\x00_thumbnail_id") != nil {
+		t.Error("a deleted pair has no line any more")
+	}
+	if got := lineOf(t, manifest, "postmeta", "220\x00_wp_trash_meta_status"); got == nil || got["h"] != "ntrash" {
+		t.Errorf("manifest trash meta = %v", got)
+	}
+	if lineOf(t, baseline, "postmeta", "220\x00_wp_trash_meta_status") != nil {
+		t.Error("a key without a row never reaches the baseline")
+	}
+	if got := lineOf(t, manifest, "options", "blogname"); got["h"] != "hblog" {
+		t.Errorf("an untouched key changed: %v", got)
+	}
+	up := lineOf(t, baseline, "posts", "219")
+	if up["h"] != "n219" || up["row"].(map[string]any)["post_title"] != b64("Neu") || up["p"] != true {
+		t.Errorf("baseline posts 219 = %v", up)
+	}
+	trashed := lineOf(t, baseline, "posts", "220")["row"].(map[string]any)
+	if trashed["post_status"] != b64("trash") || trashed["post_title"] != b64("Entwurf") {
+		t.Errorf("baseline posts 220 = %v", trashed)
+	}
+	if ins := lineOf(t, baseline, "posts", "1000001"); ins == nil || ins["h"] != "n1000001" || ins["p"] != true {
+		t.Errorf("baseline posts 1000001 = %v", ins)
+	}
+	if strings.Count(manifest, "\n") != 6 || strings.Count(baseline, "\n") != 4 {
+		t.Errorf("lines: manifest %d, baseline %d", strings.Count(manifest, "\n"), strings.Count(baseline, "\n"))
+	}
+
+	// The undo survives its way through the journal and puts every line back.
+	packed, err := json.Marshal(undo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Undo
+	if err := json.Unmarshal(packed, &back); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unpatch(siteDir, &back); err != nil {
+		t.Fatal(err)
+	}
+	same := func(a, b string) bool {
+		x, y := strings.Split(strings.TrimSpace(a), "\n"), strings.Split(strings.TrimSpace(b), "\n")
+		seen := map[string]int{}
+		for _, l := range x {
+			seen[l]++
+		}
+		for _, l := range y {
+			seen[l]--
+		}
+		for _, n := range seen {
+			if n != 0 {
+				return false
+			}
+		}
+		return len(x) == len(y)
+	}
+	if !same(manifestBefore, read(t, siteDir, manifestName)) || !same(baselineBefore, read(t, siteDir, baselineName)) {
+		t.Errorf("after the undo:\n%s\n%s", read(t, siteDir, manifestName), read(t, siteDir, baselineName))
+	}
+}
+
+func TestPatchWithoutContentStateFails(t *testing.T) {
+	if _, err := Patch(t.TempDir(), map[Key]Change{{"posts", "1"}: {H: str("x")}}); err == nil {
+		t.Fatal("patched a site folder without a content state")
+	}
+}
+
+// Like every file below .wpsync/content: a symlink in place of the file is replaced, never followed.
+func TestPatchNeverWritesThroughASymlink(t *testing.T) {
+	siteDir := patchSite(t)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("bleibt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(siteDir, ".wpsync", "content", manifestName+safefs.TmpSuffix)
+	os.Remove(link)
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skip(err)
+	}
+	if _, err := Patch(siteDir, map[Key]Change{{"posts", "219"}: {H: str("n219")}}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(outside); string(data) != "bleibt" {
+		t.Errorf("wrote through the symlink: %q", data)
+	}
+}
