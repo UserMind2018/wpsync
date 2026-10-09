@@ -15,6 +15,14 @@ defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
  * dort – gilt der Schalter $leave (R15): was an eingefügten Objekten hängt und nicht vom Push
  * stammt, lehnt die Rücknahme dann nicht ab; es bleibt stehen (verwaist) und wird genannt. Der
  * Abdruckvergleich bleibt in beiden Fällen hart.
+ *
+ * Für genau eine Zeile gilt statt des Abdrucks ein Delta (Spec Content-Push P4 A8, A21, §8.3):
+ * options/active_plugins. Die Liste ändert jeder, der im WP-Admin ein Plugin schaltet – ein harter
+ * Abdruck sperrte die Rücknahme des ganzen Satzes nach der ersten fremden Änderung. Das
+ * Vorher-Abbild nennt deshalb nicht den Wert, sondern was der Push hinzugefügt (plugins.added) und
+ * was er gestrichen hat (plugins.removed): gestrichen wird, was davon hinzugefügt wurde und noch in
+ * der Liste steht; zurück kommt, was gestrichen wurde und noch fehlt. Sonst wird an der Liste
+ * nichts angefasst, kein Wert kommt aus dem Abbild zurück, und kein Hook läuft (A17).
  */
 final class ContentRollback
 {
@@ -26,8 +34,9 @@ final class ContentRollback
      * @param bool   $leave nur für rescue.php (R15): Fremdes an eingefügten Objekten stehen lassen und in left
      *                      nennen, statt abzulehnen. Gelöscht und überschrieben wird dann nur, was der Push
      *                      selbst geschrieben hat – purge() läuft nicht. Unter WordPress immer false (D31)
-     * @return array{state: string, changes: array<string, mixed>|null, left?: list<array{table: string, key: string}>}
-     *         changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war. left nur mit $leave
+     * @return array{state: string, changes: array<string, mixed>|null, left?: list<array{table: string, key: string}>, plugins?: array{deactivated: list<string>, reactivated: list<string>}}
+     *         changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war. left nur mit $leave.
+     *         plugins nur, wenn der Push einen Plugin-Zustand hatte: was diese Rücknahme an der Liste geändert hat
      * @throws ContentException changed_since_push, before_image_invalid, engine_unsupported oder content_failed
      */
     public static function run(ContentTarget $target, string $dir, bool $leave = false): array
@@ -40,9 +49,13 @@ final class ContentRollback
             return $none; // ohne Vorher-Abbild wurde nie geschrieben
         }
         $before = self::keys($image, true);
-        $pushed = ContentImage::get($dir, ContentImage::AFTER);
-        $after  = $pushed === null ? null : self::keys($pushed, false);
-        if ($before === null || ($pushed !== null && $after === null)) {
+        // Der Plugin-Zustand des Pushs (P4 §8.3 Nr. 1): was er der Liste hinzugefügt und was er gestrichen
+        // hat – aus demselben authentisierten Abbild, in fester Form. Ohne das Feld hatte der Push keinen.
+        $switched = array_key_exists('plugins', $image);
+        $delta    = ContentPlugins::delta($image['plugins'] ?? null);
+        $pushed   = ContentImage::get($dir, ContentImage::AFTER);
+        $after    = $pushed === null ? null : self::keys($pushed, false);
+        if ($before === null || $delta === null || ($pushed !== null && $after === null)) {
             throw ContentImage::invalid();
         }
         if ($after !== null) {
@@ -57,13 +70,17 @@ final class ContentRollback
         }
         $changes = $pushed['changes'] ?? null;
         unset($image, $pushed);
+        $undo = ['deactivated' => [], 'reactivated' => []]; // was diese Rücknahme an der Liste ändert
+        if ($switched) {
+            $none['plugins'] = $undo;
+        }
         // Ohne InnoDB gäbe es keine Transaktion – auch nicht, wenn die Tabelle erst seit dem Push eine andere Engine hat.
         ContentState::innodb($target->store);
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         $left  = [];   // mit $leave: was an eingefügten Objekten stehen bleibt
         try {
-            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, $leave, $none, &$lost, &$left): array {
+            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, $leave, $delta, $switched, $none, &$lost, &$left, &$undo): array {
                 $byTable = array_fill_keys(ContentState::ORDER, []);
                 foreach ($before as $entry) {
                     $byTable[$entry['t']][] = $entry['k'];
@@ -72,7 +89,7 @@ final class ContentRollback
                 foreach ($byTable as $table => $keys) {
                     $now[$table] = $keys === [] ? [] : $store->read($table, $keys, true);
                 }
-                $untouched = true;
+                $untouched = true; // jede Zeile des Pakets steht im Vorher-Zustand (auch: der Push hatte keine)
                 $changed   = [];
                 foreach ($before as $i => $entry) {
                     $table   = $entry['t'];
@@ -87,73 +104,113 @@ final class ContentRollback
                         $changed[] = ContentException::key($table, $key);
                     }
                 }
+                // Die Liste der aktiven Plugins: unter Sperre, nach den Zeilen – in derselben Reihenfolge wie im
+                // Commit. Gelesen wird sie nur, wenn der Push an ihr etwas geändert hat.
+                $option = null;
+                $list   = [];
+                if ($delta['added'] !== [] || $delta['removed'] !== []) {
+                    $option = $store->read('options', [ContentPlugins::OPTION], true)[ContentPlugins::OPTION] ?? null;
+                    $have   = $option === null ? null : ContentPlugins::parse($option['option_value'] ?? null);
+                    if ($have === null) {
+                        // Nicht lesbar ist der einzige Stand der Liste, den die Rücknahme nicht deuten kann (§8.3 Nr. 3).
+                        throw new ContentException(
+                            ContentException::CHANGED,
+                            'Die Liste der aktiven Plugins des Ziels ist nicht lesbar – nichts wird zurückgenommen, auch Code und Uploads nicht.',
+                            [ContentException::key('options', ContentPlugins::OPTION)]
+                        );
+                    }
+                    $list = $have;
+                    $undo = ContentPlugins::undo($list, $delta);
+                }
                 // Was unter Sperre gelesen wurde, gilt nur auf der Verbindung der Transaktion.
                 if (!$store->alive()) {
                     throw ContentRepair::lost();
                 }
-                if ($untouched) {
-                    return $none;
+                $switch = $undo['deactivated'] !== [] || $undo['reactivated'] !== [];
+                if ($untouched && !$switch) {
+                    return $none; // „nichts zu tun“ gilt nur, wenn Zeilen UND Liste im Stand vor dem Push stehen (§8.3 Nr. 5)
                 }
-                if ($changed !== []) {
-                    throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
-                }
-                // Was nach dem Push an einem eingefügten Objekt entstand und nicht vom Push stammt, löschte
-                // purge() gleich mit – Inhalte, die niemand zurücknehmen wollte (M3).
-                $grown = self::grown($store, $before, $now);
-                if (!$store->alive()) {
-                    throw ContentRepair::lost();
-                }
-                if ($grown !== [] && !$leave) {
-                    throw new ContentException(ContentException::CHANGED, 'Seit dem Push kam an eingefügten Objekten etwas dazu (Meta, Zuordnungen, Kommentare, Kinder): ' . count($grown) . ' Stelle(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $grown);
-                }
-                $left = $grown;
-                // Zuerst geht, was an den eingefügten Objekten hängt: was der Push dort geschrieben hat und
-                // die Meta der festen Sperrliste, die WordPress selbst anlegt (_edit_lock …).
-                // Lag an derselben ID schon vor dem Push etwas (verwaiste Meta oder Zuordnungen eines
-                // früher gelöschten Objekts), bringt es das Vorher-Abbild danach zurück.
-                // Mit $leave nicht: purge() nähme das Fremde mit. Was der Push an das Objekt geschrieben hat,
-                // steht mit eigenem Schlüssel im Vorher-Abbild und geht in der Schleife danach.
-                foreach ($leave ? [] : array_reverse($before) as $entry) {
-                    $table = $entry['t'];
-                    $key   = $entry['k'];
-                    if ($entry['state'] !== null || !isset(ContentState::PK[$table])) {
-                        continue;
+                if (!$untouched) {
+                    if ($changed !== []) {
+                        // Der Satz bleibt ganz: auch der Plugin-Zustand geht dann nicht zurück (§8.3 Nr. 2).
+                        throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
                     }
-                    try {
-                        $store->purge($table, $key);
-                    } catch (ContentException $e) {
+                    // Was nach dem Push an einem eingefügten Objekt entstand und nicht vom Push stammt, löschte
+                    // purge() gleich mit – Inhalte, die niemand zurücknehmen wollte (M3).
+                    $grown = self::grown($store, $before, $now);
+                    if (!$store->alive()) {
+                        throw ContentRepair::lost();
+                    }
+                    if ($grown !== [] && !$leave) {
+                        throw new ContentException(ContentException::CHANGED, 'Seit dem Push kam an eingefügten Objekten etwas dazu (Meta, Zuordnungen, Kommentare, Kinder): ' . count($grown) . ' Stelle(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $grown);
+                    }
+                    $left = $grown;
+                    // Zuerst geht, was an den eingefügten Objekten hängt: was der Push dort geschrieben hat und
+                    // die Meta der festen Sperrliste, die WordPress selbst anlegt (_edit_lock …).
+                    // Lag an derselben ID schon vor dem Push etwas (verwaiste Meta oder Zuordnungen eines
+                    // früher gelöschten Objekts), bringt es das Vorher-Abbild danach zurück.
+                    // Mit $leave nicht: purge() nähme das Fremde mit. Was der Push an das Objekt geschrieben hat,
+                    // steht mit eigenem Schlüssel im Vorher-Abbild und geht in der Schleife danach.
+                    foreach ($leave ? [] : array_reverse($before) as $entry) {
+                        $table = $entry['t'];
+                        $key   = $entry['k'];
+                        if ($entry['state'] !== null || !isset(ContentState::PK[$table])) {
+                            continue;
+                        }
+                        try {
+                            $store->purge($table, $key);
+                        } catch (ContentException $e) {
+                            if (!$store->alive()) {
+                                $lost = [$table, $key, $now[$table][$key] ?? null];
+                            }
+                            throw $e;
+                        }
                         if (!$store->alive()) {
                             $lost = [$table, $key, $now[$table][$key] ?? null];
+                            throw ContentRepair::lost();
+                        }
+                    }
+                    foreach (array_reverse($before) as $entry) {
+                        $table = $entry['t'];
+                        $key   = $entry['k'];
+                        try {
+                            // Eine Zeile, die es vor dem Push gab, bekommt nur zurück, was der Push geschrieben hat.
+                            $state = $entry['state'];
+                            if ($state !== null && !ContentState::isSet($table) && ($now[$table][$key] ?? null) !== null) {
+                                $state = ContentState::written($table, $state);
+                            }
+                            $store->write($table, $key, $state);
+                        } catch (ContentException $e) {
+                            if (!$store->alive()) {
+                                $lost = [$table, $key, $now[$table][$key] ?? null];
+                            }
+                            throw $e;
+                        }
+                        if (!$store->alive()) {
+                            $lost = [$table, $key, $now[$table][$key] ?? null];
+                            throw ContentRepair::lost();
+                        }
+                    }
+                }
+                if ($switch) {
+                    // Die Liste, wie sie jetzt steht, ohne die Einträge des Pushs und mit denen, die er strich –
+                    // fremde Änderungen bleiben. Nur der Wert: autoload und option_id gehören der Site.
+                    $value = ContentPlugins::pack(ContentPlugins::apply($list, $undo['reactivated'], $undo['deactivated']));
+                    try {
+                        $store->write('options', ContentPlugins::OPTION, ['option_value' => $value]);
+                    } catch (ContentException $e) {
+                        if (!$store->alive()) {
+                            $lost = ['options', ContentPlugins::OPTION, $option];
                         }
                         throw $e;
                     }
                     if (!$store->alive()) {
-                        $lost = [$table, $key, $now[$table][$key] ?? null];
+                        $lost = ['options', ContentPlugins::OPTION, $option];
                         throw ContentRepair::lost();
                     }
                 }
-                foreach (array_reverse($before) as $entry) {
-                    $table = $entry['t'];
-                    $key   = $entry['k'];
-                    try {
-                        // Eine Zeile, die es vor dem Push gab, bekommt nur zurück, was der Push geschrieben hat.
-                        $state = $entry['state'];
-                        if ($state !== null && !ContentState::isSet($table) && ($now[$table][$key] ?? null) !== null) {
-                            $state = ContentState::written($table, $state);
-                        }
-                        $store->write($table, $key, $state);
-                    } catch (ContentException $e) {
-                        if (!$store->alive()) {
-                            $lost = [$table, $key, $now[$table][$key] ?? null];
-                        }
-                        throw $e;
-                    }
-                    if (!$store->alive()) {
-                        $lost = [$table, $key, $now[$table][$key] ?? null];
-                        throw ContentRepair::lost();
-                    }
-                }
-                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null] + ($leave ? ['left' => $left] : []);
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null]
+                    + ($leave ? ['left' => $left] : []) + ($switched ? ['plugins' => $undo] : []);
             });
         } catch (ContentException $e) {
             if ($lost !== null) {
@@ -170,7 +227,8 @@ final class ContentRollback
                 $prints[] = ['t' => $entry['t'], 'k' => $entry['k'], 'h' => $print === 'absent' ? null : $print];
             }
             if (ContentRepair::settled($target, $prints)) {
-                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null] + ($leave ? ['left' => $left] : []);
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null]
+                    + ($leave ? ['left' => $left] : []) + ($switched ? ['plugins' => $undo] : []);
             }
             throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren – nichts wurde zurückgenommen.');
         }
