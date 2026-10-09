@@ -95,17 +95,54 @@ final class PushRescueTest extends TestCase
         $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
     }
 
-    /** AC-65 */
-    public function testWrongKeyIsRejectedAndLocksAfterFiveAttempts(): void
+    /**
+     * AC-65, AC-162 (P3 R9): fünf falsche Schlüssel sperren – für falsche. Der richtige gilt weiter:
+     * wer die Push-ID kennt, kann den Notfallweg nicht genau dann sperren, wenn er gebraucht wird.
+     */
+    public function testWrongKeysLockOutOnlyWrongKeys(): void
     {
+        $before = file_get_contents(PushRescue::file($this->work, self::ID));
         for ($i = 1; $i <= 4; $i++) {
             $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64))[0], 'attempt ' . $i);
         }
+        $this->assertSame(4, PushRescue::tries($this->work, self::ID)['attempts']);
         $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64))[0], 'fifth attempt');
-        $this->assertSame(429, $this->post(self::ID, $this->key, 1000)[0], 'locked even for the right key');
+        $this->assertSame(['attempts' => 0, 'locked_until' => 1000 + PushRescue::LOCK_SECONDS], PushRescue::tries($this->work, self::ID));
+        // In der Sperre: 429 für jeden falschen Schlüssel, ohne zu zählen.
+        for ($i = 0; $i < 7; $i++) {
+            $this->assertSame([429, ['ok' => false, 'error' => 'locked']], $this->post(self::ID, str_repeat('1', 64), 1001 + $i));
+        }
+        $this->assertSame(['attempts' => 0, 'locked_until' => 1000 + PushRescue::LOCK_SECONDS], PushRescue::tries($this->work, self::ID));
         $this->assertSame('new', file_get_contents($this->content . '/plugins/x/main.php'));
+        // Kein falscher Schlüssel hat je in den Datensatz geschrieben, an dem die Rücknahme hängt.
+        $this->assertSame($before, file_get_contents(PushRescue::file($this->work, self::ID)));
 
-        $this->assertSame(200, $this->post(self::ID, $this->key, 1000 + PushRescue::LOCK_SECONDS + 1)[0], 'lock expires');
+        $this->assertSame(200, $this->post(self::ID, $this->key, 1001)[0], 'the right key still works');
+        $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
+    }
+
+    /** Nach Ablauf der Sperre zählen falsche Schlüssel wieder von vorn. */
+    public function testTheLockForWrongKeysExpires(): void
+    {
+        for ($i = 1; $i <= 5; $i++) {
+            $this->post(self::ID, str_repeat('0', 64));
+        }
+        $later = 1000 + PushRescue::LOCK_SECONDS + 1;
+        $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64), $later)[0]);
+        $this->assertSame(['attempts' => 1, 'locked_until' => 1000 + PushRescue::LOCK_SECONDS], PushRescue::tries($this->work, self::ID));
+        $this->assertSame(200, $this->post(self::ID, $this->key, $later)[0]);
+    }
+
+    /** Die Datei der Fehlversuche ist nur das: ein Symlink an ihrer Stelle wird weder gelesen noch beschrieben. */
+    public function testTheTriesFileIsNeverFollowedThroughASymlink(): void
+    {
+        $victim = $this->content . '/victim.json';
+        file_put_contents($victim, '{"attempts":4,"locked_until":99999999999}');
+        symlink($victim, $this->work . '/' . self::ID . '/' . PushRescue::TRIES_FILE);
+        $this->assertSame(['attempts' => 0, 'locked_until' => 0], PushRescue::tries($this->work, self::ID));
+        $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64))[0]);
+        $this->assertSame('{"attempts":4,"locked_until":99999999999}', file_get_contents($victim));
+        $this->assertSame(200, $this->post(self::ID, $this->key)[0]);
     }
 
     public function testUnknownAndMalformedRequests(): void

@@ -162,17 +162,30 @@ same(
 );
 same($changed, $store->data, 'nothing was touched');
 
-// 4. Die Rücknahme selbst, mit Fremdem an einem eingefügten Beitrag (R15).
-$store                                        = new ContentMemory($pushed);
-$store->data['postmeta']["1000001\0farbe"]    = ['values' => ['rot']];
+// 4. Die Rücknahme selbst – durch den Einstieg von rescue.php (PushRescue::handle) –, mit Fremdem
+//    an einem eingefügten Beitrag (R15).
+PushRescue::write($work, ID, hash('sha256', $key), [], PushRescue::COMMITTED, [], str_repeat('ab', 32));
+PushRescue::setContent($work, ID, PushRescue::CONTENT_APPLIED);
+$store                                          = new ContentMemory($pushed);
+$store->data['postmeta']["1000001\0farbe"]      = ['values' => ['rot']];
 $store->data['postmeta']["1000001\0_edit_lock"] = ['values' => ['1:1']];
-$back = RescueContent::run($content, $work, ID, $key);
-same(['state' => 'rolled_back', 'wrote' => true, 'left' => [['table' => 'postmeta', 'key' => "1000001\0farbe"]], 'left_total' => 1], $back, 'the content goes back, what grew stays');
+$request = ['action' => 'rollback', 'push_id' => ID, 'key' => $key, 'content' => '1'];
+same([403, ['ok' => false, 'error' => 'wrong key']], PushRescue::handle([$content], ['key' => 'wrong'] + $request, time()), 'a wrong key is refused');
+same($pushed['options'], array_intersect_key($store->data['options'], $pushed['options']), 'and touches nothing');
+$left = [['table' => 'postmeta', 'key' => "1000001\0farbe"]];
+same(
+    [200, ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'rolled_back', 'cache' => 'none', 'left' => $left, 'left_total' => 1], 'warnings' => ['content_left_extra']]],
+    PushRescue::handle([$content], $request, time()),
+    'the content goes back, what grew stays'
+);
 $expected                                     = $before;
 $expected['postmeta']["1000001\0farbe"]       = ['values' => ['rot']];
 $expected['postmeta']["1000001\0_edit_lock"]  = ['values' => ['1:1']];
 same($sorted($expected), $sorted($store->data), 'the state before the push, plus what the push never wrote');
 same(null, ContentImage::$fileKeys, 'no file key stays in the process');
+same(false, file_exists(RescueSeal::file($work, ID)), 'the envelope is gone');
+same(true, file_exists(PushRescue::pendingFile($work)), 'the marker for the agent lies in the work folder');
+same(true, RescueSeal::put($work, ID, (string) RescueSeal::seal($envelope, $key, ID)), 'a new envelope for the next case');
 same(['state' => 'nothing', 'wrote' => false], RescueContent::run($content, $work, ID, $key), 'a second run finds nothing to do');
 
 // 5. Dasselbe über ContentSql und RescueDb, mit einer Verbindung, die beim ersten Schreibzugriff

@@ -209,14 +209,21 @@ final class ContentImageTest extends TestCase
         $this->assertSame([ContentImage::BEFORE, ContentImage::AFTER], [\WpSync\ContentApply::BEFORE, \WpSync\ContentApply::AFTER]);
     }
 
-    /** rescue.php nimmt nie Inhalte zurück: es braucht weder das Vorher-Abbild noch einen Schlüssel. */
-    public function testRescueNeverTouchesTheImages(): void
+    /**
+     * Was rescue.php vor der Schlüsselprüfung lädt, kennt weder die Abbilder noch einen Schlüssel
+     * noch die Datenbank (P3 §4.1 Nr. 2): das alles liegt hinter RescueContent, das PushRescue erst
+     * mit dem richtigen Schlüssel lädt.
+     */
+    public function testWhatRescueLoadsBeforeTheKeyCheckKnowsNeitherImagesNorKeysNorTheDatabase(): void
     {
         foreach (['rescue.php', 'src/PushRescue.php', 'src/PushSwap.php'] as $file) {
             $source = (string) file_get_contents(__DIR__ . '/../' . $file);
-            foreach (['ContentImage', 'ContentApply', 'before.json', 'SecretKey', 'SecretBox', 'sodium_'] as $word) {
+            foreach (['ContentImage', 'ContentApply', 'ContentRollback', 'ContentSql', 'SecretKey', 'SecretBox', 'RescueSeal::', 'RescueDb', 'MysqliLink', 'sodium_', 'openssl_', 'mysqli', 'DB_PASSWORD', 'wp-config'] as $word) {
                 $this->assertStringNotContainsString($word, $source, $file . ': ' . $word);
             }
         }
+        $rescue = (string) file_get_contents(__DIR__ . '/../src/PushRescue.php');
+        $this->assertSame(1, substr_count($rescue, 'RescueContent::run('), 'ein Weg zur Datenbank, hinter der Schlüsselprüfung');
+        $this->assertSame(1, substr_count($rescue, "require_once __DIR__ . '/RescueContent.php';"));
     }
 }
