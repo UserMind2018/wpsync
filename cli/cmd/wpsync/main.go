@@ -52,6 +52,8 @@ const usage = `wpsync – WordPress Live ↔ Lokal
                                        --no-anonymize: personenbezogene Daten im Klartext,
                                        --content: Manifest und Baseline für den Inhalts-Push)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
+  wpsync content export <site>         normalisierte Zeilen und Fingerabdrücke der Arbeitskopie als
+                                       JSON-Lines auf stdout (braucht einen Pull mit --content)
   wpsync trust <site>                  eigene Änderungen in .ddev ansehen und freigeben
                                        (ohne Terminal: --fingerprint <fp> aus der Anzeige)
   wpsync push <site> code [einheit…]   lokal geänderte Plugins/Themes/mu-plugins auf die Site bringen
@@ -70,9 +72,10 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync version
 
   Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version, staging, push, pushes,
-  rollback) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach; --secret-stdin liest
-  das Secret von stdin (scan, pull, status, staging, push, pushes, rollback).
-  pull/status/list/stop --driver container --container c --docroot d --db-host h --db-name n
+  rollback, content) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach;
+  --secret-stdin liest das Secret von stdin (scan, pull, status, staging, push, pushes, rollback,
+  content). content export schreibt seine Zeilen immer auf stdout, Meldungen immer auf stderr.
+  pull/status/list/stop/content export --driver container --container c --docroot d --db-host h --db-name n
   --db-user u --local-url url [--cli-image i]: vorhandener WordPress-Container statt DDEV
   (DB-Passwort als zweite Zeile von stdin).
   push/pushes/rollback --driver container --docroot d --secret-stdin: Site-Ordner neben dem Docroot
@@ -83,7 +86,7 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 // text-only.
 var jsonCommands = map[string]bool{
 	"pair": true, "scan": true, "pull": true, "status": true, "unpair": true, "doctor": true, "version": true,
-	"staging": true, "push": true, "pushes": true, "rollback": true,
+	"staging": true, "push": true, "pushes": true, "rollback": true, "content": true,
 }
 
 // stagingCommands are the subcommands of wpsync staging (Spec 2b 6.1).
@@ -108,18 +111,21 @@ type app struct {
 	data           any // data of the JSON result
 	stdinSecrets   *secretstore.Stdin
 	browse         func(string) error // opens a URL; nil: open (macOS) or xdg-open
+	// dataStdout: stdout carries the data of the command (content export), also without --json.
+	dataStdout bool
 }
 
-// out receives human messages: stdout, with --json stderr.
+// out receives human messages: stdout – stderr with --json or when stdout carries data.
 func (a *app) out() io.Writer {
-	if a.json {
+	if a.json || a.dataStdout {
 		return a.stderr
 	}
 	return a.stdout
 }
 
-// interactive: questions only on a terminal and never with --json.
-func (a *app) interactive() bool { return !a.json && isTerminal() }
+// interactive: questions only on a terminal, never with --json and never next to data on stdout
+// (confirm asks there).
+func (a *app) interactive() bool { return !a.json && !a.dataStdout && isTerminal() }
 
 func (a *app) main(args []string) int {
 	if len(args) < 1 {
@@ -128,8 +134,8 @@ func (a *app) main(args []string) int {
 	}
 	cmd, rest := args[0], args[1:]
 	name := cmd
-	if cmd == "staging" && len(rest) > 0 && stagingCommands[rest[0]] {
-		name += " " + rest[0] // "staging create" – the caller tells the subcommands apart
+	if (cmd == "staging" && len(rest) > 0 && stagingCommands[rest[0]]) || (cmd == "content" && len(rest) > 0 && rest[0] == "export") {
+		name += " " + rest[0] // "staging create", "content export" – the caller tells the subcommands apart
 	}
 	a.json = jsonCommands[cmd] && hasJSONFlag(rest)
 	if a.json {
@@ -169,6 +175,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdPull(args)
 	case "status":
 		return a.cmdStatus(args)
+	case "content":
+		return a.cmdContent(args)
 	case "trust":
 		return a.cmdTrust(args)
 	case "push":
