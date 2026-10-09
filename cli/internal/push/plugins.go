@@ -368,3 +368,106 @@ func printPlugins(out io.Writer, plan *agentapi.PluginsPlan) {
 		fmt.Fprintln(out, "  ! Ein abgeschaltetes Plugin fehlt der Site sofort – bei einem Consent- oder Sicherheits-Plugin ohne dass ein Health-Check es merkt.")
 	}
 }
+
+// pluginsReport is what a push switched, as units – the form of data.plugins.
+func pluginsReport(a *agentapi.PluginsApplied) *PluginsReport {
+	r := &PluginsReport{Activated: []string{}, Deactivated: []string{}, Unchanged: append([]string{}, a.Unchanged...), Skipped: []string{}}
+	for _, p := range a.Activated {
+		r.Activated = append(r.Activated, p.Unit)
+	}
+	for _, p := range a.Deactivated {
+		r.Deactivated = append(r.Deactivated, p.Unit)
+	}
+	for _, p := range a.Skipped {
+		r.Skipped = append(r.Skipped, p.Unit)
+	}
+	return r
+}
+
+// switchedAsAsked reports whether the commit answers for exactly the plugins the push asked for:
+// every unit once, one to activate never as deactivated and the other way round, and no unit
+// beyond them. The answer is the site's word – an agent that names other plugins did not do this push.
+func switchedAsAsked(sw switches, a *agentapi.PluginsApplied) bool {
+	seen, on, off := map[string]int{}, map[string]bool{}, map[string]bool{}
+	for _, p := range a.Activated {
+		seen[p.Unit]++
+		on[p.Unit] = true
+	}
+	for _, p := range a.Skipped {
+		seen[p.Unit]++
+		on[p.Unit] = true
+	}
+	for _, p := range a.Deactivated {
+		seen[p.Unit]++
+		off[p.Unit] = true
+	}
+	for _, u := range a.Unchanged {
+		seen[u]++
+	}
+	for _, u := range sw.Activate {
+		if seen[u] != 1 || off[u] {
+			return false
+		}
+	}
+	for _, u := range sw.Deactivate {
+		if seen[u] != 1 || on[u] {
+			return false
+		}
+	}
+	return len(seen) == len(sw.Activate)+len(sw.Deactivate)
+}
+
+// showEntry is an entry of active_plugins for a line of output: as it is while it has the form the
+// CLI takes from the site (agentapi.PluginEntry – nothing a terminal would act on), quoted otherwise.
+func showEntry(e string) string {
+	if agentapi.PluginEntry(e) {
+		return e
+	}
+	return agentapi.Printable(e)
+}
+
+// printSwitched shows what the commit did to the plugin state.
+func printSwitched(out io.Writer, a *agentapi.PluginsApplied) {
+	for _, p := range a.Activated {
+		fmt.Fprintf(out, "  aktiviert: %s (%s)\n", p.Unit, showEntry(p.File))
+	}
+	for _, p := range a.Deactivated {
+		files := make([]string, 0, len(p.Files))
+		for _, f := range p.Files {
+			files = append(files, showEntry(f))
+		}
+		fmt.Fprintf(out, "  deaktiviert: %s (%s)\n", p.Unit, strings.Join(files, ", "))
+	}
+	for _, u := range a.Unchanged {
+		fmt.Fprintf(out, "  schon im gewünschten Zustand: %s\n", u)
+	}
+	for _, p := range a.Skipped {
+		fmt.Fprintf(out, "  auf diesem Ziel nicht aktiviert: %s (%s)\n", p.Unit, p.Why)
+	}
+}
+
+// printEntries prints one line of plugin entries; they are the agent's words.
+func printEntries(out io.Writer, label string, entries []string) {
+	if len(entries) == 0 {
+		return
+	}
+	shown := make([]string, 0, len(entries))
+	for _, e := range entries {
+		shown = append(shown, showEntry(e))
+	}
+	fmt.Fprintf(out, "  %s: %s\n", label, strings.Join(shown, ", "))
+}
+
+// printPluginsBack names what a rollback changed in the list of active plugins – or, when the
+// database part of the push stayed, what of the push still stands there (A18).
+func printPluginsBack(out io.Writer, notes agentapi.RollbackNotes) {
+	if p := notes.Plugins; p != nil {
+		printEntries(out, "wieder deaktiviert", p.Deactivated)
+		printEntries(out, "wieder aktiviert", p.Reactivated)
+	}
+	if p := notes.PluginsNotRestored; p != nil {
+		fmt.Fprintln(out, "  ! Der Plugin-Zustand des Pushs steht noch auf der Site:")
+		printEntries(out, "  noch aktiv", p.Added)
+		printEntries(out, "  noch inaktiv", p.Removed)
+	}
+}

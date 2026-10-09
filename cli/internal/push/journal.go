@@ -81,6 +81,20 @@ func (j *Journal) hasDB() bool {
 	return j.Content != nil || len(j.Activate)+len(j.Deactivate) > 0
 }
 
+// switched reports whether the push carried a plugin state.
+func (j *Journal) switched() bool { return len(j.Activate)+len(j.Deactivate) > 0 }
+
+// dbName names the database part of the push for a message.
+func (j *Journal) dbName() string {
+	switch {
+	case j.Content != nil && j.switched():
+		return "Inhalte und Plugin-Zustand"
+	case j.switched():
+		return "Plugin-Zustand"
+	}
+	return "Inhalte"
+}
+
 func knownTarget(target string) bool {
 	return target == "" || target == TargetLive || target == TargetStaging
 }

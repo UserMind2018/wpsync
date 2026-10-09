@@ -372,3 +372,371 @@ func TestRunStagesThePackageAgainAfterARefusedRealBegin(t *testing.T) {
 		t.Errorf("second try: routes = %s", got)
 	}
 }
+
+// pluginPushed pushes a set that activates plugins/kunde and deactivates plugins/alt, and confirms it.
+func pluginPushed(t *testing.T) (*fakeSite, Options, string, *bytes.Buffer) {
+	t.Helper()
+	f := newFakeSite(t)
+	o, siteDir, out := pluginSite(t, f)
+	o.Activate, o.Deactivate = []string{"plugins/kunde"}, []string{"plugins/alt"}
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	f.routes = nil
+	out.Reset()
+	return f, o, siteDir, out
+}
+
+// AC-176, AC-194, AC-208, §4.5: das Ergebnis nennt, was geschaltet wurde, und die Routinen, die nicht liefen.
+func TestRunReportsThePluginsItSwitched(t *testing.T) {
+	f := newFakeSite(t)
+	f.deactHooks = map[string]bool{"plugins/alt": true}
+	f.inactive = map[string]bool{"plugins/schon-aus": true}
+	o, _, out := pluginSite(t, f)
+	o.Activate, o.Deactivate = []string{"plugins/kunde"}, []string{"plugins/alt", "plugins/schon-aus"}
+	var report Result
+	o.Report = &report
+
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit confirm") {
+		t.Errorf("routes = %s", got)
+	}
+	want := &PluginsReport{Activated: []string{"plugins/kunde"}, Deactivated: []string{"plugins/alt"}, Unchanged: []string{"plugins/schon-aus"}, Skipped: []string{}}
+	if report.Status != "confirmed" || !reflect.DeepEqual(report.Plugins, want) || report.Content != nil {
+		t.Errorf("report = %+v, plugins = %+v", report, report.Plugins)
+	}
+	for _, w := range []string{WarningDeactivationReview, WarningActivationHooksSkipped, WarningDeactivationHooksSkipped} {
+		if !slices.Contains(report.Warnings, w) {
+			t.Errorf("warnings = %v, want %s", report.Warnings, w)
+		}
+	}
+	if len(report.PostActions) != 1 || report.PostActions[0].Step != "plugins_cache" {
+		t.Errorf("post actions = %+v", report.PostActions)
+	}
+	for _, want := range []string{"aktiviert: plugins/kunde (kunde/kunde.php)", "deaktiviert: plugins/alt (alt/alt.php)", "Aktivierungsroutine", "im WP-Admin einmal deaktivieren und aktivieren"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out.String(), "Inhalte: 0 Zeilen") {
+		t.Errorf("a push without a package names no rows:\n%s", out)
+	}
+}
+
+// A14: was das Ziel überspringt (Staging), steht als skipped im Ergebnis – ohne Hinweis auf eine Routine.
+func TestRunReportsSkippedPlugins(t *testing.T) {
+	f := newFakeSite(t)
+	f.skipped = map[string]string{"plugins/kunde": "disabled_on_staging"}
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	var report Result
+	o.Report = &report
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !reflect.DeepEqual(report.Plugins.Skipped, []string{"plugins/kunde"}) || len(report.Plugins.Activated) != 0 || slices.Contains(report.Warnings, WarningActivationHooksSkipped) {
+		t.Errorf("report = %+v, plugins = %+v", report, report.Plugins)
+	}
+	if !strings.Contains(out.String(), "nicht aktiviert: plugins/kunde (disabled_on_staging)") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// AC-195 – nie ein halber Satz: schaltet der Agent nicht oder nennt er andere Einheiten, wird nicht bestätigt, sondern zurückgenommen.
+func TestRunNeverConfirmsWithoutThePluginState(t *testing.T) {
+	for name, prepare := range map[string]func(f *fakeSite){
+		"no plugins in the answer": func(f *fakeSite) { f.noSwitch = true },
+		"another unit": func(f *fakeSite) {
+			f.tamperPlugins = func(a *agentapi.PluginsApplied) { a.Activated[0].Unit = "plugins/fremd" }
+		},
+		"one missing": func(f *fakeSite) {
+			f.tamperPlugins = func(a *agentapi.PluginsApplied) { a.Deactivated = []agentapi.PluginDeactivated{} }
+		},
+		"one twice": func(f *fakeSite) {
+			f.tamperPlugins = func(a *agentapi.PluginsApplied) { a.Unchanged = append(a.Unchanged, "plugins/kunde") }
+		},
+	} {
+		f := newFakeSite(t)
+		o, _, out := pluginSite(t, f)
+		prepare(f)
+		o.Activate, o.Deactivate = []string{"plugins/kunde"}, []string{"plugins/alt"}
+		var report Result
+		o.Report = &report
+
+		err := Run(o)
+		var rolled *RolledBackError
+		if !errors.As(err, &rolled) || rolled.Via != "agent" || len(rolled.Reasons) != 1 || !strings.Contains(rolled.Reasons[0], "Plugin") {
+			t.Fatalf("%s: err = %v\n%s", name, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback") {
+			t.Errorf("%s: routes = %s", name, got)
+		}
+		if report.Status != "rolled_back" || report.Plugins != nil {
+			t.Errorf("%s: report = %+v", name, report)
+		}
+	}
+}
+
+// AC-188, AC-195: bricht nur die Seite im Admin-Kontext, nimmt die CLI den Satz über den Agent zurück – und nennt, was die Liste wieder verliert.
+func TestRunTakesThePluginStateBackThroughTheAgent(t *testing.T) {
+	f := newFakeSite(t)
+	f.adminBroken = true
+	f.rbBody = `{"ok":true,"plugins":{"deactivated":["kunde/kunde.php"],"reactivated":["alt/alt.php"]},"post_actions":[{"step":"plugins_cache","ok":true}]}`
+	o, _, out := pluginSite(t, f)
+	o.Activate, o.Deactivate = []string{"plugins/kunde"}, []string{"plugins/alt"}
+	var report Result
+	o.Report = &report
+
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) || rolled.Via != "agent" || rolled.Content != "rolled_back" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	back := &agentapi.RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{"alt/alt.php"}}
+	if !reflect.DeepEqual(rolled.Plugins, back) || !reflect.DeepEqual(report.PluginsBack, back) || report.Plugins != nil || report.PluginsNotRestored != nil {
+		t.Errorf("rolled = %+v, report = %+v", rolled, report)
+	}
+	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback") || strings.Contains(got, "rescue") {
+		t.Errorf("routes = %s", got)
+	}
+	for _, want := range []string{"wieder deaktiviert: kunde/kunde.php", "wieder aktiviert: alt/alt.php"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+}
+
+// AC-186, AC-195: antwortet WordPress nicht mehr, geht der ganze Satz über rescue.php zurück – mit content=1, auch ohne Paket.
+func TestRunTakesThePluginStateBackThroughRescue(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken, f.rollback = true, 500
+	f.rescueBody = `{"ok":true,"status":"rolled_back","content":{"state":"rolled_back","cache":"none"},"plugins":{"deactivated":["kunde/kunde.php"],"reactivated":[]}}`
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	var report Result
+	o.Report = &report
+
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) || rolled.Via != "rescue" || rolled.Content != "rolled_back" || len(rolled.Warnings) != 0 {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback rescue list") {
+		t.Errorf("routes = %s", got)
+	}
+	if len(f.rescueForms) != 1 || f.rescueForms[0].Get("content") != "1" {
+		t.Errorf("forms = %v", f.rescueForms)
+	}
+	if report.Plugins != nil || report.PluginsBack == nil || !reflect.DeepEqual(report.PluginsBack.Deactivated, []string{"kunde/kunde.php"}) {
+		t.Errorf("report = %+v", report)
+	}
+	if !strings.Contains(out.String(), "über rescue.php zurückgenommen, Plugin-Zustand eingeschlossen") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// AC-190, A18: lässt rescue.php den DB-Anteil stehen, sagt das Ergebnis plugins_not_restored – mit den Einträgen, die noch gelten.
+func TestRunNamesThePluginStateRescueLeft(t *testing.T) {
+	for name, body := range map[string]string{
+		"kept":            `{"ok":true,"status":"rolled_back","content":{"state":"kept","error":{"code":"changed_since_push"}},"plugins_not_restored":{"added":["kunde/kunde.php"],"removed":[]},"warnings":["content_not_rolled_back","plugins_not_restored"]}`,
+		"an older rescue": `{"ok":true,"status":"rolled_back"}`,
+	} {
+		f := newFakeSite(t)
+		f.broken, f.rollback = true, 500
+		f.rescueBody = body
+		o, _, out := pluginSite(t, f)
+		o.Activate = []string{"plugins/kunde"}
+		var report Result
+		o.Report = &report
+
+		err := Run(o)
+		var rolled *RolledBackError
+		if !errors.As(err, &rolled) || rolled.Content != "kept" {
+			t.Fatalf("%s: err = %v\n%s", name, err, out)
+		}
+		if !reflect.DeepEqual(report.Warnings[len(report.Warnings)-2:], []string{WarningContentNotRolledBack, WarningPluginsNotRestored}) {
+			t.Errorf("%s: warnings = %v", name, report.Warnings)
+		}
+		if report.Plugins == nil || report.PluginsBack != nil {
+			t.Errorf("%s: the plugin state still stands: %+v", name, report)
+		}
+		if name == "kept" && (report.PluginsNotRestored == nil || !reflect.DeepEqual(report.PluginsNotRestored.Added, []string{"kunde/kunde.php"}) || !strings.Contains(out.String(), "noch aktiv: kunde/kunde.php")) {
+			t.Errorf("report = %+v\n%s", report, out)
+		}
+		if strings.Contains(strings.Join(f.routes, " "), "list") {
+			t.Errorf("%s: nothing to catch up on while the database part stands: %v", name, f.routes)
+		}
+	}
+}
+
+// wpsync rollback: derselbe Weg – über den Agent, sonst über rescue.php mit content=1.
+func TestRollbackOfAPluginState(t *testing.T) {
+	f, o, _, out := pluginPushed(t)
+	f.rbBody = `{"ok":true,"plugins":{"deactivated":["kunde/kunde.php"],"reactivated":["alt/alt.php"]}}`
+	var report Result
+	o.Report = &report
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.routes, " "); got != "rollback" {
+		t.Errorf("routes = %s", got)
+	}
+	if report.Status != "rolled_back" || report.Via != "agent" || report.PluginsBack == nil || !reflect.DeepEqual(report.PluginsBack.Reactivated, []string{"alt/alt.php"}) {
+		t.Errorf("report = %+v", report)
+	}
+	// V13: der Plugin-Zustand ist keine Einheit des Ergebnisses.
+	if !reflect.DeepEqual(report.Units, []string{"plugins/kunde", "plugins/x"}) {
+		t.Errorf("units = %v", report.Units)
+	}
+	if !strings.Contains(out.String(), "wieder aktiviert: alt/alt.php") {
+		t.Errorf("output:\n%s", out)
+	}
+
+	f, o, _, out = pluginPushed(t)
+	f.rollback = 500
+	f.rescueBody = `{"ok":true,"status":"rolled_back","content":{"state":"kept","error":{"code":"db_unreachable"}},"plugins_not_restored":{"added":["kunde/kunde.php"],"removed":["alt/alt.php"]},"warnings":["content_not_rolled_back","plugins_not_restored"]}`
+	o.Report = &report
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.routes, " "); got != "rollback rescue" || f.rescueForms[0].Get("content") != "1" {
+		t.Errorf("routes = %s, forms = %v", got, f.rescueForms)
+	}
+	if !reflect.DeepEqual(report.Warnings, []string{WarningContentNotRolledBack, WarningPluginsNotRestored}) || report.PluginsNotRestored == nil {
+		t.Errorf("report = %+v", report)
+	}
+	for _, want := range []string{"Plugin-Zustand", "noch aktiv: kunde/kunde.php", "noch inaktiv: alt/alt.php", "db_unreachable"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+}
+
+// --confirm nach rescue.php: der Plugin-Zustand bleibt – und kein Hinweis auf einen Inhaltsstand, den es nicht gibt.
+func TestConfirmPendingAfterRescueKeepsThePluginState(t *testing.T) {
+	f, o, _, out := pluginPushed(t)
+	f.confirmBody = `{"ok":true,"status":"rolled_back","warnings":["content_kept"]}`
+	var report Result
+	o.Report = &report
+	if err := ConfirmPending(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "rolled_back" || !reflect.DeepEqual(report.Warnings, []string{WarningContentKept}) {
+		t.Errorf("report = %+v", report)
+	}
+	if !strings.Contains(out.String(), "Plugin-Zustand") || strings.Contains(out.String(), "--content") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// V12: das Protokoll zeigt die Einheit plugins mit dem, was geschaltet wurde.
+func TestPushesNamesThePluginState(t *testing.T) {
+	f := newFakeSite(t)
+	f.list = `{"pushes":[{"push_id":"` + testID + `","device":"mac","target":"live","status":"rolled_back","created":1791158400,
+"units":[{"path":"plugins/kunde","files":2,"uploaded":2},{"path":"plugins","activated":["kunde/kunde.php"],"deactivated":["alt/alt.php"],
+"back":{"deactivated":["kunde/kunde.php"],"reactivated":[]},"via":"rescue"}]}]}`
+	o, _, out := localSite(t, f)
+	if err := Pushes(o); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "plugins (aktiviert: kunde/kunde.php; deaktiviert: alt/alt.php; über rescue.php zurückgenommen)") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// Ergänzt beim Umsetzen (nicht im Plan): ein Satz nur aus --deactivate – der Agent antwortet mit
+// units: [] und stamps: {} – läuft ohne Sonderfall bis zur Bestätigung; das Ergebnis hat keine Einheit.
+func TestRunOfOnlyADeactivationRunsToItsEnd(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := pluginSite(t, f)
+	o.NoCode = true
+	o.Deactivate = []string{"plugins/alt"}
+	var report Result
+	o.Report = &report
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin commit confirm" {
+		t.Errorf("routes = %s", got)
+	}
+	want := &PluginsReport{Activated: []string{}, Deactivated: []string{"plugins/alt"}, Unchanged: []string{}, Skipped: []string{}}
+	if report.Status != "confirmed" || len(report.Units) != 0 || report.Units == nil || !reflect.DeepEqual(report.Plugins, want) || report.Content != nil {
+		t.Errorf("report = %+v, plugins = %+v", report, report.Plugins)
+	}
+	raw, _ := json.Marshal(report)
+	for _, part := range []string{`"units":[]`, `"plugins":{"activated":[],"deactivated":["plugins/alt"],"unchanged":[],"skipped":[]}`} {
+		if !strings.Contains(string(raw), part) {
+			t.Errorf("json misses %s: %s", part, raw)
+		}
+	}
+	if j, err := LoadJournal(siteDir, testID); err != nil || !j.Applied || len(j.Units) != 0 {
+		t.Errorf("journal = %+v, err = %v", j, err)
+	}
+	if !strings.Contains(out.String(), "ist live") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// Ergänzt: derselbe Satz ohne Paket nimmt bei der Rücknahme den Weg eines Satzes mit Paket – zuerst
+// der Agent; antwortet er nicht, rescue.php mit content=1.
+func TestRunOfOnlyADeactivationGoesBackLikeASetWithContent(t *testing.T) {
+	f := newFakeSite(t)
+	f.adminBroken = true
+	f.rbBody = `{"ok":true,"plugins":{"deactivated":[],"reactivated":["alt/alt.php"]}}`
+	o, _, out := pluginSite(t, f)
+	o.NoCode, o.Deactivate = true, []string{"plugins/alt"}
+	var report Result
+	o.Report = &report
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) || rolled.Via != "agent" || rolled.Content != "rolled_back" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin commit rollback" {
+		t.Errorf("routes = %s", got)
+	}
+	if report.PluginsBack == nil || !reflect.DeepEqual(report.PluginsBack.Reactivated, []string{"alt/alt.php"}) || report.Plugins != nil {
+		t.Errorf("report = %+v", report)
+	}
+
+	f = newFakeSite(t)
+	f.adminBroken, f.rollback = true, 500
+	f.rescueBody = `{"ok":true,"status":"rolled_back","content":{"state":"rolled_back","cache":"none"},"plugins":{"deactivated":[],"reactivated":["alt/alt.php"]}}`
+	o, _, out = pluginSite(t, f)
+	o.NoCode, o.Deactivate = true, []string{"plugins/alt"}
+	o.Report = &report
+	err = Run(o)
+	if !errors.As(err, &rolled) || rolled.Via != "rescue" || rolled.Content != "rolled_back" {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin commit rollback rescue list" {
+		t.Errorf("routes = %s", got)
+	}
+	if len(f.rescueForms) != 1 || f.rescueForms[0].Get("content") != "1" {
+		t.Errorf("forms = %v", f.rescueForms)
+	}
+}
+
+// Ergänzt: antwortet der Agent und lehnt die Rücknahme ab (die Liste ist nicht lesbar, eine Zeile
+// geändert), geht nichts an ihm vorbei über rescue.php – der Satz bleibt ganz.
+func TestRunNeverGoesAroundARefusingAgentForAPluginState(t *testing.T) {
+	f := newFakeSite(t)
+	f.adminBroken, f.rollback, f.rbCode = true, 409, "wpsync_content_changed_since_push"
+	o, _, out := pluginSite(t, f)
+	o.NoCode, o.Deactivate = true, []string{"plugins/alt"}
+	var report Result
+	o.Report = &report
+	err := Run(o)
+	var rolled *RolledBackError
+	if err == nil || errors.As(err, &rolled) || !strings.Contains(err.Error(), "ROLLBACK NICHT MÖGLICH") {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); got != "begin begin commit rollback" {
+		t.Errorf("routes = %s", got)
+	}
+	if report.Status != "committed" || report.Plugins == nil {
+		t.Errorf("the push still stands: %+v", report)
+	}
+}

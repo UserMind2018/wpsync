@@ -119,6 +119,11 @@ type Result struct {
 	// Plugins: what the push switched – while it stands on the site. Omitted without a plugin state,
 	// in a dry run and once the push is rolled back (Spec Content-Push P4 §4.5).
 	Plugins *PluginsReport `json:"plugins,omitempty"`
+	// PluginsBack: what a rollback changed in the list of active plugins – entries, as the agent
+	// names them. PluginsNotRestored: the database part of the push stayed on the site (rescue.php,
+	// A18); what of the push still stands in the list.
+	PluginsBack        *agentapi.RollbackPlugins `json:"plugins_back,omitempty"`
+	PluginsNotRestored *agentapi.PluginsKept     `json:"plugins_not_restored,omitempty"`
 	// Via: how a rollback happened – "agent" (through WordPress) or "rescue" (rescue.php, without
 	// it). Omitted when nothing was rolled back (Spec Content-Push P3 §9).
 	Via string `json:"via,omitempty"`
@@ -266,13 +271,18 @@ type RolledBackError struct {
 	PostActions []agentapi.PostAction
 	// Via: "agent" or "rescue". Content: what became of the content of the push – "" without
 	// content, "rolled_back" or "nothing" when it is back, "kept" when it still stands; then
-	// ContentError is the reason rescue.php named, if any (Spec Content-Push P3 §9).
+	// ContentError is the reason rescue.php named, if any (Spec Content-Push P3 §9). For a push that
+	// only switches plugins it tells the same about the database part.
 	Via          string
 	Content      string
 	ContentError *ContentErrorReport
 	// ContentLeft: what rescue.php left on inserted objects (R15).
 	ContentLeft      []agentapi.ContentKey
 	ContentLeftTotal int
+	// Plugins: what the rollback changed in the list of active plugins; PluginsNotRestored: what
+	// of the push still stands there because the database part stayed (Content "kept").
+	Plugins            *agentapi.RollbackPlugins
+	PluginsNotRestored *agentapi.PluginsKept
 }
 
 // RescueDBError: rescue.php cannot take the database part of this push back without WordPress, and
@@ -1025,11 +1035,35 @@ func Run(o Options) error {
 		report.PostActions = committed.Content.PostActions
 		if rowsOff {
 			fmt.Fprintf(o.Out, "  ! der Agent nennt %d angewandte Zeilen, das Paket hat %d\n", committed.Content.Rows, len(pkg.Rows))
-		} else {
+		} else if pkg != nil { // without a package the database step ran for the plugin state alone
 			report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
 			fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
 		}
 		printActions(o.Out, committed.Content.PostActions)
+	}
+	// The same for the plugin state: an answer without it, or for other plugins than asked, is never confirmed.
+	switchOff := ""
+	if sw.any() {
+		switch {
+		case committed.Plugins == nil:
+			switchOff = "der Agent hat den Plugin-Zustand des Pushs nicht geschaltet"
+		case !switchedAsAsked(sw, committed.Plugins):
+			switchOff = "der Agent nennt andere Plugins als die, die der Push schalten sollte"
+		default:
+			report.Plugins = pluginsReport(committed.Plugins)
+			printSwitched(o.Out, committed.Plugins)
+			// A5, A17: a push writes the list itself – no activation and no deactivation hook ran.
+			if slices.ContainsFunc(report.Plugins.Activated, func(u string) bool { return slices.Contains(hooked, u) }) {
+				fmt.Fprintln(o.Out, "  ! Mindestens ein aktiviertes Plugin registriert eine Aktivierungsroutine – sie lief nicht.\n"+
+					"    Braucht das Plugin sie (eigene Tabellen, Rollen, Cron): im WP-Admin einmal deaktivieren und aktivieren.")
+				report.Warnings = append(report.Warnings, WarningActivationHooksSkipped)
+			}
+			off := deactHooked(plan.Plugins)
+			if slices.ContainsFunc(report.Plugins.Deactivated, func(u string) bool { return slices.Contains(off, u) }) {
+				fmt.Fprintln(o.Out, "  ! Mindestens ein abgeschaltetes Plugin registriert eine Deaktivierungsroutine – sie lief nicht (Cron-Einträge und Ähnliches bleiben).")
+				report.Warnings = append(report.Warnings, WarningDeactivationHooksSkipped)
+			}
+		}
 	}
 	o.event("commit", map[string]any{"push_id": begin.PushID})
 	fmt.Fprintln(o.Out, "  getauscht – prüfe die Site …")
@@ -1050,6 +1084,9 @@ func Run(o Options) error {
 	}
 	if rowsOff && len(worse) == 0 {
 		worse = []string{fmt.Sprintf("der Agent nennt %d angewandte Zeilen, das Paket hat %d", committed.Content.Rows, len(pkg.Rows))}
+	}
+	if switchOff != "" && len(worse) == 0 {
+		worse = []string{switchOff}
 	}
 	if len(worse) > 0 {
 		report.Health = WorsePages(before, after)
@@ -1334,10 +1371,12 @@ func rolledBack(report *Result, err error) error {
 		report.Status = "rolled_back"
 		report.Via, report.ContentError = rolled.Via, rolled.ContentError
 		report.ContentLeft, report.ContentLeftTotal = rolled.ContentLeft, rolled.ContentLeftTotal
+		report.PluginsBack, report.PluginsNotRestored = rolled.Plugins, rolled.PluginsNotRestored
 		report.Warnings = append(report.Warnings, rolled.Warnings...)
-		// Through rescue.php the content stays on the site – then it is still what was applied.
+		// Through rescue.php the database part may stay on the site – then content and plugin state
+		// are still what was applied.
 		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
-			report.Content = nil
+			report.Content, report.Plugins = nil, nil
 		}
 		if rolled.PostActions != nil {
 			report.PostActions = rolled.PostActions
@@ -1366,7 +1405,8 @@ func stagingPages(siteURL, base string, pages []string) []string {
 // back – an older agent, no envelope, rows changed since the push – code and uploads go back
 // anyway and the result says content_not_rolled_back. If the agent answers and refuses (a wpsync
 // code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php is not
-// called: the set stays whole. A push without content goes through rescue.php, always.
+// called: the set stays whole. A push without content goes through rescue.php, always. A push that
+// switches plugins has a database part like one with content (Spec Content-Push P4 §8.3).
 // ctx bounds the check after the rollback; a check cut short by it is left out of the error.
 func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
@@ -1376,7 +1416,7 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	var notes agentapi.RollbackNotes
 	var err error
 	viaAgent := false
-	if j.Content != nil {
+	if j.hasDB() {
 		var apiErr *agentapi.APIError
 		notes, err = agentRollback(o, j.PushID)
 		switch {
@@ -1410,11 +1450,13 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	}
 	printKept(o.Out, notes.Kept)
 	printActions(o.Out, notes.PostActions)
-	rolled := &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions, Via: "rescue"}
+	printPluginsBack(o.Out, notes)
+	rolled := &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions, Via: "rescue",
+		Plugins: notes.Plugins, PluginsNotRestored: notes.PluginsNotRestored}
 	if viaAgent {
 		rolled.Via = "agent"
 	}
-	if j.Content != nil {
+	if j.hasDB() {
 		rolled.Content = "rolled_back"
 		if slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
 			rolled.Content = "kept"
@@ -1426,7 +1468,7 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 			printLeft(o.Out, notes.Content)
 		}
 		if !viaAgent && rolled.Content != "kept" {
-			fmt.Fprintln(o.Out, "  über rescue.php zurückgenommen, Inhalte eingeschlossen – die Nacharbeiten holt der Agent nach, sobald WordPress wieder lädt")
+			fmt.Fprintf(o.Out, "  über rescue.php zurückgenommen, %s eingeschlossen – die Nacharbeiten holt der Agent nach, sobald WordPress wieder lädt\n", j.dbName())
 		}
 	}
 	return rolled

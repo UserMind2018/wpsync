@@ -29,6 +29,13 @@ var (
 // PluginUnit reports whether s names a plugin as a unit: "plugins/<slug>".
 func PluginUnit(s string) bool { return pluginUnitRe.MatchString(s) }
 
+// PluginEntry reports whether s has the form of an entry of active_plugins as the CLI takes it
+// from the site: "<slug>/<path>.php" of letters, digits, dot, underscore, hyphen, slash and blank,
+// without "..". Such an entry is safe to show as it is.
+func PluginEntry(s string) bool {
+	return len(s) <= 255 && !strings.Contains(s, "..") && pluginEntryRe.MatchString(s)
+}
+
 // PluginRequirement is one requirement of a plugin header the target does not meet: requires_php,
 // requires_wp, requires_plugins – with what the header needs and what the target has.
 type PluginRequirement struct {
@@ -169,7 +176,7 @@ func cleanLabel(p *string) *string {
 func cleanEntries(in []string) []string {
 	out := []string{}
 	for _, e := range in {
-		if len(out) < maxPluginEntries && len(e) <= 255 && !strings.Contains(e, "..") && pluginEntryRe.MatchString(e) {
+		if len(out) < maxPluginEntries && PluginEntry(e) {
 			out = append(out, e)
 		}
 	}
