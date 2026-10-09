@@ -341,7 +341,7 @@ eq "content.unfaithful = Zeilen in unfaithful.jsonl" "$(last pull-content '.data
 eq "content.id_max = id_max im Kopf" "$(tail -n 1 "$JSON/pull-content.jsonl" | jq -cS '.data.content.id_max')" "$(jq -cS '.head.id_max' <<<"$HEAD")"
 for f in manifest.jsonl map.json baseline.jsonl unfaithful.jsonl env.json summary.json; do ok "$f liegt da" test -s "$CONTENT/$f"; done
 eq "kein Rest einer halben Datei" "$(find "$CONTENT" -type f | wc -l | tr -d ' ')" 6
-eq "Kopf: canon_version, list_version" "$(jq -c '.head | [.canon_version, .list_version]' <<<"$HEAD")" "[1,1]"
+eq "Kopf: canon_version, list_version" "$(jq -c '.head | [.canon_version, .list_version]' <<<"$HEAD")" "[1,2]"
 eq "Kopf: origins" "$(jq -c '.head.origins' <<<"$HEAD")" "{\"home\":\"$SOURCE_URL\",\"siteurl\":\"$SOURCE_URL\"}"
 eq "Kopf: pushable" "$(jq -c '.head | [.pushable, has("why")]' <<<"$HEAD")" "[true,false]"
 eq "Kopf: variants" "$(jq -c '.head.variants' <<<"$HEAD")" '["plain","esc1","esc2"]'

@@ -20,9 +20,6 @@ final class ContentManifest
      */
     public const PAGE_RECORDS = 20000;
 
-    /** Zähler-Tabellen mit ihrem Primärschlüssel – für sie gilt der ID-Korridor (Studio §6.1). */
-    private const COUNTERS = ['posts' => 'ID', 'terms' => 'term_id', 'term_taxonomy' => 'term_taxonomy_id'];
-
     /**
      * Der Cursor aus dem Request: null oder genau das, was eine Seite als next genannt hat.
      *
@@ -97,13 +94,11 @@ final class ContentManifest
         $engines = [];
         $idMax   = [];
         foreach ($tables as $name) {
-            $status = (array) $wpdb->get_results($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($prefix . $name)), ARRAY_A);
-            self::check();
-            $engines[$name] = (string) ($status[0]['Engine'] ?? '');
-            if (isset(self::COUNTERS[$name])) {
-                $max = (int) $wpdb->get_var('SELECT MAX(`' . self::COUNTERS[$name] . '`) FROM `' . $prefix . $name . '`');
-                self::check();
-                $idMax[$name] = max($max, (int) ($status[0]['Auto_increment'] ?? 0) - 1);
+            // Dieselbe Rechnung prüft später jede neue ID eines Pakets (ContentCheck::ID_HEADROOM).
+            $status         = ContentSql::status($wpdb, $prefix . $name);
+            $engines[$name] = (string) ($status['Engine'] ?? '');
+            if (isset(ContentState::PK[$name])) {
+                $idMax[$name] = ContentSql::counter($wpdb, $prefix . $name, ContentState::PK[$name], $status);
             }
         }
         $head = [
@@ -138,7 +133,7 @@ final class ContentManifest
     }
 
     /** Schema, Host und Port in einer Form, in der sich zwei URLs vergleichen lassen; '' wenn unlesbar. */
-    private static function origin(string $url): string
+    public static function origin(string $url): string
     {
         $parts  = parse_url($url);
         $scheme = strtolower((string) ($parts['scheme'] ?? ''));
@@ -170,12 +165,4 @@ final class ContentManifest
         return $out;
     }
 
-    /** Ein id_max aus einer gescheiterten Abfrage läge unter dem, was Live schon vergeben hat (B8). */
-    private static function check(): void
-    {
-        global $wpdb;
-        if ((string) $wpdb->last_error !== '') {
-            throw new \RuntimeException('content read failed');
-        }
-    }
 }

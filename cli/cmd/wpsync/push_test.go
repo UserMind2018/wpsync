@@ -49,6 +49,16 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"upload_missing", fmt.Errorf("wp-content/uploads/2026/10/a.png %w", push.ErrUploadMissing), cliout.ExitUsage, "relativ zu wp-content/uploads/"},
 		{"uploads_there", push.ErrUploadsThere, cliout.ExitUnknown, "liegen schon auf der Site"},
 		{"upload_layout", &agentapi.APIError{Status: 409, Code: "wpsync_upload_layout", Message: "wp-content/uploads ist ein symbolischer Link"}, cliout.ExitUnknown, "symbolischer Link"},
+		{"no_content", fmt.Errorf("%w: %w", push.ErrAgentNoContent, &agentapi.APIError{Status: 404, Code: "rest_no_route"}), cliout.ExitAgentOutdated, "kann noch keine Inhalte pushen – Agent 0.7.0 installieren"},
+		{"content_conflict", &push.ContentError{Reason: "conflict", Message: "Auf dem Ziel seit dem Pull geändert"}, cliout.ExitUnknown, "wpsync pull kunde --content"},
+		{"content_blocked", &push.ContentError{Reason: "blocked_row", Message: "1 Zeile(n) stehen auf der Sperrliste"}, cliout.ExitUnknown, "nichts wurde übertragen"},
+		{"content_author", &push.ContentError{Reason: "author_unknown", Message: "Neue Beiträge brauchen einen Autor"}, cliout.ExitUnknown, "wp-admin/tools.php?page=wpsync"},
+		{"content_changed", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "changed_since_push", Message: "Seit dem Push geändert"}), cliout.ExitUnknown, "auch Code und Uploads nicht"},
+		{"content_unrestored", &push.ContentError{Reason: "content_failed", Message: "die Zeile posts 219 liess sich nicht zurücksetzen", Keys: []agentapi.ContentKey{{Table: "posts", Key: "219"}}}, cliout.ExitUnknown, "von Hand prüfen"},
+		{"content_failed", &push.ContentError{Reason: "content_failed", Message: "Die Datenbank hat einen Schreibzugriff abgelehnt"}, cliout.ExitUnknown, "nichts wurde übertragen"},
+		{"content_image", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "before_image_invalid", Message: "Das Vorher-Abbild lässt sich nicht öffnen"}), cliout.ExitUnknown, "WPSYNC_KEY oder die Salts"},
+		{"content_stage", &agentapi.APIError{Status: 409, Code: "wpsync_content_offset", Message: "Stück passt nicht an das Paket."}, cliout.ExitUnknown, "Stück passt nicht"},
+		{"content_left", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Warnings: []string{push.WarningContentNotRolledBack}}, cliout.ExitPushRolledBack, "wpsync rollback kunde p_20261005_0123456789ab"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

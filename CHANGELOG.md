@@ -5,11 +5,45 @@ Agent-Version steht pro Release dabei.
 
 ## [Unreleased]
 
-**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` braucht Agent ≥ 0.7.0; ohne
-`--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter „Geändert“. Vorstufe
-des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
+**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` und `push --content` brauchen
+Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter
+„Geändert“.
 
 ### Neu
+- `wpsync push <site> code … --content <package.jsonl>`: Inhalte als dritter Kanal eines Pushs –
+  ein Paket aus Zeilen der sieben Inhaltstabellen (`update`, `insert` mit fester ID, `trash` –
+  der Agent tut dabei, was WordPress beim Weg in den Papierkorb tut, samt `__trashed` am Namen
+  und `_wp_desired_post_slug`; `trash` darf `row` mit genau `post_date` und `post_date_gmt`
+  tragen – das Datum, das WordPress einem nie veröffentlichten Entwurf beim Verschieben gibt),
+  transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
+  Vorher-Abbild, Nacharbeiten (`data.post_actions`), Messwert (`data.content: {rows, seconds}`)
+  und Health-Check der geänderten Seiten.
+  `--dry-run` prüft das Paket ohne Push-Fenster (vollständig nur mit offenem Fenster, siehe
+  „Sicherheit“); das `plan`-Ereignis nennt `content: {rows, conflicts, limits, partial,
+  unchecked, unchecked_total}`. Auch
+  nach `--to staging`
+- `--no-code`: ein Satz nur aus `--uploads` und `--content`
+- `wpsync rollback` nimmt den ganzen Satz zurück (Inhalte → Code → Uploads) – oder nichts, wenn
+  sich Zeilen seit dem Push geändert haben (`changed_since_push`). Antwortet WordPress nicht,
+  nimmt `rescue.php` Code und Uploads zurück und das Ergebnis nennt
+  `warnings: ["content_not_rolled_back"]`; ein späterer `rollback` holt die Inhalte nach – oder
+  `pushes --confirm` schliesst den Push als zurückgerollt ab und lässt die Inhalte stehen
+  (`status: "rolled_back"`, `warnings: ["content_kept"]`). Die Rücknahme schreibt an bestehenden
+  Zeilen nur zurück, was der Push geschrieben hat
+- Nach einem bestätigten Inhalts-Push nach Live zieht die CLI `manifest.jsonl` und
+  `baseline.jsonl` nach; `rollback` nimmt das zurück
+- Agent: Endpunkt `/content/stage` (Paket in Stücken, je Kopplung, 24 h), Prüfungen eines Pakets
+  gegen die Listen des Agents, Sperre von serialisierten Objekten (`unsafe_value`), von Resten
+  der lokalen Adresse und von Pseudonymen; `rescue.json` kennt den DB-Anteil eines Pushs. Die
+  Transaktion ist an ihre Datenbankverbindung gebunden (Sitzungsmarke): nach einem Reconnect
+  schreibt nichts mehr und es gibt keinen `COMMIT`. Sites hinter HyperDB/LudicrousDB lehnt der
+  Agent ab (`engine_unsupported`)
+- `error.reason` bei Exit 1 für Inhalte: `package_invalid`, `baseline_outdated`,
+  `origin_mismatch`, `package_too_large`, `engine_unsupported`, `blocked_row`,
+  `list_version_mismatch`, `unsafe_value`, `local_origin_in_package`, `pseudonym_in_package`,
+  `write_mismatch`, `id_outside_corridor`, `id_taken`, `conflict`, `row_unfaithful`,
+  `dangling_reference`, `upload_missing`, `author_unknown`, `package_missing`,
+  `content_failed`, `changed_since_push` – dazu `error.keys` und `error.paths`
 - `wpsync pull <site> --content`: Manifest der sieben Inhaltstabellen (Fingerabdruck je Zeile,
   Meta-Paar und Zuordnung, keine Werte; für Zeilen, die der Pull pseudonymisiert, auch kein
   Fingerabdruck – `h: null`, `why: "pseudonymized"`), `map.json`, Baseline, `unfaithful.jsonl`
@@ -35,6 +69,12 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
 - `error.reason` bei Exit 1: `manifest_incomplete`, `content_export_failed`, `canon_version`
 
 ### Geändert
+- Listen des Agents für Inhalte in Version 2 (`list_version`): mehr Sperrwörter für
+  Meta-Schlüssel und Optionen (`passwd`, `credential`, `apikey`, `api-key`, `webhook`, `oauth`;
+  als ganzes Namensglied – zwischen `_ - . :`, Ziffern oder an einer camelCase-Grenze – `pass`,
+  `pwd`, `auth`, `salt`, `sk`, `private`), Objekt-IDs höchstens 18 Stellen, Prüfung auch in
+  Kleinschreibung, feste Liste von Beitragstypen, die keine Projekt-Erweiterung freigibt. `p` und
+  `why` in `content export` folgen den neuen Listen
 - Jeder Pull ersetzt auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON); `staging create`
   und `staging refresh` schreiben sie jetzt ebenfalls um (bisher blieben sie auf Live gerichtet)
 - Ein Pull ohne `--content`, der eine der sieben Inhaltstabellen neu lädt, verwirft einen
@@ -44,6 +84,11 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   umgeschrieben (bisher als Text ersetzt und damit zerstört). Sieht ein String **in** einem
   serialisierten Wert serialisiert aus, lässt sich nicht lesen und enthält die Live-URL, bleibt
   der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
+- Agent: Für eine Anfrage an den Agent gibt `$wpdb` keinen Datenbankfehler mehr aus. Mit
+  `WP_DEBUG` und `WP_DEBUG_DISPLAY` stand er sonst samt Abfrage als HTML vor dem JSON der
+  Antwort – die CLI konnte sie nicht lesen (ein abgelehnter Inhalts-Push galt als „Stand
+  unklar“ statt `content_failed`), und die Meldung zeigte die Abfrage mit ihren Werten. Im
+  Fehlerprotokoll des Servers steht der Fehler weiter
 
 ### Sicherheit
 - CLI: Die lokale URL aus `map.json` wird geprüft, bevor sie als Argument an `wp eval-file`
@@ -62,6 +107,102 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   (Tiefe insgesamt höchstens 64, verschachtelte serialisierte Strings zählen mit)
 - Agent: Eine URL-Ersetzung macht aus einem ungültigen serialisierten Wert nie einen gültigen –
   weder mit Leerraum an den Rändern noch eine Ebene tiefer
+- Agent: Neue IDs eines Inhalts-Pakets (`posts`, `terms`, `term_taxonomy`) prüft der Agent nicht
+  mehr nur gegen den Korridor aus dem Paket, sondern gegen das Ziel: höchstens
+  `limits.id_headroom` (2.000.000) über `max(MAX(id), AUTO_INCREMENT − 1)` der Tabelle – auf
+  Staging der Kopie – und nie über 2^53 − 1, sonst `id_outside_corridor` mit `error.keys`. Ein
+  `insert` mit einer ID wie 999999999999999999 verschob sonst den `AUTO_INCREMENT` von Live
+  dauerhaft (auch eine Rücknahme setzt ihn nicht zurück). Zwei Millionen, weil neue Objekte
+  der Arbeitskopie bei `id_max` + 1.000.001 beginnen. `limits` nennt die Grenze als
+  `id_headroom`, auch im `plan`-Ereignis der CLI
+- Agent: Eine gescheiterte Abfrage des Inhaltskanals landet nicht mehr samt allen Werten im
+  PHP-Fehlerprotokoll. `hide_errors()` schaltete nur die Ausgabe ab; `wpdb::print_error()`
+  schrieb die ganze Abfrage weiter per `error_log()`. Schreiben, Lesen (auch unter Sperre),
+  Rücknahme, Reparatur und die Nacharbeiten laufen jetzt mit `suppress_errors(true)` und
+  stellen danach die Einstellung der Site wieder her; im Protokoll steht nur noch die
+  Fehlernummer der Datenbank
+- Agent: `rollback` löscht nicht mehr mit, was nach dem Push an einem **eingefügten** Beitrag,
+  Term oder einer eingefügten `term_taxonomy`-Zeile entstanden ist. Hängt dort etwas, das der
+  Push nicht geschrieben hat – Meta-Schlüssel, Zuordnungen (auch fremder Beiträge an der neuen
+  `term_taxonomy`), Kommentare, Revisionen/Kindseiten, weitere Taxonomien, Kind-Terme –, endet
+  die Rücknahme mit `changed_since_push` und nennt die Stellen in `error.keys` (Kommentare als
+  `{table: "comments", key: "<post-id>"}`); nichts wird zurückgenommen. Meta der festen
+  Sperrliste (`_edit_lock`, `_edit_last`, `_wp_old_slug`, `_wp_trash_meta_*`, `_elementor_css` …)
+  und der oEmbed-Cache (`_oembed_*`) zählen nicht und gehen mit dem Beitrag
+- Agent: Engere Grenzen für Projekt-Erweiterungen (`extensions`) eines Inhalts-Pakets,
+  `list_version` bleibt 2. Die feste Liste `never_post_types` kennt weitere Code-Träger, Shop-,
+  Mitgliedschafts-, Kurs-, Formular- und Weiterleitungs-Typen; dazu Präfixe (`shop_`, `wc_`,
+  `edd_`, `memberpress`, `sfwd-`, `llms_`, `tutor_`, `ld-`, `frm_`, `forminator_`, `wpforms`,
+  `nf_`, `jp_`, `amp_`, `flamingo_`) und Wörter im Namen (`snippet`, `code`, `redirect`,
+  `webhook`, `payment`, `order`, `subscription`, `membership`, `coupon`). Neu eine Sperre für
+  Taxonomien: `action-group`, `user-group`, `link_category`, `product_type`,
+  `product_visibility`, `shop_order_status` und alles mit `user`, `role` oder `cap` im Namen.
+  Ein Paket, das so etwas freischalten will, ist `package_invalid`. Eine Taxonomie aus einer
+  Erweiterung, die die Site (auch) für Benutzer registriert hat, ist `blocked_row`, ebenso eine
+  Zuordnung an einen Beitrag, für dessen Typ sie nicht registriert ist. Im Manifest-Kopf neu:
+  `lists.never_post_type_words`, `lists.never_taxonomies`, `lists.never_taxonomy_words`
+- Die Erweiterungen eines Pakets bleiben sichtbar: `content.extensions` in der Antwort des
+  Begin und im `plan`-Ereignis, `units[].extensions` an der Einheit `content` in
+  `wpsync pushes --json` (ohne `--json` hinter der Einheit) und in der Liste der Pushes im
+  WP-Admin. Das Feld fehlt, wenn das Paket keine nennt
+- Agent: Eine Transaktion des Inhaltskanals wartet höchstens 10 Sekunden auf eine fremde Sperre
+  (`SET SESSION innodb_lock_wait_timeout`, ein Versuch; danach wieder der Wert der Site) – läuft
+  die Zeit ab, endet der Push mit `content_failed`, nichts ist geschrieben. Und was die Prüfung
+  vom Ziel liest (das Vorher-Abbild), ist in der Summe auf `limits.max_state_bytes` (64 MB)
+  begrenzt, im Probelauf wie beim Anwenden: sonst `package_too_large` mit `error.state_bytes`,
+  bevor etwas geschrieben wird
+- Agent: `before.json` und `after.json` eines Inhalts-Pushs liegen nicht mehr als ungeschützter
+  Klartext im Arbeitsordner. Mit einem Schlüssel der Installation (`WPSYNC_KEY`, sonst die
+  Salts aus `wp-config.php`) sind sie verschlüsselt und authentisiert (mit der PHP-Erweiterung
+  `sodium`), sonst mit einem HMAC-SHA256 versehen; an Push und Dateinamen gebunden, Modus 0600,
+  Ordner 0700. `rollback` prüft das vor dem Lesen, dazu die Form jedes Schlüssels, und schreibt
+  nur Schlüssel zurück, die `after.json` als vom Push geschrieben nennt – sonst der neue Grund
+  `before_image_invalid` (409, nichts wird zurückgenommen). Die Rücknahme über den WP-Admin
+  geht weiter ohne Gerät. Werden `WPSYNC_KEY` oder die Salts nach einem Push geändert, lässt
+  sich dessen Inhalt nicht mehr zurücknehmen. Ein beschädigtes Vorher-Abbild meldete bisher
+  `content_failed`. Abgelegte Pakete und ihre Kopie im Push sind nur noch für den Besitzer
+  lesbar; scheitert das Schreiben, steht kein Pfad im Fehlerprotokoll
+- Agent: Der Probelauf eines Inhalts-Pakets ist ohne offenes Push-Fenster kein Weg mehr, die
+  Site auszufragen. Ist das Fenster der Kopplung zu, behandelt er ein Objekt mit gesperrtem Typ
+  oder gesperrter Taxonomie in jeder Prüfung wie ein fehlendes – die Antwort ist für „fehlt“ und
+  „existiert, aber gesperrt“ dieselbe – und prüft die Dateien von Attachments (`upload_missing`)
+  nicht. Was er deshalb offen lässt, ist kein Fehler: es steht in `content.unchecked` als
+  `[{table, key, check}]` mit `check` `reference` (Verweis auf ein Objekt ausserhalb des Pakets,
+  das fehlt oder gesperrt ist) oder `attachment_files`, höchstens 200 Einträge, dazu
+  `unchecked_total`. `blocked_row` bleibt, was allein aus der Zeile oder dem Paket folgt. Die
+  Antwort nennt `content.partial: true`; die CLI reicht `partial`, `unchecked` und
+  `unchecked_total` im `plan`-Ereignis durch und sagt beides in je einer Zeile; der Probelauf
+  endet damit nicht mit einem Fehler. Mit offenem Fenster unverändert vollständig, `unchecked`
+  leer
+- Agent: Die Dateiprüfung von Attachments erkennt ihre Meta-Schlüssel in jeder
+  Gross-/Kleinschreibung (`_WP_Attached_File` umging sie; WordPress liest den Schlüssel
+  trotzdem), prüft den Pfad am Wert, wie er geschrieben wird (nach dem Einsetzen der Adresse des
+  Ziels), und nimmt `_wp_attachment_backup_sizes` dazu: `file` jedes Eintrags ist ein blosser
+  Dateiname im Ordner der Datei des Attachments, sonst `blocked_row`; fehlt die Datei,
+  `upload_missing`
+- Agent: Die Engine-Prüfung gilt immer allen sieben Inhaltstabellen des Ziels, nicht nur denen,
+  die das Paket nennt, und läuft auch vor einer Rücknahme: ist eine nicht InnoDB,
+  `engine_unsupported` – nichts wird geschrieben bzw. zurückgenommen
+- Agent: Die Frage, ob eine Transaktion noch auf ihrer Verbindung lebt, lässt sich nicht mehr
+  aus einem Abfrage-Cache beantworten: sie trägt jedes Mal einen anderen Kommentar
+  (`SELECT @wpsync_tx /* … */`), und der Inhaltskanal setzt `DONOTCACHEDB` für den Request.
+  Erweiterte `wpdb`-Klassen (Query Monitor u. a.) bleiben erlaubt
+- CLI: Was der Commit über die Inhalte antwortet, prüft die CLI gegen das Paket. Abdrücke
+  (`content.after`) gelten nur für Schlüssel des Pakets und für die Papierkorb-Meta eines
+  Beitrags mit `op: trash`; ein fremder Schlüssel lässt `manifest.jsonl` und `baseline.jsonl`
+  unangetastet (`warnings: ["content_state_failed"]`). Weicht `content.rows` von der Zeilenzahl
+  des Pakets ab, wird der Satz nicht bestätigt, sondern zurückgenommen
+- Agent: Ein Wert, der – ohne Leerraum am Rand – wie ein serialisiertes Objekt beginnt
+  (`O:8:"stdClass":0:{}x`), ist `unsafe_value`, auch wenn er wegen eines Anhangs nicht als
+  serialisiert gilt: PHPs `unserialize()` läse das Objekt trotzdem
+- Agent: Unmittelbar vor dem Anlegen neuer Beiträge prüft der Agent, dass es den Benutzer, der
+  das Push-Fenster geöffnet hat, noch gibt – sonst `author_unknown`, nichts wird geschrieben
+  (bisher wäre ein gelöschter Benutzer Autor geworden)
+- Agent: Endet ein Inhalts-Push mit `content_failed` und `unrestored: true` (eine Zeile liess
+  sich nach einem Verbindungsverlust nicht zurücksetzen), bleibt sein Arbeitsordner samt
+  Vorher-Abbild liegen: der Push steht als `failed` und nicht aufgeräumt im Protokoll, und das
+  Aufräumen fasst ihn nicht an. Die Meldung nennt die Zeile und dass sie von Hand zu prüfen
+  ist; die CLI sagt dasselbe statt „nichts wurde übertragen“
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

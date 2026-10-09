@@ -11,14 +11,20 @@ namespace {
     {
         /** @var string */
         public $code;
+        /** @var string */
+        public $message;
         /** @var int */
         public $status;
+        /** @var array<string, mixed> die Fehlerdaten, wie WordPress sie als data ausliefert */
+        public $data;
 
         /** @param array<string, mixed> $data */
         public function __construct(string $code, string $message = '', array $data = [])
         {
-            $this->code   = $code;
-            $this->status = (int) ($data['status'] ?? 0);
+            $this->code    = $code;
+            $this->message = $message;
+            $this->status  = (int) ($data['status'] ?? 0);
+            $this->data    = $data;
         }
     }
 
@@ -203,6 +209,12 @@ namespace {
     /** @param mixed ...$args */
     function add_action(...$args): void
     {
+    }
+
+    /** @return string|false Adresse eines Beitrags unter $GLOBALS['wpsync_test_permalink_base'] */
+    function get_permalink(int $id)
+    {
+        return ($GLOBALS['wpsync_test_permalink_base'] ?? 'https://example.test') . '/?p=' . $id;
     }
 }
 

@@ -275,7 +275,7 @@ final class Admin
     }
 
     /** @param array<string, mixed> $unit */
-    private static function unitLine(array $unit): string
+    public static function unitLine(array $unit): string
     {
         $line = (string) ($unit['path'] ?? '');
         $old  = (string) ($unit['old_version'] ?? '');
@@ -288,7 +288,16 @@ final class Admin
         } elseif ($new !== '') {
             $line .= ' ' . $new;
         }
-        return $line . ' – ' . (int) ($unit['uploaded'] ?? 0) . ' von ' . (int) ($unit['files'] ?? 0) . ' Dateien übertragen';
+        $line .= ' – ' . (int) ($unit['uploaded'] ?? 0) . ' von ' . (int) ($unit['files'] ?? 0) . ' Dateien übertragen';
+        // Inhalte: womit das Paket über die Whitelist des Agents hinausging.
+        $parts = [];
+        foreach (['post_types' => 'Beitragstypen', 'taxonomies' => 'Taxonomien', 'meta_exceptions' => 'Meta-Ausnahmen'] as $field => $label) {
+            $names = array_filter(is_array($unit['extensions'][$field] ?? null) ? $unit['extensions'][$field] : [], 'is_string');
+            if ($names !== []) {
+                $parts[] = $label . ' ' . implode(', ', $names);
+            }
+        }
+        return $parts === [] ? $line : $line . ' – Projekt-Erweiterungen: ' . implode('; ', $parts);
     }
 
     private static function notice(string $type, string $message): void

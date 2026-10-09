@@ -27,6 +27,7 @@ final class ProtectionTest extends TestCase
     {
         $this->assertTrue($this->check('/wpsync/v1/ping', '/?rest_route=/wpsync/v1/ping'));
         $this->assertTrue($this->check('/wpsync/v1/infosheet/refresh', '/'));
+        $this->assertTrue($this->check('/wpsync/v1/content/stage', '/'), 'zwei Segmente, nur Kleinbuchstaben: auch hinter „Password Protected“ erreichbar');
         $this->assertFalse($this->check('/wpsync/v1evil', '/'));
         $this->assertFalse($this->check('/wpsync/v1/../wp/v2/users', '/'));
         $this->assertFalse($this->check('/wp/v2/users', '/wp-json/wpsync/v1/ping'), 'rest_route in GET wins over the path');

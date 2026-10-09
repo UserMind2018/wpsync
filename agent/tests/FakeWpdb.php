@@ -31,8 +31,43 @@ final class FakeWpdb
     public $queries = [];
     /** @var (callable(string): void)|null sieht jede Abfrage, bevor sie beantwortet wird */
     public $observer = null;
+    /** @var list<mixed> jeder Wert, der durch prepare() ging */
+    public $prepared = [];
+    /** @var bool wie $wpdb->show_errors: ein Fehler wird samt Abfrage in die Antwort ausgegeben */
+    public $show_errors = false;
+    /** @var list<string> Abfragen, deren Fehler $wpdb ausgegeben hätte */
+    public $shown = [];
+    /** @var bool wie $wpdb->suppress_errors: ein Fehler wird weder ausgegeben noch per error_log() protokolliert */
+    public $suppress_errors = false;
+    /** @var list<bool> jeder Aufruf von suppress_errors(), in dieser Reihenfolge */
+    public $suppressCalls = [];
+    /** @var list<string> Abfragen, die $wpdb samt ihrer Werte ins Fehlerprotokoll geschrieben hätte (print_error()) */
+    public $logged = [];
+    /** @var list<string> Abfragen, die liefen, während Fehler nicht unterdrückt waren */
+    public $unsuppressed = [];
     /** @var list<array{pattern: string, results: list<mixed>, error: string|null}> */
     private $answers = [];
+
+    public function show_errors(bool $show = true): bool
+    {
+        $before            = $this->show_errors;
+        $this->show_errors = $show;
+        return $before;
+    }
+
+    /** Wie wpdb::suppress_errors(): liefert die Einstellung davor. */
+    public function suppress_errors(bool $suppress = true): bool
+    {
+        $before                = $this->suppress_errors;
+        $this->suppress_errors = $suppress;
+        $this->suppressCalls[] = $suppress;
+        return $before;
+    }
+
+    public function hide_errors(): bool
+    {
+        return $this->show_errors(false);
+    }
 
     /** Antworten in dieser Reihenfolge; die letzte gilt für alle weiteren Treffer. Eine Closure wird mit dem SQL gefragt. */
     public function answer(string $pattern, ...$results): void
@@ -55,8 +90,9 @@ final class FakeWpdb
 
     public function prepare(string $query, ...$args): string
     {
-        return (string) preg_replace_callback('/%[sd]/', static function (array $m) use (&$args): string {
-            $value = array_shift($args);
+        return (string) preg_replace_callback('/%[sd]/', function (array $m) use (&$args): string {
+            $value            = array_shift($args);
+            $this->prepared[] = $value;
             return $m[0] === '%d' ? (string) (int) $value : "'" . addslashes((string) $value) . "'";
         }, $query);
     }
@@ -132,6 +168,9 @@ final class FakeWpdb
     {
         $this->last_error = '';
         $this->queries[]  = $sql;
+        if (!$this->suppress_errors) {
+            $this->unsuppressed[] = $sql;
+        }
         if ($this->observer !== null) {
             ($this->observer)($sql);
         }
@@ -141,6 +180,12 @@ final class FakeWpdb
             }
             if ($answer['error'] !== null) {
                 $this->last_error = $answer['error'];
+                if (!$this->suppress_errors) {
+                    $this->logged[] = $sql; // wpdb::print_error(): error_log() mit der ganzen Abfrage
+                }
+                if ($this->show_errors) {
+                    $this->shown[] = $sql;
+                }
                 return [false, null];
             }
             $results = $answer['results'];

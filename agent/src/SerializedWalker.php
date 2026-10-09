@@ -15,6 +15,9 @@ final class SerializedWalker
     /** Tiefe insgesamt: Arrays, Objekte und in Strings verschachtelte serialisierte Werte zählen zusammen. */
     private const MAX_DEPTH = 64;
 
+    /** @var int Objekte und Enums, die der laufende Durchgang gesehen hat (hasObject) */
+    private static $objects = 0;
+
     /** Ziffern einer Länge oder Anzahl: mehr passt in keinen Wert, und als int liefe die Zahl über. */
     private const MAX_DIGITS = 10;
 
@@ -71,6 +74,38 @@ final class SerializedWalker
         }
         $out = substr($value, 0, $from) . $new . substr($value, $end);
         return $out === $value || self::valid($new) ? $out : null;
+    }
+
+    /**
+     * Enthält der Wert an struktureller Stelle ein Objekt, eine Klasse mit eigener Serialisierung
+     * oder ein Enum (O:, C:, E:) – auch verschachtelt oder doppelt serialisiert? So prüft der
+     * Inhalts-Push jeden Paketwert (Spec Content-Push §11): WordPress reicht Meta und Optionen an
+     * maybe_unserialize(), ein Objekt im Wert wäre Code-Ausführung über __wakeup/__destruct.
+     * Betrachtet wird der Wert wie von is_serialized(): ohne Leerraum am Rand.
+     *
+     * @return bool|null false: kein serialisierter Wert oder einer ohne Objekt; null: sieht
+     *                   serialisiert aus, lässt sich aber nicht vollständig lesen
+     */
+    public static function hasObject(string $value): ?bool
+    {
+        list($pos, $end) = self::trimmed($value, 0, strlen($value));
+        if (!self::looksAt($value, $pos, $end)) {
+            return false;
+        }
+        self::$objects = 0;
+        try {
+            // Der Durchgang "ändert" jeden Text: einen String, der serialisiert aussieht und sich
+            // nicht lesen lässt, meldet inner() dann als unlesbar, statt ihn als Text durchzureichen.
+            $read = self::parse($value, $pos, $end, 0, static function (string $text): string {
+                return $text . '.';
+            });
+        } catch (\OverflowException $e) {
+            return null; // tiefer als MAX_DEPTH
+        }
+        if ($read === null || $pos !== $end) {
+            return null;
+        }
+        return self::$objects > 0;
     }
 
     private static function valid(string $value): bool
@@ -156,6 +191,7 @@ final class SerializedWalker
                 }
                 $out = substr($s, $pos, $start + $len + 2 - $pos);
                 $pos = $start + $len + 2;
+                self::$objects++;
                 return $out;
             case 'a':
                 if (preg_match('/\Ga:(\d{1,' . self::MAX_DIGITS . '}):\{/', $s, $m, 0, $pos) !== 1) {
@@ -175,6 +211,7 @@ final class SerializedWalker
                 if (!self::fits($pos, $end, (int) $m[3], 0)) {
                     return null;
                 }
+                self::$objects++;
                 return self::members($s, $pos, $end, $depth, 2 * (int) $m[3], $m[0], $text);
         }
         return null; // C: und Unbekanntes lassen sich ohne die Klasse nicht lesen

@@ -178,4 +178,32 @@ final class SerializedWalkerTest extends TestCase
             SerializedWalker::rewrite($value, [self::class, 'upper'])
         );
     }
+
+    /** Härtung S1: Objekte, eigene Serialisierung und Enums an struktureller Stelle – auch verschachtelt. */
+    public function testHasObject(): void
+    {
+        $object = 'O:8:"stdClass":1:{s:1:"a";i:1;}';
+        foreach ([
+            $object,
+            "  " . $object . "\n",
+            serialize(['x' => [1, new \stdClass()]]),
+            'a:1:{i:0;' . $object . '}',
+            serialize(serialize(['deep' => new \stdClass()])),
+            'E:11:"Suit:Hearts";',
+            'a:1:{s:1:"e";E:11:"Suit:Hearts";}',
+        ] as $value) {
+            $this->assertTrue(SerializedWalker::hasObject($value), $value);
+        }
+        foreach (['', 'Text', 'O:8:"stdClass" im Fliesstext', serialize(['a' => 'O:8:"stdClass":0:{}x', 'b' => [1, 2.5, null, true]]), serialize('nur Text'), '[{"json":"O:1"}]'] as $value) {
+            $this->assertFalse(SerializedWalker::hasObject($value), $value);
+        }
+        foreach (['C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}', 'a:2:{i:0;i:1;}', 's:99:"zu kurz";', 'a:1:{i:0;s:14:"a:2:{i:0;i:1;}";}', 'O:8:"stdClass":1:{s:1:"a";'] as $value) {
+            $this->assertNull(SerializedWalker::hasObject($value), $value);
+        }
+        // Auf dem gehärteten Parser: zu tief ist unlesbar, Leerraum am Rand zählt nicht – auch nicht in einem inneren String.
+        $this->assertNull(SerializedWalker::hasObject(str_repeat('a:1:{i:0;', 70) . 'i:1;' . str_repeat('}', 70)));
+        $this->assertNull(SerializedWalker::hasObject('a:1:{i:0;s:99999999999999999999:"x";}'));
+        $this->assertTrue(SerializedWalker::hasObject(serialize(['x' => " \n" . $object . "\t"])));
+        $this->assertTrue(SerializedWalker::hasObject("\0" . $object . "\v"));
+    }
 }
