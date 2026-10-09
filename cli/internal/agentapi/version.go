@@ -62,3 +62,34 @@ func parseVersion(v string) ([3]int, bool) {
 	}
 	return out, true
 }
+
+// AtLeast compares dotted versions numerically ("0.10.0" ≥ "0.4.0"); unreadable versions fail.
+func AtLeast(version, minimum string) bool {
+	parse := func(v string) ([]int, bool) {
+		v, _, _ = strings.Cut(v, "-")
+		var out []int
+		for _, part := range strings.Split(v, ".") {
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, false
+			}
+			out = append(out, n)
+		}
+		return out, true
+	}
+	have, ok := parse(version)
+	want, _ := parse(minimum)
+	if !ok {
+		return false
+	}
+	for i := range want {
+		h := 0
+		if i < len(have) {
+			h = have[i]
+		}
+		if h != want[i] {
+			return h > want[i]
+		}
+	}
+	return true
+}
