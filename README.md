@@ -560,6 +560,18 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   Er nähme einen Push von 0.9.0 zurück, ohne die Liste der Plugins anzufassen – Code zurück, Plugin
   weiter aktiv bzw. weiter aus. Solange Pushes mit Plugin-Zustand unbestätigt sind oder ihr Snapshot
   noch aufbewahrt wird, den Agent nicht auf eine ältere Version zurücksetzen.
+- **Gleichzeitiges Schalten im WP-Admin.** WordPress selbst liest und schreibt `active_plugins`
+  ohne Sperre. Schaltet jemand im WP-Admin ein Plugin genau in dem Augenblick, in dem der Push oder
+  seine Rücknahme die Liste schreibt, kann die eine Änderung die andere überschreiben; die CLI
+  bemerkt das nicht. Während eines Pushs mit Plugin-Zustand im WP-Admin keine Plugins schalten.
+- **Wessen Fenster gilt.** Der Commit prüft das Recht des Benutzers, der das Fenster beim Begin
+  geöffnet hatte – ist er inzwischen gelöscht oder darf er keine Plugins mehr aktivieren, wird
+  abgelehnt. Öffnet zwischen Begin und Commit jemand anderes das Fenster neu, ändert das für den
+  laufenden Push nichts.
+- **Rücknahme, die mitten im Abschluss abbricht.** Stirbt der Agent zwischen dem COMMIT seiner
+  Rücknahme und dem Vermerk dazu, rechnet die Wiederholung das Delta noch einmal: Das Ergebnis
+  bleibt der Stand vor dem Push, auch wenn dazwischen niemand die Einträge des Pushs angefasst hat;
+  wer sie in diesen Sekunden von Hand schaltet, wird überschrieben.
 - **`admin_check_skipped`.** Nennt der Agent `admin-ajax.php` unter einer anderen Adresse als der
   gekoppelten (http statt https, mit/ohne www), fällt die Seite aus dem Health-Check; der Push geht
   durch, das Ergebnis trägt die Warnung. Abhilfe: mit der Adresse koppeln, unter der WordPress läuft
