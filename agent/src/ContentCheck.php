@@ -447,6 +447,7 @@ final class ContentCheck
 
     /**
      * Nr. 9: jede Datei eines Attachments liegt auf dem Ziel oder kommt mit der Einheit uploads (S10).
+     * Geprüft wird jeder Wert des Paars; _wp_attached_file hat höchstens einen.
      *
      * @param array<string, mixed> $uploads
      */
@@ -459,22 +460,29 @@ final class ContentCheck
             if (($name !== '_wp_attached_file' && $name !== '_wp_attachment_metadata') || $row['values'] === []) {
                 continue;
             }
-            foreach (self::attachmentFiles($name, (string) $row['values'][0]) as $rel) {
-                // Härtung S3: derselbe Massstab wie für die Einheit uploads – Pfad, Name, Typ.
-                $ok = strpos($rel, '://') === false && PushUploads::validFile($rel) && !PushUploads::blockedName($rel)
-                    && (!function_exists('wp_check_filetype') || PushUploads::allowedName($rel));
-                if (!$ok) {
-                    $invalid[] = ContentException::key('postmeta', (string) $key);
-                    continue 2;
-                }
-                $full = $this->target->uploadsDir . '/' . $rel;
-                if (!isset($uploads[$rel]) && !(is_file($full) && !is_link($full))) {
-                    $missing[$rel] = true;
+            // Ein Attachment hat genau eine Datei: WordPress liest den ersten Wert, wer sonst liest, vielleicht einen anderen.
+            if ($name === '_wp_attached_file' && count($row['values']) > 1) {
+                $invalid[] = ContentException::key('postmeta', (string) $key);
+                continue;
+            }
+            foreach ($row['values'] as $value) {
+                foreach (self::attachmentFiles($name, (string) $value) as $rel) {
+                    // Härtung S3: derselbe Massstab wie für die Einheit uploads – Pfad, Name, Typ.
+                    $ok = strpos($rel, '://') === false && PushUploads::validFile($rel) && !PushUploads::blockedName($rel)
+                        && (!function_exists('wp_check_filetype') || PushUploads::allowedName($rel));
+                    if (!$ok) {
+                        $invalid[] = ContentException::key('postmeta', (string) $key);
+                        continue 3;
+                    }
+                    $full = $this->target->uploadsDir . '/' . $rel;
+                    if (!isset($uploads[$rel]) && !(is_file($full) && !is_link($full))) {
+                        $missing[$rel] = true;
+                    }
                 }
             }
         }
         if ($invalid !== []) {
-            throw new ContentException(ContentException::BLOCKED, 'Ein Attachment nennt eine Datei, die nicht unter uploads liegen darf (Pfad oder Dateityp).', $invalid);
+            throw new ContentException(ContentException::BLOCKED, 'Ein Attachment nennt eine Datei, die nicht unter uploads liegen darf (Pfad oder Dateityp), oder mehr als eine Datei.', $invalid);
         }
         if ($missing !== []) {
             $paths = array_slice(array_map('strval', array_keys($missing)), 0, ContentException::MAX_KEYS);

@@ -422,6 +422,15 @@ final class ContentCheckTest extends TestCase
         }
         $sized = serialize(['file' => '2026/10/da.jpg', 'sizes' => ['x' => ['file' => '../../../wp-config.php']]]);
         $this->refused('blocked_row', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attachment_metadata", 'absent', ['values' => [$sized]])], [], $target);
+
+        // Jeder Wert des Paars zählt, nicht nur der erste – und ein Attachment hat genau eine Datei.
+        $good = serialize(['file' => '2026/10/da.jpg']);
+        $e    = $this->refused('blocked_row', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attachment_metadata", 'absent', ['values' => [$good, $sized]])], [], $target);
+        $this->assertSame([['table' => 'postmeta', 'key' => "300\0_wp_attachment_metadata"]], $e->keys());
+        $e = $this->refused('upload_missing', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attachment_metadata", 'absent', ['values' => [$good, serialize(['file' => '2026/10/fehlt.jpg'])]])], [], $target);
+        $this->assertSame(['2026/10/fehlt.jpg'], $e->toArray()['paths']);
+        $e = $this->refused('blocked_row', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => ['2026/10/da.jpg', '2026/10/da.jpg']])], [], $target);
+        $this->assertSame([['table' => 'postmeta', 'key' => "300\0_wp_attached_file"]], $e->keys(), 'mehr als ein Wert für _wp_attached_file');
         exec('rm -rf ' . escapeshellarg($dir));
     }
 
