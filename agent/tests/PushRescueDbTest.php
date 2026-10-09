@@ -599,7 +599,7 @@ final class PushRescueDbTest extends ContentApplyCase
         foreach ($bad as $why => $collected) {
             PushRescue::setStatus($work, self::ID, PushRescue::COMMITTED);
             // So versiegelt, wie es nur jemand mit dem Schlüssel könnte – und trotzdem abgelehnt.
-            RescueSeal::put($work, self::ID, (string) RescueSeal::seal(['v' => 1, 'created' => 1] + $collected, $this->key, self::ID));
+            RescueSeal::put($work, self::ID, (string) RescueSeal::seal(['v' => 1, 'created' => time()] + $collected, $this->key, self::ID));
             list($status, $body) = $this->rescue([], PushRescue::contentDirs($this->content));
             $this->assertSame(200, $status, $why);
             $this->assertSame(['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], $body['content'], $why);
