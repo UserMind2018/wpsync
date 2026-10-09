@@ -133,11 +133,13 @@ type ContentApplied struct {
 	Seconds     float64        `json:"seconds"`
 }
 
-// PushCommitResult is everything /push/commit answers: the stamps of the swapped units and, for a
-// push with content, what the agent applied.
+// PushCommitResult is everything /push/commit answers: the stamps of the swapped units, for a
+// push with a database part what the agent applied, and for a push with a plugin state what it
+// changed in active_plugins (agent 0.9.0).
 type PushCommitResult struct {
 	Stamps  map[string]map[string]PushStamp
 	Content *ContentApplied
+	Plugins *PluginsApplied
 }
 
 var (
@@ -289,6 +291,7 @@ func (c *Client) PushCommitFull(pushID string) (*PushCommitResult, error) {
 			Next    *pushCursor                     `json:"next"`
 			Stamps  map[string]map[string]PushStamp `json:"stamps"`
 			Content *ContentApplied                 `json:"content"`
+			Plugins *PluginsApplied                 `json:"plugins"`
 		}
 		if err := c.PostJSON("/wpsync/v1/push/commit", map[string]any{"push_id": pushID, "cursor": cursor}, &res); err != nil {
 			return nil, err
@@ -297,7 +300,10 @@ func (c *Client) PushCommitFull(pushID string) (*PushCommitResult, error) {
 			if res.Content != nil {
 				res.Content.Clean()
 			}
-			return &PushCommitResult{Stamps: res.Stamps, Content: res.Content}, nil
+			if res.Plugins != nil {
+				res.Plugins.Clean()
+			}
+			return &PushCommitResult{Stamps: res.Stamps, Content: res.Content, Plugins: res.Plugins}, nil
 		}
 		// Each call places at least one file; a cursor that does not move would loop forever.
 		if cursor != nil && (res.Next.U < cursor.U || (res.Next.U == cursor.U && res.Next.I <= cursor.I)) {

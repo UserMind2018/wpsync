@@ -41,6 +41,10 @@ type APIError struct {
 	// the error data of the agent. Never values of rows.
 	Keys  []ContentKey
 	Paths []string
+	// Plugins and Detail: details of a refusal of the plugin state (code wpsync_plugins_…): the units
+	// it is about, and – without a rescue envelope – why there is none. Never a value of the option.
+	Plugins []PluginRefusal
+	Detail  string
 }
 
 func (e *APIError) Error() string {
@@ -231,8 +235,10 @@ func readAPIError(resp *http.Response) error {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
-			Keys  []ContentKey `json:"keys"`
-			Paths []string     `json:"paths"`
+			Keys    []ContentKey    `json:"keys"`
+			Paths   []string        `json:"paths"`
+			Plugins []PluginRefusal `json:"plugins"`
+			Detail  string          `json:"detail"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
@@ -241,6 +247,14 @@ func readAPIError(resp *http.Response) error {
 			e.Keys = CleanKeys(wpErr.Data.Keys)
 			if e.Paths = wpErr.Data.Paths; len(e.Paths) > maxContentKeys {
 				e.Paths = e.Paths[:maxContentKeys]
+			}
+		}
+		if strings.HasPrefix(e.Code, PluginsCodePrefix) {
+			e.Plugins = cleanRefusals(wpErr.Data.Plugins)
+			if wpErr.Data.Detail != "" {
+				if e.Detail = wpErr.Data.Detail; !stepRe.MatchString(e.Detail) {
+					e.Detail = "unknown"
+				}
 			}
 		}
 		return e

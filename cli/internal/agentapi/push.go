@@ -38,6 +38,14 @@ type PushBeginRequest struct {
 	// Content names a package staged before through /content/stage (agent 0.7.0, Spec Content-Push
 	// §7). With it Units may be empty: a push of content alone.
 	Content *PushContentRef `json:"content,omitempty"`
+	// Activate and Deactivate name plugins to switch in the same set, as units "plugins/<slug>"
+	// (agent 0.9.0, Spec Content-Push P4 §4.2). A unit to activate must be part of Units; one to
+	// deactivate need not. PluginHeads carries, per unit to activate, the first 8192 bytes of every
+	// PHP file directly in its folder that names a plugin header: the agent checks them against the
+	// target already in the dry run. They are a claim – in the commit the built file counts.
+	Activate    []string                     `json:"activate,omitempty"`
+	Deactivate  []string                     `json:"deactivate,omitempty"`
+	PluginHeads map[string]map[string][]byte `json:"plugin_heads,omitempty"`
 }
 
 // PushUnitPlan is the agent's view of one unit.
@@ -96,6 +104,9 @@ type PushBegin struct {
 	// Content: the agent's check of the package the request named; nil when it named none – or
 	// when the agent does not know the content channel.
 	Content *ContentPlan `json:"content"`
+	// Plugins: the agent's plan for the plugin state the request named; nil when it named none –
+	// or when the agent is older than 0.9.0 and ignored the fields.
+	Plugins *PluginsPlan `json:"plugins"`
 }
 
 // PushChunk is a file or a piece of one; Data travels base64-encoded.
@@ -127,6 +138,11 @@ type PushRecordUnit struct {
 	PostActions []PostAction `json:"post_actions,omitempty"`
 	Left        []ContentKey `json:"left,omitempty"`
 	LeftTotal   int          `json:"left_total,omitempty"`
+	// Activated, Deactivated, Back: on the unit "plugins" (agent 0.9.0) the entries of active_plugins
+	// the push added and removed, and what a rollback changed back.
+	Activated   []string         `json:"activated,omitempty"`
+	Deactivated []string         `json:"deactivated,omitempty"`
+	Back        *RollbackPlugins `json:"back,omitempty"`
 }
 
 // PushRecord is one line of the push log. Status: uploading, committed, confirmed, rolled_back,
@@ -154,6 +170,9 @@ func (c *Client) PushBegin(req PushBeginRequest) (*PushBegin, error) {
 	}
 	if res.Content != nil {
 		res.Content.Clean()
+	}
+	if res.Plugins != nil {
+		res.Plugins.Clean()
 	}
 	if db := res.Rescue.DB; db != nil {
 		switch {
@@ -221,6 +240,12 @@ type RollbackNotes struct {
 	// (agent 0.8.0, Spec Content-Push P3 §7.6); nil from the agent's own rollback, from an older
 	// rescue.php and for a push without content.
 	Content *RescueContent `json:"content,omitempty"`
+	// Plugins: what the rollback changed in active_plugins (agent 0.9.0, Spec Content-Push P4 §4.4);
+	// nil for a push without a plugin state and while the database part of the push still stands.
+	Plugins *RollbackPlugins `json:"plugins,omitempty"`
+	// PluginsNotRestored: with the warning plugins_not_restored the entries of the push that still
+	// stand in active_plugins although code and uploads are back (A18).
+	PluginsNotRestored *PluginsKept `json:"plugins_not_restored,omitempty"`
 }
 
 // RescueContent is the part "content" of an answer of rescue.php. State: rolled_back (rows were
@@ -300,6 +325,7 @@ func (n RollbackNotes) Clean() RollbackNotes {
 	}
 	out.PostActions = CleanActions(n.PostActions)
 	out.Content = n.Content.clean()
+	out.Plugins, out.PluginsNotRestored = n.Plugins.clean(), n.PluginsNotRestored.clean()
 	return out
 }
 
@@ -339,6 +365,13 @@ func (c *Client) PushList() ([]PushRecord, error) {
 			if u.LeftTotal < len(u.Left) || u.LeftTotal > 1<<20 {
 				u.LeftTotal = len(u.Left)
 			}
+			if u.Activated != nil {
+				u.Activated = cleanEntries(u.Activated)
+			}
+			if u.Deactivated != nil {
+				u.Deactivated = cleanEntries(u.Deactivated)
+			}
+			u.Back = u.Back.clean()
 		}
 	}
 	return res.Pushes, nil
