@@ -695,6 +695,30 @@ final class ContentCheck
                 }
             }
         }
+        // Kind-Terme: parent einer term_taxonomy-Zeile ist die term_id des Eltern-Terms. Unter einem neuen
+        // Term hinge jedes Kind, das auf seine ID zeigt (in welcher Taxonomie auch immer); unter einer
+        // neuen term_taxonomy-Zeile eines Terms die Kinder dieses Terms in ihrer Taxonomie. attached()
+        // sieht beides nicht: es fragt nach den Zeilen des Terms bzw. über die Elternzeile, die es
+        // vor dem Insert nicht gibt.
+        $newTerms = array_fill_keys(array_map('strval', $new['terms'] ?? []), true);
+        $parents  = $newTerms; // term_id → true (jede Taxonomie) oder [Taxonomie => true]
+        foreach ($new['term_taxonomy'] ?? [] as $key) {
+            $row  = $this->rows['term_taxonomy'][$key] ?? null;
+            $term = is_array($row) ? (string) ($row['term_id'] ?? '') : '';
+            if ($term !== '' && !isset($newTerms[$term])) {
+                $parents[$term]                            = is_array($parents[$term] ?? null) ? $parents[$term] : [];
+                $parents[$term][(string) $row['taxonomy']] = true;
+            }
+        }
+        $asked = array_map('strval', array_keys($parents));
+        foreach ($asked === [] ? [] : $this->target->store->childTerms($asked, $lock) as $term => $children) {
+            $scope = $parents[(string) $term] ?? [];
+            foreach ($children as $child) {
+                if (($scope === true || isset($scope[$child['taxonomy']])) && !isset($named['term_taxonomy'][$child['id']])) {
+                    $left["term_taxonomy\0\0" . $child['id']] = ContentException::key('term_taxonomy', $child['id']);
+                }
+            }
+        }
         if ($left !== []) {
             throw new ContentException(
                 ContentException::LEFTOVERS,

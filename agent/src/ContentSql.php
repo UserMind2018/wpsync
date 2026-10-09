@@ -365,6 +365,22 @@ final class ContentSql implements ContentStore
         return $out;
     }
 
+    public function childTerms(array $termIds, bool $lock): array
+    {
+        $ids = array_values(array_unique(array_map('strval', $termIds)));
+        $out = array_fill_keys($ids, []);
+        foreach (array_chunk($ids, self::CHUNK) as $chunk) {
+            $sql = 'SELECT `parent` AS o, `term_taxonomy_id` AS c, `taxonomy` AS tax FROM ' . $this->quoted('term_taxonomy')
+                . ' WHERE `parent` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ') ORDER BY `term_taxonomy_id`' . ($lock ? ' FOR UPDATE' : '');
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                if (isset($out[(string) $row['o']])) {
+                    $out[(string) $row['o']][] = ['id' => (string) $row['c'], 'taxonomy' => (string) $row['tax']];
+                }
+            }
+        }
+        return $out;
+    }
+
     public function purge(string $table, string $key): void
     {
         switch ($table) {

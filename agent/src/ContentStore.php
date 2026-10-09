@@ -98,6 +98,18 @@ interface ContentStore
     public function attached(string $table, array $ids, bool $lock): array;
 
     /**
+     * Kind-Terme: die term_taxonomy-Zeilen, deren parent einer der Terme ist (parent trägt die
+     * term_id des Eltern-Terms). Ohne dass es zu dem Term oder seiner term_taxonomy-Zeile etwas
+     * geben muss – so findet die Prüfung eines Pakets, was unter einer freien ID noch hängt.
+     *
+     * @param list<string> $termIds
+     * @param bool         $lock    wie bei read()
+     * @return array<string, list<array{id: string, taxonomy: string}>> term_id → Kinder (leer, wenn es keine gibt)
+     * @throws ContentException
+     */
+    public function childTerms(array $termIds, bool $lock): array;
+
+    /**
      * Was an einem eingefügten Objekt hängt, wenn es wieder verschwindet: posts → alle Meta und
      * Zuordnungen des Beitrags, terms → alle Meta des Terms, term_taxonomy → alle Zuordnungen.
      *

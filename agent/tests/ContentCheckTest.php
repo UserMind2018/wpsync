@@ -349,6 +349,19 @@ final class ContentCheckTest extends TestCase
             'Zuordnung auf die term_taxonomy-Zeile' => [static function (ContentMemory $s): void {
                 $s->orphans['219'] = ['1000002'];
             }, $term, [['table' => 'term_relationships', 'key' => "219\0"]]],
+            // NR-2: parent einer term_taxonomy-Zeile ist die term_id des Eltern-Terms. Eine Unterkategorie, die
+            // unter einer zurückgenommenen Kategorie stehen blieb, hinge am neuen Term dieser ID.
+            'Kind-Term unter dem neuen Term' => [static function (ContentMemory $s): void {
+                $s->data['terms']['8']         = ContentFixtures::term('8', 'Unterkategorie');
+                $s->data['term_taxonomy']['8'] = ['parent' => '1000001'] + ContentFixtures::taxonomy('8', '8', 'category');
+            }, $term, [['table' => 'term_taxonomy', 'key' => '8']]],
+            'Kind-Term unter einer neuen term_taxonomy-Zeile eines bestehenden Terms – nur in deren Taxonomie' => [static function (ContentMemory $s): void {
+                $s->data['terms']['8']          = ContentFixtures::term('8', 'Kind in post_tag');
+                $s->data['term_taxonomy']['8']  = ['parent' => '5'] + ContentFixtures::taxonomy('8', '8', 'post_tag');
+                $s->data['terms']['10']         = ContentFixtures::term('10', 'Kind in category');
+                $s->data['term_taxonomy']['10'] = ['parent' => '5'] + ContentFixtures::taxonomy('10', '10', 'category'); // gehört zur bestehenden Zeile 5
+            }, [ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '5', 'taxonomy' => 'post_tag', 'description' => '', 'parent' => '0'])],
+                [['table' => 'term_taxonomy', 'key' => '8']]],
         ];
     }
 
@@ -399,6 +412,14 @@ final class ContentCheckTest extends TestCase
         $this->store->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
         $this->assertSame([['table' => 'postmeta', 'key' => "1000001\0farbe"]], $this->refused('id_has_leftovers', $rows)->keys());
         unset($this->store->data['postmeta']["1000001\0farbe"]);
+        // NR-2: auch ein Kind-Term, den das Paket selbst unter den neuen Term hängt, ist kein Rest.
+        $this->store->data['terms']['8']         = ContentFixtures::term('8', 'Unterkategorie');
+        $this->store->data['term_taxonomy']['8'] = ['parent' => '1000001'] + ContentFixtures::taxonomy('8', '8', 'category');
+        $this->check([
+            ContentFixtures::row('insert', 'terms', '1000001', 'absent', ['name' => 'Neu', 'slug' => 'neu', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '1000001', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('update', 'term_taxonomy', '8', $this->h('term_taxonomy', '8'), ['term_id' => '8', 'taxonomy' => 'category', 'description' => '', 'parent' => '1000001']),
+        ])->run();
         // Am bestehenden Beitrag 219 hängt Meta (_edit_lock, _elementor_data): ein update stört das nie.
         $this->check([$this->updatePost()])->run();
     }

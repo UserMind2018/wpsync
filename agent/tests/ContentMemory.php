@@ -236,6 +236,23 @@ final class ContentMemory implements ContentStore
         return $out;
     }
 
+    public function childTerms(array $termIds, bool $lock): array
+    {
+        if ($lock && !$this->open) {
+            throw new \LogicException('locked read outside a transaction');
+        }
+        $out = [];
+        foreach ($termIds as $id) {
+            $out[(string) $id] = [];
+            foreach ($this->data['term_taxonomy'] ?? [] as $tt => $row) {
+                if ((string) ($row['parent'] ?? '0') === (string) $id) {
+                    $out[(string) $id][] = ['id' => (string) $tt, 'taxonomy' => (string) $row['taxonomy']];
+                }
+            }
+        }
+        return $out;
+    }
+
     public function purge(string $table, string $key): void
     {
         $this->log[] = 'purge ' . $table . ':' . $key;

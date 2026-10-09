@@ -686,6 +686,19 @@ final class ContentSqlTest extends TestCase
         $this->sql()->attached('posts', ['1'], true);
     }
 
+    /** NR-2: Kind-Terme über parent allein – ohne JOIN auf eine Elternzeile, die es (noch) nicht gibt. */
+    public function testChildTermsAreFoundByTheirParentAlone(): void
+    {
+        $this->db->answer('/FROM `wp_term_taxonomy` WHERE `parent`/', [['o' => '7', 'c' => '8', 'tax' => 'category'], ['o' => '7', 'c' => '9', 'tax' => 'post_tag'], ['o' => '99', 'c' => '1', 'tax' => 'category']]);
+        $this->assertSame(
+            ['7' => [['id' => '8', 'taxonomy' => 'category'], ['id' => '9', 'taxonomy' => 'post_tag']], '12' => []],
+            $this->sql()->childTerms(['7', '12', '7'], true)
+        );
+        $this->assertSame(['SELECT `parent` AS o, `term_taxonomy_id` AS c, `taxonomy` AS tax FROM `wp_term_taxonomy` WHERE `parent` IN (7,12) ORDER BY `term_taxonomy_id` FOR UPDATE'], $this->db->queries);
+        $this->assertSame([], $this->db->writes());
+        $this->assertSame([], $this->sql()->childTerms([], false));
+    }
+
     public function testReadsTheRawRelationshipsOfAnObject(): void
     {
         $this->db->answer('/FROM `wp_term_relationships`/', [['o' => '219', 'tt' => '3'], ['o' => '219', 'tt' => '77'], ['o' => '220', 'tt' => '3']]);

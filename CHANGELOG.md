@@ -51,7 +51,8 @@ sich wie bisher (`content_not_rolled_back`).
   `ROLLBACK`
 - Was `rescue.php` an eingefügten Objekten stehen lässt, bleibt nicht folgenlos liegen – es hinge
   sich an ein neues Objekt mit derselben ID. Neu deshalb: **(a)** der Agent lehnt ein `insert`
-  ab, an dessen ID auf dem Ziel noch etwas hängt (Meta, Zuordnungen, Kommentare, Kinder) –
+  ab, an dessen ID auf dem Ziel noch etwas hängt (Meta, Zuordnungen, Kommentare, Kinder – auch
+  Kind-Terme, deren `parent` auf die ID eines neuen Terms zeigt) –
   `error.reason: "id_has_leftovers"` (HTTP 409 `wpsync_content_id_has_leftovers`, Exit 1) mit den
   Resten in `error.keys`; nicht im Probelauf ohne offenes Push-Fenster. **(b)** Beim Wiederanlauf
   entfernt der Agent an jedem eingefügten Objekt, das weiterhin fehlt, alle Meta und Zuordnungen;
