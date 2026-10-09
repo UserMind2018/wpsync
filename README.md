@@ -440,7 +440,8 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
 (`--deactivate plugins/a,plugins/b`).
 
 - **Was geschaltet werden kann.** Nur ein Plugin in seinem Ordner, `plugins/<slug>` – kein Theme, nicht
-  `mu-plugins`, nie `plugins/wpsync-agent`; höchstens 20 je Schalter, keins doppelt, keins in beiden
+  `mu-plugins`, nie der Agent selbst (`plugins/wpsync-agent` und der Ordner, in dem er auf der Site
+  wirklich liegt – dann lehnt der Agent mit `plugins_invalid` ab); höchstens 20 je Schalter, keins doppelt, keins in beiden
   (sonst Exit 2, bevor die Site gefragt wird). `--activate` aktiviert nur Code, den **derselbe** Push
   überträgt und prüft: Die Einheit kommt immer in den Satz, auch unverändert, und eine lokal neue
   zählt damit als genannt; fehlt ihr Ordner lokal, ist er leer oder ein Symlink, ist das Exit 2. Mit

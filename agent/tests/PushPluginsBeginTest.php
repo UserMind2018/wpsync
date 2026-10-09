@@ -190,4 +190,18 @@ final class PushPluginsBeginTest extends PushPluginsFlowCase
         $this->assertFileExists($this->sealed($this->staging, $id), 'der Umschlag liegt im Arbeitsordner der Kopie');
         $this->assertSame([], $this->pushDirs($this->live));
     }
+
+    /** Security-Review P4 S3: liegt der Agent unter einem anderen Ordnernamen, schützt der Begin auch diesen – als Schalter und als Einheit. */
+    public function testTheRealFolderOfTheAgentIsProtected(): void
+    {
+        mkdir($this->live . '/plugins/wpsync-agent-main', 0777, true);
+        \WpSync\Push::register($this->live . '/plugins/wpsync-agent-main');
+        foreach ([true, false] as $dry) {
+            $this->assertRefused('wpsync_plugins_invalid', 400, $this->beginSet([], ['dry' => $dry, 'deactivate' => ['plugins/wpsync-agent-main']]));
+            $error = $this->beginSet(['plugins/wpsync-agent-main' => ['wpsync-agent.php' => "<?php\n"]], ['dry' => $dry]);
+            $this->assertInstanceOf(\WP_Error::class, $error, 'auch der Code-Kanal ersetzt den laufenden Agent nicht');
+            $this->assertSame(400, $error->data['status']);
+        }
+        $this->assertSame([], Store::$pushes);
+    }
 }

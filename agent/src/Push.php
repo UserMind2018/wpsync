@@ -51,6 +51,12 @@ final class Push
     public static function register(string $pluginDir): void
     {
         self::$pluginDir = $pluginDir;
+        // Der Ordner, in dem der Agent wirklich liegt: als Einheit und als Schalter tabu, wie immer er heisst (S3).
+        $folder = basename(rtrim(str_replace('\\', '/', $pluginDir), '/'));
+        if ($folder !== '' && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*\z/', $folder) === 1) {
+            PushUnits::$agent      = $folder;
+            ContentPlugins::$agent = $folder;
+        }
         add_action(self::CRON, [self::class, 'maintain']);
         // Früh: hat rescue.php einen Push zurückgenommen, holt der Agent nach, was WordPress braucht (P3 §8.1).
         add_action('init', [self::class, 'catchUp'], 1);

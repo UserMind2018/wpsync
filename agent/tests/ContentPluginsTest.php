@@ -177,4 +177,22 @@ final class ContentPluginsTest extends TestCase
         );
         $this->assertSame($refused->toArray(), ContentException::fromArray($refused->toArray())->toArray());
     }
+
+    /**
+     * Security-Review P4 S3: der Eintrag des laufenden Agents wird nie gestrichen – auch dann nicht, wenn ein
+     * Auftrag seinen Ordner doch nennt (ein anderer Name, die Kopie, ein Plan, an dem jemand gedreht hat).
+     */
+    public function testChangeNeverRemovesTheEntryOfTheAgent(): void
+    {
+        $list = ['wpsync-agent/wpsync-agent.php', 'old/old.php'];
+        $this->assertSame(['added' => [], 'removed' => ['old/old.php']], ContentPlugins::change($list, [], ['wpsync-agent', 'old']));
+        $this->assertSame(['added' => [], 'removed' => []], ContentPlugins::change($list, [], ['WPSync-Agent']));
+        ContentPlugins::$agent = 'wpsync-agent-main';
+        try {
+            $list = ['wpsync-agent-main/wpsync-agent.php', 'wpsync-agent/alt.php', 'old/old.php'];
+            $this->assertSame(['added' => [], 'removed' => ['old/old.php']], ContentPlugins::change($list, [], ['wpsync-agent-main', 'wpsync-agent', 'old']));
+        } finally {
+            ContentPlugins::$agent = 'wpsync-agent';
+        }
+    }
 }

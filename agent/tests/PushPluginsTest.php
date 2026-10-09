@@ -28,6 +28,8 @@ final class PushPluginsTest extends TestCase
     {
         PushPlugins::$site = null;
         PushPlugins::$can  = null;
+        \WpSync\PushUnits::$agent = 'wpsync-agent';
+        \WpSync\ContentPlugins::$agent = 'wpsync-agent';
         exec('rm -rf ' . escapeshellarg($this->dir));
     }
 
@@ -199,5 +201,24 @@ final class PushPluginsTest extends TestCase
         $this->assertSame(['php' => '8.2.0', 'wp' => '6.5', 'multisite' => true], PushPlugins::site());
         $e = PushPlugins::refuse(ContentException::PLUGINS_NOT_ALLOWED, 'nein', [['unit' => 'plugins/x', 'why' => 'y']], ['detail' => 'z']);
         $this->assertSame(['code' => 'plugins_not_allowed', 'message' => 'nein', 'plugins' => [['unit' => 'plugins/x', 'why' => 'y']], 'detail' => 'z'], $e->toArray());
+    }
+
+    /**
+     * Security-Review P4 S3: der Selbstschutz hängt nicht am Ordnernamen wpsync-agent – liegt der laufende
+     * Agent unter einem anderen Namen (ZIP von GitHub: wpsync-agent-main), ist auch dieser Ordner tabu:
+     * als Schalter (400 plugins_invalid) und als Einheit des Code-Kanals.
+     */
+    public function testTheFolderOfTheRunningAgentIsNeverSwitchedOrPushed(): void
+    {
+        \WpSync\PushUnits::$agent = 'wpsync-agent-main';
+        foreach ([['deactivate' => ['plugins/wpsync-agent-main']], ['activate' => ['plugins/WPSync-Agent-Main']], ['deactivate' => ['plugins/wpsync-agent']]] as $params) {
+            $e = $this->refused($params);
+            $this->assertSame([ContentException::PLUGINS_INVALID, 400], [$e->reason(), $e->status()], json_encode($params));
+        }
+        $this->assertFalse(\WpSync\PushUnits::valid('plugins/wpsync-agent-main'));
+        $this->assertFalse(\WpSync\PushUnits::valid('plugins/wpsync-agent'), 'der feste Name bleibt gesperrt');
+        $this->assertTrue(\WpSync\PushUnits::valid('plugins/wpsync-agent-main-addon'));
+        $this->assertTrue(\WpSync\PushUnits::valid('themes/wpsync-agent-main'));
+        $this->assertNotNull(PushPlugins::request(['deactivate' => ['plugins/anderes']]));
     }
 }

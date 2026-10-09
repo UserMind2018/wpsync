@@ -19,6 +19,12 @@ final class ContentPlugins
     /** Höchstens so viele Einträge je Richtung trägt ein Vorher-Abbild (added, removed). */
     public const MAX = 100;
 
+    /**
+     * @var string Ordner des laufenden Agents unter wp-content/plugins (Push::register()); rescue.php setzt ihn
+     *             nicht – dort streicht ohnehin nur undo(), nach dem authentisierten Abbild.
+     */
+    public static $agent = 'wpsync-agent';
+
     /** Mehr liest parse() nicht: die Liste einer echten Site hat wenige Kilobyte. */
     private const MAX_BYTES = 1048576;
     /** <slug>/<pfad>.php – der Slug wie eine Einheit, der Pfad ohne Steuerzeichen und Backslash. */
@@ -113,6 +119,11 @@ final class ContentPlugins
     {
         $removed = [];
         foreach ($list as $entry) {
+            // Der Agent schaltet sich nie selbst ab – was immer der Auftrag nennt (Security-Review P4 S3).
+            $own = strtolower(self::slug((string) $entry));
+            if ($own === 'wpsync-agent' || $own === strtolower(self::$agent)) {
+                continue;
+            }
             foreach ($slugs as $slug) {
                 $prefix = $slug . '/';
                 if (strncmp((string) $entry, $prefix, strlen($prefix)) === 0) {
