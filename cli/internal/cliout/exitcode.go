@@ -91,6 +91,12 @@ type Failure struct {
 	// relative to wp-content/uploads/ it is about (Spec Content-Push §10). Never a value.
 	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
 	Paths []string              `json:"paths,omitempty"`
+	// Total, StateBytes, Tables: what such a refusal names beyond that – how many keys it is about
+	// (keys holds at most 200), with package_too_large the size of the rows the package meets on the
+	// target, with engine_unsupported the content tables that are not InnoDB.
+	Total      int      `json:"total,omitempty"`
+	StateBytes int64    `json:"state_bytes,omitempty"`
+	Tables     []string `json:"tables,omitempty"`
 	// Plugins: with a refusal of the plugin state of a push (reason plugins_invalid,
 	// plugins_requirements, plugins_not_allowed, plugins_unsupported, plugins_failed) the units it is
 	// about and why (Spec Content-Push P4 §4.5). Never a value of the option, never the target's list.
@@ -161,6 +167,7 @@ func Classify(err error) Failure {
 	var refused *push.ContentError
 	if errors.As(err, &refused) {
 		f.Keys, f.Paths = refused.Keys, refused.Paths
+		f.Total, f.StateBytes, f.Tables = refused.Total, refused.StateBytes, refused.Tables
 	}
 	var needDB *push.RescueDBError
 	if f.Reason == "rescue_db_unavailable" && errors.As(err, &needDB) {

@@ -221,3 +221,58 @@ func TestRollbackNotesCarryPostActions(t *testing.T) {
 		t.Fatalf("notes = %+v, %v", notes, err)
 	}
 }
+
+// Was eine Ablehnung des Inhaltskanals über keys und paths hinaus nennt: total (auch bei gekappten
+// keys), state_bytes (package_too_large) und tables (engine_unsupported) – als Fehler einer Route
+// und im Plan des Probelaufs, begrenzt und nur in ihrer Form.
+func TestContentErrorsCarryTotalStateBytesAndTables(t *testing.T) {
+	answer, status := "", 409
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c, _ := newTestClient(srv.URL)
+	fail := func() *APIError {
+		t.Helper()
+		_, err := c.PushBegin(PushBeginRequest{Target: "live"})
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("err = %v", err)
+		}
+		return apiErr
+	}
+	answer = `{"code":"wpsync_content_conflict","message":"geändert","data":{"status":409,"keys":[{"table":"posts","key":"219"}],"total":731}}`
+	if e := fail(); e.Total != 731 || e.StateBytes != 0 || e.Tables != nil {
+		t.Errorf("err = %+v", e)
+	}
+	answer = `{"code":"wpsync_content_package_too_large","message":"zu gross","data":{"status":413,"state_bytes":73400320}}`
+	if e := fail(); e.StateBytes != 73400320 || e.Total != 0 {
+		t.Errorf("err = %+v", e)
+	}
+	answer = `{"code":"wpsync_content_engine_unsupported","message":"Nicht InnoDB","data":{"status":409,"tables":["options","postmeta","wp_options; DROP","\u001b[2J"]}}`
+	if e := fail(); !reflect.DeepEqual(e.Tables, []string{"options", "postmeta"}) {
+		t.Errorf("tables = %v", e.Tables)
+	}
+	// Unsinn von der Site: negative oder riesige Zahlen zählen nicht, total nie unter der Zahl der Schlüssel.
+	answer = `{"code":"wpsync_content_conflict","message":"x","data":{"keys":[{"table":"posts","key":"1"},{"table":"posts","key":"2"}],"total":-5,"state_bytes":-1}}`
+	if e := fail(); e.Total != 2 || e.StateBytes != 0 {
+		t.Errorf("err = %+v", e)
+	}
+	// Nur für Codes der Familie.
+	answer = `{"code":"wpsync_push_state","message":"x","data":{"total":9,"state_bytes":9,"tables":["options"]}}`
+	if e := fail(); e.Total != 0 || e.StateBytes != 0 || e.Tables != nil {
+		t.Errorf("err = %+v", e)
+	}
+
+	status = 200
+	answer = `{"push_id":"","agent_version":"0.9.0","window_open":true,"units":[],"rescue":{"url":"x"},"content":{"ok":false,
+		"error":{"code":"engine_unsupported","message":"Nicht InnoDB","tables":["options","<b>"],"total":0,"state_bytes":12}}}`
+	res, err := c.PushBegin(PushBeginRequest{Target: "live", Dry: true})
+	if err != nil || res.Content == nil || res.Content.Error == nil {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+	if f := res.Content.Error; !reflect.DeepEqual(f.Tables, []string{"options"}) || f.StateBytes != 12 || f.Total != 0 {
+		t.Errorf("failure = %+v", f)
+	}
+}

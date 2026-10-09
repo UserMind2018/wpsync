@@ -41,6 +41,12 @@ type APIError struct {
 	// the error data of the agent. Never values of rows.
 	Keys  []ContentKey
 	Paths []string
+	// Total, StateBytes, Tables: what such a refusal names beyond that – how many keys there are (Keys
+	// holds at most 200), the size of the rows a package meets (package_too_large) and the tables
+	// that are not InnoDB (engine_unsupported).
+	Total      int
+	StateBytes int64
+	Tables     []string
 	// Plugins and Detail: details of a refusal of the plugin state (code wpsync_plugins_…): the units
 	// it is about, and – without a rescue envelope – why there is none. Never a value of the option.
 	Plugins []PluginRefusal
@@ -235,10 +241,13 @@ func readAPIError(resp *http.Response) error {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
-			Keys    []ContentKey    `json:"keys"`
-			Paths   []string        `json:"paths"`
-			Plugins []PluginRefusal `json:"plugins"`
-			Detail  string          `json:"detail"`
+			Keys       []ContentKey    `json:"keys"`
+			Paths      []string        `json:"paths"`
+			Total      int             `json:"total"`
+			StateBytes int64           `json:"state_bytes"`
+			Tables     []string        `json:"tables"`
+			Plugins    []PluginRefusal `json:"plugins"`
+			Detail     string          `json:"detail"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
@@ -248,6 +257,7 @@ func readAPIError(resp *http.Response) error {
 			if e.Paths = wpErr.Data.Paths; len(e.Paths) > maxContentKeys {
 				e.Paths = e.Paths[:maxContentKeys]
 			}
+			e.Total, e.StateBytes, e.Tables = cleanRefusalNumbers(wpErr.Data.Total, len(e.Keys), wpErr.Data.StateBytes, wpErr.Data.Tables)
 		}
 		if strings.HasPrefix(e.Code, PluginsCodePrefix) {
 			e.Plugins = cleanRefusals(wpErr.Data.Plugins)

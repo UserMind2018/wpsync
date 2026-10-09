@@ -204,3 +204,32 @@ func TestPluginRefusalsHaveReasonAndUnits(t *testing.T) {
 		t.Errorf("json = %s", raw)
 	}
 }
+
+// Eine Ablehnung der Inhalte reicht durch, was der Agent über keys und paths hinaus nennt: total
+// (wie viele Schlüssel es sind – keys trägt höchstens 200), state_bytes und tables.
+func TestContentRefusalsCarryTotalStateBytesAndTables(t *testing.T) {
+	keys := []agentapi.ContentKey{{Table: "posts", Key: "219"}}
+	f := Classify(fmt.Errorf("push: %w", &push.ContentError{Reason: "conflict", Message: "geändert", Keys: keys, Total: 731}))
+	if f.Total != 731 || f.StateBytes != 0 || f.Tables != nil {
+		t.Errorf("failure = %+v", f)
+	}
+	raw, _ := json.Marshal(f)
+	if !strings.Contains(string(raw), `"total":731`) || strings.Contains(string(raw), "state_bytes") || strings.Contains(string(raw), "tables") {
+		t.Errorf("json = %s", raw)
+	}
+	raw, _ = json.Marshal(Classify(&push.ContentError{Reason: "package_too_large", StateBytes: 73400320}))
+	if !strings.Contains(string(raw), `"state_bytes":73400320`) || strings.Contains(string(raw), `"total"`) {
+		t.Errorf("json = %s", raw)
+	}
+	raw, _ = json.Marshal(Classify(&push.ContentError{Reason: "engine_unsupported", Tables: []string{"options", "postmeta"}}))
+	if !strings.Contains(string(raw), `"tables":["options","postmeta"]`) {
+		t.Errorf("json = %s", raw)
+	}
+	// Kein anderer Fehler trägt die Felder.
+	raw, _ = json.Marshal(Classify(push.ErrNothing))
+	for _, field := range []string{"total", "state_bytes", "tables"} {
+		if strings.Contains(string(raw), field) {
+			t.Errorf("json = %s", raw)
+		}
+	}
+}

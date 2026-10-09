@@ -74,6 +74,10 @@ type ContentFailure struct {
 	Keys    []ContentKey `json:"keys,omitempty"`
 	Total   int          `json:"total,omitempty"` // number of keys on the site; Keys holds at most 200
 	Paths   []string     `json:"paths,omitempty"` // upload_missing: relative to wp-content/uploads/
+	// StateBytes: package_too_large – the size of the rows the package meets on the target.
+	// Tables: engine_unsupported – the content tables that are not InnoDB.
+	StateBytes int64    `json:"state_bytes,omitempty"`
+	Tables     []string `json:"tables,omitempty"`
 }
 
 // ContentUnchecked names one row a dry run without an open push window left unchecked, and what
@@ -204,6 +208,26 @@ func (f *ContentFailure) Clean() {
 	if len(f.Paths) > maxContentKeys {
 		f.Paths = f.Paths[:maxContentKeys]
 	}
+	f.Total, f.StateBytes, f.Tables = cleanRefusalNumbers(f.Total, len(f.Keys), f.StateBytes, f.Tables)
+}
+
+// cleanRefusalNumbers bounds what a refusal of the content channel names beyond keys and paths:
+// total is never below the number of keys it carries and never absurd, state_bytes is a size, and
+// tables are at most 20 names of content tables. All of it comes from the site.
+func cleanRefusalNumbers(total, keys int, stateBytes int64, tables []string) (int, int64, []string) {
+	if total < keys || total > 1<<20 {
+		total = keys
+	}
+	if stateBytes < 0 || stateBytes > 1<<40 {
+		stateBytes = 0
+	}
+	var names []string
+	for _, t := range tables {
+		if len(names) < 20 && tableRe.MatchString(t) {
+			names = append(names, t)
+		}
+	}
+	return total, stateBytes, names
 }
 
 // Clean bounds and cleans what came from the site.
