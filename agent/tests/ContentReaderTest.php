@@ -374,4 +374,83 @@ final class ContentReaderTest extends TestCase
         $db->answer('/FROM `wp_options`/', [['option_id' => '1', 'option_name' => 'admin_email', 'option_value' => 'chef@kunde.de']], []);
         $this->assertSame([['t' => 'options', 'k' => 'admin_email', 'h' => null, 'why' => 'pseudonymized']], $this->all($this->hiding($db), true, ['options']));
     }
+
+    /** Eine Quelle mit $posts Beiträgen und je Beitrag zwei Meta-Paaren, die auf jede Abfrage richtig antwortet. */
+    private function source(int $posts): FakeWpdb
+    {
+        $db = new FakeWpdb();
+        $db->answer('/FROM `wp_posts` WHERE/', function (string $sql) use ($posts): array {
+            preg_match('/`ID` > (\d+) ORDER BY `ID` LIMIT (\d+)$/', $sql, $m);
+            $found = [];
+            for ($id = (int) $m[1] + 1; $id <= $posts && count($found) < (int) $m[2]; $id++) {
+                $found[] = $this->post((string) $id);
+            }
+            return $found;
+        });
+        $db->answer('/SELECT DISTINCT m\.`post_id`/', static function (string $sql) use ($posts): array {
+            preg_match('/> (\d+) ORDER BY .* LIMIT (\d+)$/', $sql, $m);
+            $ids = [];
+            for ($id = (int) $m[1] + 1; $id <= $posts && count($ids) < (int) $m[2]; $id++) {
+                $ids[] = (string) $id;
+            }
+            return $ids;
+        });
+        $db->answer('/AS o, m\.`meta_key` AS k/', static function (string $sql): array {
+            preg_match('/> (\d+) AND m\.`post_id` <= (\d+)/', $sql, $m);
+            $found = [];
+            for ($id = (int) $m[1] + 1; $id <= (int) $m[2]; $id++) {
+                $found[] = ['o' => (string) $id, 'k' => '_a', 'v' => 'x'];
+                $found[] = ['o' => (string) $id, 'k' => '_b', 'v' => 'y'];
+            }
+            return $found;
+        });
+        return $db;
+    }
+
+    /** Security-Review M5: eine Seite endet auch nach einer Zahl von Datensätzen – an einer Schrittgrenze */
+    public function testARecordLimitEndsThePageAtAStepBoundary(): void
+    {
+        $posts  = ContentReader::POSTS_PER_STEP * 2 + 50;
+        $reader = $this->reader($this->source($posts));
+        $keys   = [];
+        $emit   = static function (array $record) use (&$keys): void {
+            $keys[] = $record['t'] . ' ' . $record['k'];
+        };
+        $limit  = ContentReader::POSTS_PER_STEP + 1; // mitten im zweiten Schritt erreicht
+        $far    = microtime(true) + 60;
+        $pages  = [];
+        $cursor = null;
+        do {
+            $before  = count($keys);
+            $cursor  = $reader->read($cursor, $far, false, $emit, ['posts', 'postmeta'], $limit);
+            $pages[] = [count($keys) - $before, $cursor];
+        } while ($cursor !== null && count($pages) < 50);
+
+        $this->assertSame([ContentReader::POSTS_PER_STEP * 2, ['t' => 0, 'a' => (string) (ContentReader::POSTS_PER_STEP * 2)]], $pages[0], 'der Schritt, der die Grenze erreicht, wird zu Ende gelesen');
+        // Zweite Seite: der Rest von posts (50) und Meta-Schritte zu je 25 Objekten × 2 Paaren, bis die Grenze erreicht ist.
+        $this->assertSame(['t' => 1, 'a' => '100'], $pages[1][1]);
+        $this->assertSame(50 + 4 * ContentReader::OBJECTS_PER_STEP * 2, $pages[1][0]);
+        $this->assertNull($pages[count($pages) - 1][1]);
+        foreach ($pages as $page) {
+            $this->assertLessThan($limit + ContentReader::POSTS_PER_STEP, $page[0], 'höchstens ein Schritt über der Grenze');
+        }
+        $expected = [];
+        for ($id = 1; $id <= $posts; $id++) {
+            $expected[] = 'posts ' . $id;
+        }
+        for ($id = 1; $id <= $posts; $id++) {
+            $expected[] = 'postmeta ' . $id . "\0_a";
+            $expected[] = 'postmeta ' . $id . "\0_b";
+        }
+        $this->assertSame($expected, $keys, 'nichts doppelt, nichts ausgelassen');
+    }
+
+    public function testWithoutARecordLimitOnlyTheBudgetEndsAPage(): void
+    {
+        $seen = 0;
+        $this->assertNull($this->reader($this->source(450))->read(null, microtime(true) + 60, false, static function () use (&$seen): void {
+            $seen++;
+        }, ['posts', 'postmeta']));
+        $this->assertSame(450 * 3, $seen);
+    }
 }

@@ -172,4 +172,30 @@ final class RestRoutesTest extends TestCase
 
         $this->assertSame([], $GLOBALS['wpdb']->queries);
     }
+
+    /** Security-Review M5: flush() allein leert den eigenen Ausgabepuffer (gzip) nicht – die Seite wüchse darin bis zum Ende */
+    public function testFlushOutputEmptiesTheOwnOutputBuffer(): void
+    {
+        $this->boot();
+        $chunks = [];
+        ob_start(static function (string $buffer) use (&$chunks): string {
+            $chunks[] = $buffer;
+            return '';
+        });
+        echo str_repeat('x', 1000);
+        Rest::flushOutput();
+        $left = ob_get_length();
+        ob_end_clean();
+        $this->assertSame(0, $left);
+        $this->assertSame(1000, strlen($chunks[0]));
+    }
+
+    public function testFlushOutputLeavesABufferAloneThatMustNotBeFlushed(): void
+    {
+        $this->boot();
+        ob_start(null, 0, PHP_OUTPUT_HANDLER_CLEANABLE | PHP_OUTPUT_HANDLER_REMOVABLE);
+        echo 'abc';
+        Rest::flushOutput();
+        $this->assertSame('abc', ob_get_clean());
+    }
 }

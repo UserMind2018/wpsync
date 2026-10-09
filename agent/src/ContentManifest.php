@@ -7,12 +7,18 @@ defined('ABSPATH') || exit;
  * Endpunkt /content/manifest (Spec Content-Push §4.2): JSON-Lines mit einem Kopf und je Zeile der
  * sieben Inhaltstabellen einem Fingerabdruck – eingeschränkt auf das, was der Pull-Scope ohnehin
  * überträgt, ohne wpsync_%-Optionen und Transients. Keine Werte, und für das, was der Pull
- * pseudonymisiert, auch kein Abdruck (h null, why "pseudonymized"). Seitenweise mit Zeitbudget; die
- * letzte Zeile jeder Seite nennt den Cursor der nächsten.
+ * pseudonymisiert, auch kein Abdruck (h null, why "pseudonymized"). Seitenweise mit Zeitbudget und
+ * einer Obergrenze der Datensätze; die letzte Zeile jeder Seite nennt den Cursor der nächsten.
  */
 final class ContentManifest
 {
     private const FLAGS = JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE;
+
+    /**
+     * Datensätze je Seite, zusätzlich zum Zeitbudget: ein schneller Server mit grossem Budget hielte
+     * sonst hunderttausende Zeilen in einer Antwort. Der Leser beendet den laufenden Schritt noch.
+     */
+    public const PAGE_RECORDS = 20000;
 
     /** Zähler-Tabellen mit ihrem Primärschlüssel – für sie gilt der ID-Korridor (Studio §6.1). */
     private const COUNTERS = ['posts' => 'ID', 'terms' => 'term_id', 'term_taxonomy' => 'term_taxonomy_id'];
@@ -70,7 +76,7 @@ final class ContentManifest
         }
         $next = $reader->read($cursor, $deadline, false, static function (array $record) use ($write): void {
             $write((string) json_encode($record, self::FLAGS));
-        }, self::tables($scope));
+        }, self::tables($scope), self::PAGE_RECORDS);
         $write((string) json_encode(['next' => $next]));
     }
 

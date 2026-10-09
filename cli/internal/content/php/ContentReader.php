@@ -50,30 +50,38 @@ final class ContentReader
     }
 
     /**
-     * Liest bis zum Ende oder bis $deadline, mindestens einen Schritt.
+     * Liest bis zum Ende, bis $deadline oder bis $limit Datensätze ausgegeben sind – mindestens
+     * einen Schritt, und jeden angefangenen Schritt zu Ende: der Cursor liegt immer auf einer
+     * Schrittgrenze, eine Seite hat höchstens einen Schritt mehr als $limit.
      *
      * @param array{t?: mixed, a?: mixed}|null   $cursor null: von vorn
      * @param callable(array<string, mixed>): void $emit
      * @param list<string>|null                  $tables Tabellen ohne Präfix; null: alle sieben
+     * @param int                                $limit  Datensätze je Aufruf; 0: nur $deadline begrenzt
      * @return array{t: int, a: string}|null Cursor für den nächsten Aufruf; null: fertig
      * @throws \RuntimeException bei einem Datenbankfehler
      */
-    public function read(?array $cursor, float $deadline, bool $rows, callable $emit, ?array $tables = null): ?array
+    public function read(?array $cursor, float $deadline, bool $rows, callable $emit, ?array $tables = null, int $limit = 0): ?array
     {
         $t     = max(0, (int) ($cursor['t'] ?? 0));
         $after = (string) ($cursor['a'] ?? '');
+        $count = 0;
+        $counted = static function (array $record) use ($emit, &$count): void {
+            $count++;
+            $emit($record);
+        };
         for (; $t < count(Canon::TABLES); $t++, $after = '') {
             $table = Canon::TABLES[$t];
             if ($tables !== null && !in_array($table, $tables, true)) {
                 continue;
             }
             while (true) {
-                $next = $this->step($table, (int) $after, $rows, $emit);
+                $next = $this->step($table, (int) $after, $rows, $counted);
                 if ($next === null) {
                     break;
                 }
                 $after = $next;
-                if (microtime(true) > $deadline) {
+                if (microtime(true) > $deadline || ($limit > 0 && $count >= $limit)) {
                     return ['t' => $t, 'a' => $after];
                 }
             }

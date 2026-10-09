@@ -508,7 +508,7 @@ final class Rest
         ContentManifest::send($cursor, $scope, static function (string $line) use (&$lines): void {
             echo $line, "\n"; // phpcs:ignore WordPress.Security.EscapeOutput
             if (++$lines % 2000 === 0) {
-                flush();
+                self::flushOutput();
             }
         }, $deadline);
         exit;
@@ -720,6 +720,20 @@ final class Rest
     {
         $limit = (int) self::param($request, 'limit');
         return min(20000, max(1, $limit > 0 ? $limit : 2000));
+    }
+
+    /**
+     * Gibt aus, was bis hier geschrieben ist. flush() allein erreicht den eigenen Ausgabepuffer
+     * (gzip aus beginRaw) nicht – ohne ob_flush() wüchse eine ganze Seite darin an. Ein Puffer, der
+     * sich nicht leeren lässt, bleibt, wie er ist.
+     */
+    public static function flushOutput(): void
+    {
+        $status = ob_get_level() > 0 ? ob_get_status() : [];
+        if (((int) ($status['flags'] ?? 0) & PHP_OUTPUT_HANDLER_FLUSHABLE) !== 0) {
+            ob_flush();
+        }
+        flush();
     }
 
     /** Rohausgabe, gzip wenn der Client es anbietet und der Server nicht selbst komprimiert. */

@@ -26,7 +26,8 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   `key_encoding`). Läuft ohne Request an die Site, auch im Container-Modus (PHP-Version und
   Tabellenpräfix aus `env.json`); Meldungen immer auf stderr, mit `--json` das Ergebnisobjekt
   als letzte Zeile. Braucht einen aktuellen Inhaltsstand (sonst Exit 2)
-- Agent: Endpunkt `/content/manifest` (JSON-Lines, seitenweise mit Zeitbudget, im Umfang des
+- Agent: Endpunkt `/content/manifest` (JSON-Lines, seitenweise mit Zeitbudget und höchstens rund
+  20 000 Datensätzen je Seite, im Umfang des
   Pull-Profils, ohne Transients und `wpsync_*`-Optionen); im Kopf `id_max`, `engines`, die Listen
   des Agents und die Pseudonym-Muster, dazu `pushable: false` mit `why` bei Multisite oder
   abweichender WordPress-/Website-Adresse

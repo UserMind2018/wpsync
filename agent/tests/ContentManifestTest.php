@@ -158,6 +158,23 @@ final class ContentManifestTest extends TestCase
         $this->assertSame(Canon::hash('options', 'admin_email', Canon::columns(['option_value'], ['option_value' => 'chef@kunde.de'])), $plain[0]['h']);
     }
 
+    /** Security-Review M5: eine Seite ist auch in der Zahl ihrer Datensätze begrenzt, nicht nur in der Zeit */
+    public function testAPageEndsAfterItsRecordLimit(): void
+    {
+        $this->db->answer('/FROM `wp_terms`/', static function (string $sql): array {
+            preg_match('/`term_id` > (\d+) ORDER BY `term_id` LIMIT (\d+)$/', $sql, $m);
+            $found = [];
+            for ($id = (int) $m[1] + 1; $id <= 3 * ContentManifest::PAGE_RECORDS && count($found) < (int) $m[2]; $id++) {
+                $found[] = ['term_id' => (string) $id, 'name' => 'n', 'slug' => 's', 'term_group' => '0'];
+            }
+            return $found;
+        });
+        $lines = $this->page(['t' => 2, 'a' => '']);
+        $this->assertCount(ContentManifest::PAGE_RECORDS + 1, $lines);
+        $this->assertSame(['next' => ['t' => 2, 'a' => (string) ContentManifest::PAGE_RECORDS]], $lines[count($lines) - 1]);
+        $this->assertSame(0, ContentManifest::PAGE_RECORDS % 500, 'die Grenze liegt auf einer Schrittgrenze der einfachen Tabellen');
+    }
+
     public function testMultisiteIsNotPushable(): void
     {
         $GLOBALS['wpsync_test_multisite'] = true;
