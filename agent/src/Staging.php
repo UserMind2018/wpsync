@@ -166,6 +166,40 @@ final class Staging
         return array_values(array_unique($out));
     }
 
+    /**
+     * Was ein Inhalts-Push in die Kopie braucht (Spec Content-Push §7.8): ihr Präfix, ihre sieben
+     * Inhaltstabellen und die Tabelle der Yoast-Indexables – jeder Name von StagingGuard::table()
+     * geprüft –, der Ersetzer, mit dem sie angelegt wurde, und ihre Adresse. null, wenn es keine
+     * Kopie gibt oder ihr Datensatz den Guard nicht besteht. Ob die Kopie gerade benutzbar ist,
+     * entscheidet pushContent().
+     *
+     * @return array{prefix: string, tables: array<string, string>, indexables: string, replace: StagingReplace, url: string}|null
+     */
+    public static function contentTarget(): ?array
+    {
+        $record = self::record();
+        if ($record === null) {
+            return null;
+        }
+        try {
+            $guard  = self::guard($record);
+            $prefix = $guard->stagingPrefix();
+            $tables = [];
+            foreach (Canon::TABLES as $name) {
+                $tables[$name] = $guard->table($prefix . $name);
+            }
+            return [
+                'prefix'     => $prefix,
+                'tables'     => $tables,
+                'indexables' => $guard->table($prefix . 'yoast_indexable'),
+                'replace'    => new StagingReplace(home_url(), '/' . (string) $record['dir']),
+                'url'        => self::url($record),
+            ];
+        } catch (StagingException | \InvalidArgumentException $e) {
+            return null;
+        }
+    }
+
     /** Ein Push nach Staging zählt als Nutzung (Spec 5.9). */
     public static function markUsed(): void
     {

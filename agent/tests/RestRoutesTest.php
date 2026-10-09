@@ -59,7 +59,22 @@ final class RestRoutesTest extends TestCase
             }
             $this->assertSame($signed, $args['permission_callback'], $route);
         }
-        $this->assertGreaterThanOrEqual(19, count($routes));
+        $this->assertGreaterThanOrEqual(20, count($routes));
+    }
+
+    /** Spec Content-Push §7.5: die Ablage eines Pakets hängt an derselben Signaturprüfung wie der Push. */
+    public function testContentStageIsASignedRoute(): void
+    {
+        $this->boot();
+        $routes = $this->routes();
+        $this->assertArrayHasKey('wpsync/v1/content/stage', $routes);
+        $this->assertSame('POST', $routes['wpsync/v1/content/stage']['methods']);
+        $this->assertSame([Rest::class, 'contentStage'], $routes['wpsync/v1/content/stage']['callback']);
+        $this->assertSame($routes['wpsync/v1/push/begin']['permission_callback'], $routes['wpsync/v1/content/stage']['permission_callback']);
+
+        $result = Rest::auth(new \WP_REST_Request('/wpsync/v1/content/stage'));
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertSame(401, $result->status);
     }
 
     /** Spec Content-Push §4.2: das Manifest hängt an derselben Signaturprüfung wie /db. */

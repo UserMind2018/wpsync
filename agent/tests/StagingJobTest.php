@@ -823,6 +823,29 @@ final class StagingJobTest extends TestCase
         $this->assertFileExists($this->rootOf($record));
     }
 
+    /** Spec Content-Push §7.8: ein Inhalts-Push in die Kopie bekommt nur Tabellennamen, die der Guard geprüft hat. */
+    public function testContentTargetNamesOnlyTablesOfTheCopy(): void
+    {
+        $this->boot();
+        $this->assertNull(Staging::contentTarget(), 'ohne Kopie');
+        $this->create();
+        $record = $this->record();
+        $target = Staging::contentTarget();
+        $this->assertNotNull($target);
+        $this->assertSame($record['prefix'], $target['prefix']);
+        $this->assertSame(\WpSync\Canon::TABLES, array_keys($target['tables']));
+        foreach ($target['tables'] as $name => $table) {
+            $this->assertSame($record['prefix'] . $name, $table);
+        }
+        $this->assertSame($record['prefix'] . 'yoast_indexable', $target['indexables']);
+        $this->assertSame('https://example.test/' . $record['dir'], $target['url']);
+        $this->assertSame('https://example.test/' . $record['dir'] . '/x', $target['replace']->text('https://example.test/x'));
+
+        $record['prefix'] = 'wp_';
+        Store::setState(Staging::STATE, $record);
+        $this->assertNull(Staging::contentTarget(), 'ein Datensatz mit dem Präfix von Live besteht den Guard nicht');
+    }
+
     /** @param array<string, mixed> $record */
     private function rootOf(array $record): string
     {

@@ -51,6 +51,9 @@ final class Rest
             'files'             => 'files',
             // Inhalts-Manifest (Spec Content-Push §4.2): nur Fingerabdrücke, im Umfang des Pull-Scopes.
             'content/manifest'  => 'contentManifest',
+            // Ablage eines Inhalts-Pakets (Spec Content-Push §7.5). Ohne Push-Fenster: abgelegt ist nicht
+            // angewandt – geschrieben wird erst im Commit eines Pushs, und der braucht das Fenster.
+            'content/stage'     => 'contentStage',
             'push/begin'        => 'pushBegin',
             'push/upload'       => 'pushUpload',
             'push/commit'       => 'pushCommit',
@@ -287,6 +290,12 @@ final class Rest
     public static function pushList(): \WP_REST_Response
     {
         return Push::index();
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function contentStage(\WP_REST_Request $request)
+    {
+        return Push::stage(self::json($request), self::$keyId);
     }
 
     /** @return \WP_REST_Response|\WP_Error */

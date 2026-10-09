@@ -90,6 +90,23 @@ final class Push
     }
 
     /**
+     * Nimmt ein Inhalts-Paket in Stücken entgegen (Spec Content-Push §7.5) – immer in den
+     * Arbeitsordner von Live, auch für einen späteren Push nach Staging. Braucht kein offenes
+     * Push-Fenster: der Probelauf soll das Paket prüfen können, und angewandt wird es erst im Commit.
+     *
+     * @param array<string, mixed> $params
+     * @return \WP_REST_Response|\WP_Error
+     */
+    public static function stage(array $params, string $keyId)
+    {
+        $live = self::content();
+        if ($live === '' || rtrim(wp_normalize_path((string) realpath(dirname(self::$pluginDir, 2))), '/') !== $live) {
+            return self::error('wpsync_layout', 'Push braucht das Standardlayout wp-content/plugins/wpsync-agent.', 400);
+        }
+        return PushContent::stage($params, $keyId, self::workDir($live), time());
+    }
+
+    /**
      * Prüft Einheiten, Konflikte, Rechte und Platz. Mit dry nur Auskunft; sonst legt es den Push
      * an und nimmt die Sperre. Ziel live oder staging (Spec 2b 5.8): der Client nennt nur das Wort,
      * das Verzeichnis kommt aus dem Staging-Datensatz.
