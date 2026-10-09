@@ -270,9 +270,29 @@ func Invalidate(siteDir string) error {
 }
 
 type recordLine struct {
-	T string  `json:"t"`
-	K string  `json:"k"`
-	H *string `json:"h"`
+	T   string  `json:"t"`
+	K   string  `json:"k"`
+	H   *string `json:"h"`
+	Why string  `json:"why"`
+}
+
+// noPrint marks a manifest row without a fingerprint in the map of compare; the reason follows.
+// A fingerprint is hex and never starts with it.
+const noPrint = "!"
+
+// manifestWhy is the reason a manifest row carries no fingerprint, as unfaithful.jsonl names it:
+// what the agent said (unnormalizable, key_encoding, pseudonymized) if it is a plain word, else
+// unnormalizable. The manifest comes from the site; the reasons compare gives itself stay its own.
+func manifestWhy(why string) string {
+	if why == "" || len(why) > 32 || why == "differs" || why == "local_only" || why == "unnormalizable_local" {
+		return "unnormalizable"
+	}
+	for _, c := range []byte(why) {
+		if (c < 'a' || c > 'z') && c != '_' {
+			return "unnormalizable"
+		}
+	}
+	return why
 }
 
 // lines calls fn for every record line ({"t":…}) of a JSON-Lines file; other lines are skipped.
@@ -317,10 +337,10 @@ func Compare(siteDir string) (rows, bad int, err error) {
 }
 
 func compare(root *os.Root) (rows, bad int, err error) {
-	live := map[string]string{} // t \x00 k → h; "" without fingerprint
+	live := map[string]string{} // t \x00 k → h; noPrint + reason without fingerprint
 	if err := lines(root, manifestName, func(r recordLine) error {
-		h := ""
-		if r.H != nil {
+		h := noPrint + manifestWhy(r.Why)
+		if r.H != nil && !strings.HasPrefix(*r.H, noPrint) && *r.H != "" {
 			h = *r.H
 		}
 		live[r.T+"\x00"+r.K] = h
@@ -338,8 +358,8 @@ func compare(root *os.Root) (rows, bad int, err error) {
 			switch {
 			case !known:
 				why = "local_only"
-			case h == "":
-				why = "unnormalizable"
+			case strings.HasPrefix(h, noPrint):
+				why = strings.TrimPrefix(h, noPrint)
 			case r.H == nil:
 				why = "unnormalizable_local"
 			case *r.H != h:

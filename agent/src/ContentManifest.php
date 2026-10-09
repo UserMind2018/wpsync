@@ -6,7 +6,8 @@ defined('ABSPATH') || exit;
 /**
  * Endpunkt /content/manifest (Spec Content-Push §4.2): JSON-Lines mit einem Kopf und je Zeile der
  * sieben Inhaltstabellen einem Fingerabdruck – eingeschränkt auf das, was der Pull-Scope ohnehin
- * überträgt, ohne wpsync_%-Optionen und Transients. Keine Werte. Seitenweise mit Zeitbudget; die
+ * überträgt, ohne wpsync_%-Optionen und Transients. Keine Werte, und für das, was der Pull
+ * pseudonymisiert, auch kein Abdruck (h null, why "pseudonymized"). Seitenweise mit Zeitbudget; die
  * letzte Zeile jeder Seite nennt den Cursor der nächsten.
  */
 final class ContentManifest
@@ -62,7 +63,8 @@ final class ContentManifest
     {
         global $wpdb;
         // Vor dem Kopf: ohne gültiges home gibt es nichts zu normalisieren.
-        $reader = new ContentReader($wpdb, (string) $wpdb->prefix, new ContentOrigin((string) get_option('home')), $scope->excludedPostTypes());
+        // Pseudonymisiert der Pull, gibt es für diese Zeilen auch keinen Abdruck des echten Werts.
+        $reader = new ContentReader($wpdb, (string) $wpdb->prefix, new ContentOrigin((string) get_option('home')), $scope->excludedPostTypes(), $scope->anonymize());
         if ($cursor === null) {
             $write((string) json_encode(['head' => self::head($scope)], self::FLAGS));
         }

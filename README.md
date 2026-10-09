@@ -429,7 +429,8 @@ die Site, und nichts davon braucht ein Push-Fenster.
 **`wpsync pull <site> --content`** holt zusätzlich zum normalen Pull ein **Manifest** der sieben
 Inhaltstabellen (`posts`, `postmeta`, `terms`, `term_taxonomy`, `term_relationships`, `termmeta`,
 `options`): je Zeile, je Meta-Paar `(Objekt, Schlüssel)` und je Zuordnung `(Objekt, Taxonomie)`
-ein Fingerabdruck, keine Werte.
+ein Fingerabdruck, keine Werte. Für Zeilen, die der Pull pseudonymisiert, gibt es auch keinen
+Fingerabdruck.
 
 Voraussetzungen, beide geprüft, bevor etwas eingerichtet oder geladen wird:
 
@@ -441,7 +442,7 @@ Unter `<site>/.wpsync/content/` liegen danach:
 
 | Datei | Inhalt |
 |---|---|
-| `manifest.jsonl` | Stand der Site: erst der Kopf `{"head": {…}}`, dann je Zeile `{"t","k","h"}` (Tabelle ohne Präfix, Schlüssel, Fingerabdruck). Liess sich ein Wert nicht normalisieren, ist `h` `null` und `why` nennt den Grund |
+| `manifest.jsonl` | Stand der Site: erst der Kopf `{"head": {…}}`, dann je Zeile `{"t","k","h"}` (Tabelle ohne Präfix, Schlüssel, Fingerabdruck). Ohne Fingerabdruck ist `h` `null` und `why` nennt den Grund: `unnormalizable` (ein Wert liess sich nicht normalisieren), `key_encoding` (der Schlüssel ist kein gültiges UTF-8) oder `pseudonymized` (der Pull pseudonymisiert die Zeile) |
 | `map.json` | Domain-Abbildung des Pulls: `live` (`home`, `siteurl`), `local` (die lokale URL), `variants`, `canon_version`, `pulled_at` |
 | `baseline.jsonl` | normalisierte Zeilen der lokalen Site direkt nach dem Pull, mit Werten und Fingerabdruck – dasselbe Format wie `content export` |
 | `unfaithful.jsonl` | `{"t","k","why"}` je Schlüssel, den der Pull nicht treu übertragen hat – nicht pushbar |
@@ -460,13 +461,24 @@ Gründe in `unfaithful.jsonl`:
 
 | `why` | Bedeutung |
 |---|---|
-| `differs` | lokal ein anderer Fingerabdruck als auf der Site – etwa pseudonymisierte Werte oder was das Post-Setup lokal umstellt |
+| `differs` | lokal ein anderer Fingerabdruck als auf der Site – etwa was das Post-Setup lokal umstellt |
+| `pseudonymized` | der Pull pseudonymisiert die Zeile; das Manifest nennt für sie keinen Abdruck des echten Werts |
 | `unnormalizable` | der Wert auf der Site liess sich nicht normalisieren (das Manifest hat keinen Abdruck) |
+| `key_encoding` | der Schlüssel auf der Site ist kein gültiges UTF-8 (das Manifest hat keinen Abdruck) |
 | `unnormalizable_local` | der lokale Wert liess sich nicht normalisieren |
 | `local_only` | die Zeile gibt es lokal, im Manifest nicht |
 
 Eine Zeile, die im Manifest steht und lokal fehlt, zählt nicht dazu – das Pull-Profil filtert
 Zeilen.
+
+- **Pseudonymisiert** (`why: "pseudonymized"`) sind genau die Zeilen, an denen die Regeln der
+  Pseudonymisierung etwas ersetzen: Beiträge der Typen `shop_order`, `shop_order_refund` und
+  `shop_subscription` als Ganzes, Meta-Paare mit einem pseudonymisierten Schlüssel
+  (`_billing_*`, `_shipping_*`, `_customer_ip_address`, … – an jedem Beitrag) und die Optionen
+  `admin_email` und `new_admin_email`. Ein Abdruck über den echten Wert liesse sich offline
+  erraten (IP, Postleitzahl, Telefon, E-Mail), deshalb fehlt er. Mit `--no-anonymize` zieht der
+  Pull Klartext, und das Manifest nennt auch für diese Zeilen den Abdruck. Pushbar sind sie
+  in keinem Fall.
 
 - **Normalisiert** heisst: Die eigene Origin der Site ist durch einen Platzhalter ersetzt –
   `⟦wpsync:origin⟧` (Klartext), `⟦wpsync:origin:esc1⟧` (`https:\/\/…`) und `⟦wpsync:origin:esc2⟧`
@@ -763,7 +775,10 @@ abbilden lässt, sofern das Profil sie kopiert.
 - **Inhalts-Manifest:** `/content/manifest` ist signiert wie jeder Request, liest nur und
   braucht kein Push-Fenster. Die Inhalte verlassen den Server dort nur als Fingerabdruck, ohne
   Werte, im Umfang des Pull-Profils (abgewählte Tabellen und Beitragstypen fehlen) und ohne
-  Transients und `wpsync_*`-Optionen. Die Listen des Agents für den späteren Inhalts-Push
+  Transients und `wpsync_*`-Optionen. Der Fingerabdruck ist ein ungesalzenes SHA-256: Für alles,
+  was der Pull pseudonymisiert, liefert das Manifest deshalb gar keinen (`why: "pseudonymized"`),
+  ausser der Pull läuft mit `--no-anonymize`. Für alle anderen Zeilen gilt: Wer das Manifest
+  hat, kann kurze oder erratbare Werte am Abdruck wiedererkennen. Die Listen des Agents für den späteren Inhalts-Push
   stehen im Kopf als Daten; sie erweitern keine Rechte. Lokal liegen Manifest und Baseline unter
   `.wpsync/content/` neben dem Docroot; wpsync schreibt und liest sie, ohne einem Symlink zu
   folgen, und prüft die Werte aus `env.json`, bevor sie an Docker oder WP-CLI gehen. Die

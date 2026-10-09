@@ -9,7 +9,8 @@ defined('ABSPATH') || exit;
  * kanonischer Form (Spec Content-Push §4, §6.1). Dieselbe Datei rechnet auf Live (Manifest) und in
  * der Arbeitskopie (wpsync content export, C1) – sie benutzt deshalb nur das übergebene
  * $wpdb-Objekt und keine WordPress-Funktion. Meta und Zuordnungen werden objektweise gelesen, nie
- * die ganze Tabelle (Messung Q3).
+ * die ganze Tabelle (Messung Q3). Ein Datensatz ohne Abdruck trägt h null und why:
+ * unnormalizable, key_encoding oder – nur mit $hidePseudonymized – pseudonymized.
  */
 final class ContentReader
 {
@@ -26,18 +27,26 @@ final class ContentReader
     private $origin;
     /** @var list<string> */
     private $excluded;
+    /** @var bool */
+    private $hidePseudonymized;
 
     /**
      * @param object       $db                $wpdb der Site
      * @param string       $prefix            Tabellen-Präfix (auf Staging das der Kopie)
      * @param list<string> $excludedPostTypes Beitragstypen, die der Pull-Scope auslässt
+     * @param bool         $hidePseudonymized Zeilen, die der Pull pseudonymisiert (Anonymizer::touches),
+     *                                        bekommen weder Abdruck noch Werte: h null, why "pseudonymized".
+     *                                        Für das Manifest eines pseudonymisierenden Pulls – ein Abdruck
+     *                                        des echten Werts liesse sich offline erraten. Der lokale Export
+     *                                        liest schon Pseudonyme und lässt den Schalter aus.
      */
-    public function __construct($db, string $prefix, ContentOrigin $origin, array $excludedPostTypes = [])
+    public function __construct($db, string $prefix, ContentOrigin $origin, array $excludedPostTypes = [], bool $hidePseudonymized = false)
     {
         $this->db       = $db;
         $this->prefix   = $prefix;
         $this->origin   = $origin;
         $this->excluded = array_values($excludedPostTypes);
+        $this->hidePseudonymized = $hidePseudonymized;
     }
 
     /**
@@ -103,7 +112,7 @@ final class ContentReader
             array_merge([$after], $args, [self::POSTS_PER_STEP])
         );
         foreach ($found as $row) {
-            $emit($this->columns('posts', (string) $row['ID'], Canon::POSTS, $row, $rows));
+            $emit($this->hidden('posts', (string) $row['ID'], $row) ?? $this->columns('posts', (string) $row['ID'], Canon::POSTS, $row, $rows));
         }
         return count($found) < self::POSTS_PER_STEP ? null : (string) $found[count($found) - 1]['ID'];
     }
@@ -117,7 +126,7 @@ final class ContentReader
             [$after, self::ROWS_PER_STEP]
         );
         foreach ($found as $row) {
-            $emit($this->columns($table, (string) $row[$pk], $names, $row, $rows));
+            $emit($this->hidden($table, (string) $row[$pk], $row) ?? $this->columns($table, (string) $row[$pk], $names, $row, $rows));
         }
         return count($found) < self::ROWS_PER_STEP ? null : (string) $found[count($found) - 1][$pk];
     }
@@ -131,7 +140,8 @@ final class ContentReader
             [$after, 'wpsync\\_%', '\\_transient\\_%', '\\_site\\_transient\\_%', self::ROWS_PER_STEP]
         );
         foreach ($found as $row) {
-            $emit($this->columns('options', (string) $row['option_name'], ['option_value'], $row, $rows));
+            $emit($this->hidden('options', (string) $row['option_name'], ['option_name' => $row['option_name']])
+                ?? $this->columns('options', (string) $row['option_name'], ['option_value'], $row, $rows));
         }
         return count($found) < self::ROWS_PER_STEP ? null : (string) $found[count($found) - 1]['option_id'];
     }
@@ -162,7 +172,8 @@ final class ContentReader
             array_merge([$after, $last], $args)
         );
         foreach ($this->group($found, 'o', 'k', 'v') as $pair) {
-            $emit($this->set($table, $pair[0], $pair[1], $pair[2], true, $rows));
+            $emit($this->hidden($table, Canon::pairKey($pair[0], $pair[1]), [$column => $pair[0], 'meta_key' => $pair[1]])
+                ?? $this->set($table, $pair[0], $pair[1], $pair[2], true, $rows));
         }
         return count($ids) < self::OBJECTS_PER_STEP ? null : (string) $last;
     }
@@ -197,9 +208,22 @@ final class ContentReader
             $found[$i]['entry'] = $row['tt'] . ':' . $row['ord'];
         }
         foreach ($this->group($found, 'o', 'tax', 'entry') as $pair) {
-            $emit($this->set('term_relationships', $pair[0], $pair[1], $pair[2], false, $rows));
+            $emit($this->hidden('term_relationships', Canon::pairKey($pair[0], $pair[1]), ['object_id' => $pair[0]])
+                ?? $this->set('term_relationships', $pair[0], $pair[1], $pair[2], false, $rows));
         }
         return count($ids) < self::RELATIONS_PER_STEP ? null : (string) $last;
+    }
+
+    /**
+     * Der Datensatz ohne Abdruck für eine Zeile, die der Pull pseudonymisiert – null, wenn der
+     * Schalter aus ist oder keine Regel des Anonymizers die Zeile trifft.
+     *
+     * @param array<string, string|null> $row die Spalten, an denen die Regeln die Zeile erkennen
+     * @return array<string, mixed>|null
+     */
+    private function hidden(string $table, string $key, array $row): ?array
+    {
+        return $this->hidePseudonymized && Anonymizer::touches($table, $row) ? self::without($table, $key, 'pseudonymized') : null;
     }
 
     /**

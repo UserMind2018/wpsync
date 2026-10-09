@@ -11,7 +11,10 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
 
 ### Neu
 - `wpsync pull <site> --content`: Manifest der sieben Inhaltstabellen (Fingerabdruck je Zeile,
-  Meta-Paar und Zuordnung, keine Werte), `map.json`, Baseline, `unfaithful.jsonl`, `env.json` und
+  Meta-Paar und Zuordnung, keine Werte; für Zeilen, die der Pull pseudonymisiert, auch kein
+  Fingerabdruck – `h: null`, `why: "pseudonymized"`), `map.json`, Baseline, `unfaithful.jsonl`
+  (Gründe `differs`, `pseudonymized`, `unnormalizable`, `key_encoding`, `unnormalizable_local`,
+  `local_only`), `env.json` und
   `summary.json` unter `<site>/.wpsync/content/`; Ergebnis zusätzlich
   `content: {rows, unfaithful, id_max, canon_version, reloaded}`, Phase `content`. Lädt alle
   sieben Inhaltstabellen neu, sobald sich eine geändert hat oder der Stand fehlt. Braucht
@@ -41,6 +44,10 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
 
 ### Sicherheit
+- Agent: `/content/manifest` liefert für Zeilen, die der Pull pseudonymisiert (Bestellungen,
+  pseudonymisierte Meta-Schlüssel, `admin_email`/`new_admin_email`), keinen Fingerabdruck des
+  echten Werts – ein ungesalzener Abdruck von IP, Postleitzahl, Telefon oder E-Mail liesse sich
+  offline erraten. Mit `--no-anonymize` bleiben die Abdrücke
 - Agent: Serialisierte Werte mit übergrossen Längenangaben oder tausenden verschachtelten
   Ebenen brechen weder das Manifest noch `staging create` ab – sie gelten als nicht lesbar
   (Tiefe insgesamt höchstens 64, verschachtelte serialisierte Strings zählen mit)

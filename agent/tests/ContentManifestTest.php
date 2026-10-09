@@ -143,6 +143,21 @@ final class ContentManifestTest extends TestCase
         $this->assertStringContainsString("NOT IN ('shop_order')", $sql);
     }
 
+    /** Security-Review M1: kein Abdruck für das, was der Pull pseudonymisiert – ausser mit plain_pii */
+    public function testPseudonymizedRowsCarryNoFingerprintUnlessThePullIsPlain(): void
+    {
+        $rows = [
+            ['option_id' => '1', 'option_name' => 'admin_email', 'option_value' => 'chef@kunde.de'],
+            ['option_id' => '2', 'option_name' => 'blogname', 'option_value' => 'Kunde'],
+        ];
+        $this->db->answer('/FROM `wp_options`/', $rows);
+        $lines = $this->page(['t' => 6, 'a' => '']);
+        $this->assertSame(['t' => 'options', 'k' => 'admin_email', 'h' => null, 'why' => 'pseudonymized'], $lines[0]);
+        $this->assertNotNull($lines[1]['h']);
+        $plain = $this->page(['t' => 6, 'a' => ''], Scope::fromArray(['plain_pii' => true]));
+        $this->assertSame(Canon::hash('options', 'admin_email', Canon::columns(['option_value'], ['option_value' => 'chef@kunde.de'])), $plain[0]['h']);
+    }
+
     public function testMultisiteIsNotPushable(): void
     {
         $GLOBALS['wpsync_test_multisite'] = true;

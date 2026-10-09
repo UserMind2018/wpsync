@@ -292,4 +292,40 @@ final class AnonymizerTest extends TestCase
         $this->assertSame([], Anonymizer::metaKeys('terms'));
         $this->assertContains('user_email', Anonymizer::columns('users', true));
     }
+
+    /** Security-Review M1: touches() sagt für eine Zeile voraus, ob rows() etwas daran ersetzen kann */
+    public function testTouchesFollowsTheRules(): void
+    {
+        $this->assertTrue(Anonymizer::touches('posts', ['post_type' => 'shop_order']));
+        $this->assertFalse(Anonymizer::touches('posts', ['post_type' => 'page']));
+        $this->assertTrue(Anonymizer::touches('posts', []), 'ohne die Spalte der Bedingung: sichere Seite');
+        $this->assertTrue(Anonymizer::touches('postmeta', ['meta_key' => '_billing_email']));
+        $this->assertFalse(Anonymizer::touches('postmeta', ['meta_key' => '_elementor_data']));
+        $this->assertTrue(Anonymizer::touches('postmeta', []), 'ohne Schlüsselspalte: sichere Seite');
+        $this->assertTrue(Anonymizer::touches('options', ['option_name' => 'admin_email']));
+        $this->assertFalse(Anonymizer::touches('options', ['option_name' => 'blogname']));
+        $this->assertTrue(Anonymizer::touches('users', ['ID' => '1']), 'set ohne when: jede Zeile');
+        $this->assertTrue(Anonymizer::touches('comments', ['comment_type' => 'comment']));
+        foreach (['terms', 'term_taxonomy', 'term_relationships', 'termmeta', 'wc_order_stats', 'gibt_es_nicht'] as $table) {
+            $this->assertFalse(Anonymizer::touches($table, []), $table);
+        }
+    }
+
+    /** touches() und rows() dürfen nie auseinanderlaufen: was rows() ändert, hat touches() angekündigt. */
+    public function testWhateverRowsChangesTouchesAnnounced(): void
+    {
+        $rows = [
+            'posts'    => [['post_type' => 'shop_order', 'post_password' => 'wc_order_x', 'post_excerpt' => 'Notiz'], ['post_type' => 'page', 'post_password' => 'x', 'post_excerpt' => 'y']],
+            'postmeta' => [['meta_key' => '_customer_ip_address', 'meta_value' => '203.0.113.7'], ['meta_key' => '_x', 'meta_value' => '203.0.113.7']],
+            'options'  => [['option_name' => 'new_admin_email', 'option_value' => 'a@kunde.de'], ['option_name' => 'blogname', 'option_value' => 'a@kunde.de']],
+            'termmeta' => [['meta_key' => '_billing_email', 'meta_value' => 'a@kunde.de']],
+            'terms'    => [['name' => 'a@kunde.de', 'slug' => 'a']],
+        ];
+        foreach ($rows as $table => $list) {
+            foreach ($list as $row) {
+                $changed = $this->one('wp_' . $table, $row) !== $row;
+                $this->assertSame($changed, Anonymizer::touches($table, $row), $table . ' ' . json_encode($row));
+            }
+        }
+    }
 }

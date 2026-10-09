@@ -141,6 +141,37 @@ final class Anonymizer
     }
 
     /**
+     * Kann rows() an dieser Zeile etwas ersetzen? Dieselben Regeln, ohne Schlüssel und ohne die
+     * Werte anzusehen – für alles, was statt des Pseudonyms nur einen Abdruck des echten Werts
+     * herausgäbe (Inhalts-Manifest). Im Zweifel ja: fehlt der Zeile die Spalte einer Bedingung oder
+     * die Schlüsselspalte einer meta-Regel, gilt die Regel.
+     *
+     * @param string                     $table Tabelle ohne Präfix
+     * @param array<string, string|null> $row   die Spalten, die der Aufrufer kennt
+     */
+    public static function touches(string $table, array $row): bool
+    {
+        foreach (self::rules()[$table] ?? [] as $rule) {
+            if (isset($rule['when'])) {
+                list($column, $values) = $rule['when'];
+                if (array_key_exists($column, $row) && !in_array((string) $row[$column], $values, true)) {
+                    continue;
+                }
+            }
+            if (($rule['set'] ?? []) !== []) {
+                return true;
+            }
+            if (isset($rule['meta'])) {
+                list($keyColumn, , $keys) = $rule['meta'];
+                if (!array_key_exists($keyColumn, $row) || isset($keys[(string) $row[$keyColumn]])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * @param list<array<string, string|null>> $rows Zeilen mit Spaltennamen als Schlüssel
      * @return list<array<string, string|null>>
      */

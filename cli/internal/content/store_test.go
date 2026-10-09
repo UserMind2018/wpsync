@@ -64,6 +64,47 @@ func TestCompareFindsUnfaithfulRows(t *testing.T) {
 	}
 }
 
+// A manifest row without a fingerprint names its reason; unfaithful.jsonl hands it on – but only a
+// plain lower-case word, the manifest comes from the site.
+func TestCompareHandsOnTheReasonOfTheManifest(t *testing.T) {
+	dir := t.TempDir()
+	f := Paths(dir)
+	write(t, f.Manifest, `{"head":{"canon_version":1}}`+"\n"+
+		`{"t":"options","k":"admin_email","h":null,"why":"pseudonymized"}`+"\n"+
+		`{"t":"postmeta","k":"7\u0000_billing_email","h":null,"why":"pseudonymized"}`+"\n"+
+		`{"t":"posts","k":"3","h":null,"why":"unnormalizable"}`+"\n"+
+		`{"t":"posts","k":"4","h":null,"why":"key_encoding"}`+"\n"+
+		`{"t":"posts","k":"5","h":null}`+"\n"+
+		`{"t":"posts","k":"6","h":null,"why":"Not A Reason\u001b[31m"}`+"\n"+
+		`{"t":"posts","k":"7","h":null,"why":"`+strings.Repeat("a", 33)+`"}`+"\n"+
+		`{"t":"posts","k":"8","h":null,"why":""}`+"\n")
+	var baseline strings.Builder
+	for _, key := range []string{`"options","k":"admin_email"`, `"postmeta","k":"7\u0000_billing_email"`, `"posts","k":"3"`, `"posts","k":"4"`,
+		`"posts","k":"5"`, `"posts","k":"6"`, `"posts","k":"7"`, `"posts","k":"8"`} {
+		baseline.WriteString(`{"t":` + key + `,"h":"aa","row":{},"p":false,"why":"option"}` + "\n")
+	}
+	write(t, f.Baseline, baseline.String())
+	rows, bad, err := Compare(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != 8 || bad != 8 {
+		t.Fatalf("rows=%d bad=%d", rows, bad)
+	}
+	data, _ := os.ReadFile(f.Unfaithful)
+	want := `{"t":"options","k":"admin_email","why":"pseudonymized"}` + "\n" +
+		`{"t":"postmeta","k":"7\u0000_billing_email","why":"pseudonymized"}` + "\n" +
+		`{"t":"posts","k":"3","why":"unnormalizable"}` + "\n" +
+		`{"t":"posts","k":"4","why":"key_encoding"}` + "\n" +
+		`{"t":"posts","k":"5","why":"unnormalizable"}` + "\n" +
+		`{"t":"posts","k":"6","why":"unnormalizable"}` + "\n" +
+		`{"t":"posts","k":"7","why":"unnormalizable"}` + "\n" +
+		`{"t":"posts","k":"8","why":"unnormalizable"}` + "\n"
+	if string(data) != want {
+		t.Fatalf("unfaithful:\n%s", data)
+	}
+}
+
 func TestMapIsWrittenWithItsID(t *testing.T) {
 	dir := t.TempDir()
 	m := Map{CanonVersion: 1, Variants: []string{"plain", "esc1", "esc2"}, Live: agentapi.ContentOrigins{Home: "https://kunde.de", SiteURL: "https://kunde.de"},

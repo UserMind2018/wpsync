@@ -400,10 +400,12 @@ echo "nach Grund:"
 jq -r '.why' "$CONTENT/unfaithful.jsonl" | sort | uniq -c
 echo "Schlüssel:"
 jq -r '[.why, .t, (.k | gsub("\u0000"; " / "))] | @tsv' "$CONTENT/unfaithful.jsonl" | sort | head -n 100
-# Genau diese drei: die Admin-Adresse, die der Pull pseudonymisiert (gesperrte Option, AC-148),
-# und die beiden Fixtures mit dem Platzhalter im Rohwert. Alles andere kommt treu an.
+# Genau diese drei: die Admin-Adresse, die der Pull pseudonymisiert (gesperrte Option, AC-148) –
+# für sie nennt das Manifest keinen Abdruck des echten Werts –, und die beiden Fixtures mit dem
+# Platzhalter im Rohwert. Alles andere kommt treu an.
+eq "Manifest: pseudonymisierte Option ohne Abdruck, why" "$(rec "$CONTENT/manifest.jsonl" options admin_email "" '[.h, .why] | tojson')" '[null,"pseudonymized"]'
 eq "unfaithful: nur das Erwartete" "$(jq -r '[.why, .t, (.k | gsub("\u0000"; "/"))] | join(" ")' "$CONTENT/unfaithful.jsonl" | LC_ALL=C sort | tr '\n' ';')" \
-  "differs options admin_email;unnormalizable postmeta $BAD_ID/_e2e_ph;unnormalizable posts $BAD_ID;"
+  "pseudonymized options admin_email;unnormalizable postmeta $BAD_ID/_e2e_ph;unnormalizable posts $BAD_ID;"
 eq "AC-148: die pseudonymisierte Option ist nicht pushbar" "$(rec "$CONTENT/baseline.jsonl" options admin_email "" '[.p, .why] | tojson')" '[false,"option"]'
 
 echo "== content export: stdout gehört den Daten, direkt nach dem Pull = Baseline"

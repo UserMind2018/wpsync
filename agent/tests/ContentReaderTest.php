@@ -302,4 +302,76 @@ final class ContentReaderTest extends TestCase
         $this->assertSame(['t' => 'postmeta', 'k' => "7\0_a", 'h' => null, 'why' => 'unnormalizable'], $records[2]);
         $this->assertNotNull($records[3]['h']);
     }
+
+    private function hiding(FakeWpdb $db): ContentReader
+    {
+        return new ContentReader($db, 'wp_', new ContentOrigin('https://kunde.de'), [], true);
+    }
+
+    /**
+     * Security-Review M1, analog AC-148: Für alles, was der Pull pseudonymisiert, verlässt kein
+     * Abdruck des echten Werts den Server – je Regel des Anonymizers, die eine Inhaltstabelle trifft.
+     */
+    public function testWhatThePullPseudonymizesCarriesNoFingerprint(): void
+    {
+        $covered = 0;
+        foreach (\WpSync\Anonymizer::postTypes() as $i => $type) {
+            $db = new FakeWpdb();
+            $db->answer('/FROM `wp_posts`/', [
+                $this->post((string) (10 + $i), ['post_type' => $type, 'post_password' => 'wc_order_AbC', 'post_excerpt' => 'Bitte klingeln']),
+                $this->post('99'),
+            ], []);
+            $hidden = $this->all($this->hiding($db), false, ['posts']);
+            $this->assertSame(['t' => 'posts', 'k' => (string) (10 + $i), 'h' => null, 'why' => 'pseudonymized'], $hidden[0], $type);
+            $this->assertMatchesRegularExpression('/^[0-9a-f]{64}\z/', (string) $hidden[1]['h'], 'andere Beitragstypen behalten ihren Abdruck');
+            $db = new FakeWpdb();
+            $db->answer('/FROM `wp_posts`/', [$this->post((string) (10 + $i), ['post_type' => $type])], []);
+            $this->assertMatchesRegularExpression('/^[0-9a-f]{64}\z/', (string) $this->all($this->reader($db), false, ['posts'])[0]['h'], 'ohne Schalter: ' . $type);
+            $covered++;
+        }
+        foreach (['postmeta' => 'post_id', 'termmeta' => 'term_id'] as $table => $column) {
+            foreach (\WpSync\Anonymizer::metaKeys($table) as $key) {
+                $rows = [['o' => '7', 'k' => $key, 'v' => '203.0.113.7'], ['o' => '7', 'k' => '_e2e_plain', 'v' => 'x']];
+                $db   = new FakeWpdb();
+                $db->answer('/SELECT DISTINCT m\.`' . $column . '`/', ['7'], []);
+                $db->answer('/AS o, m\.`meta_key` AS k/', $rows);
+                $hidden = $this->all($this->hiding($db), false, [$table]);
+                $this->assertSame(['t' => $table, 'k' => "7\0" . $key, 'h' => null, 'why' => 'pseudonymized'], $hidden[0], $key);
+                $this->assertNotNull($hidden[1]['h']);
+                $db = new FakeWpdb();
+                $db->answer('/SELECT DISTINCT m\.`' . $column . '`/', ['7'], []);
+                $db->answer('/AS o, m\.`meta_key` AS k/', $rows);
+                $this->assertSame(Canon::hash($table, "7\0" . $key, Canon::set(['203.0.113.7'])), $this->all($this->reader($db), false, [$table])[0]['h'], 'ohne Schalter: ' . $key);
+                $covered++;
+            }
+        }
+        foreach (\WpSync\Anonymizer::metaKeys('options') as $name) {
+            $rows = [['option_id' => '1', 'option_name' => $name, 'option_value' => 'chef@kunde.de'], ['option_id' => '2', 'option_name' => 'blogname', 'option_value' => 'Kunde']];
+            $db   = new FakeWpdb();
+            $db->answer('/FROM `wp_options`/', $rows, []);
+            $hidden = $this->all($this->hiding($db), false, ['options']);
+            $this->assertSame(['t' => 'options', 'k' => $name, 'h' => null, 'why' => 'pseudonymized'], $hidden[0]);
+            $this->assertNotNull($hidden[1]['h']);
+            $db = new FakeWpdb();
+            $db->answer('/FROM `wp_options`/', $rows, []);
+            $this->assertSame(Canon::hash('options', $name, Canon::columns(['option_value'], ['option_value' => 'chef@kunde.de'])), $this->all($this->reader($db), false, ['options'])[0]['h']);
+            $covered++;
+        }
+        $this->assertGreaterThan(20, $covered);
+        // Tabellen, für die es heute keine Regel gibt: bekommt eine davon eine, muss dieser Test sie abdecken.
+        foreach (['terms', 'term_taxonomy', 'term_relationships'] as $table) {
+            $this->assertFalse(\WpSync\Anonymizer::changes('wp_' . $table, 'wp_'), $table);
+        }
+        $this->assertSame([], \WpSync\Anonymizer::columns('posts', true), 'posts: nur Regeln mit when');
+        $this->assertSame([], \WpSync\Anonymizer::columns('postmeta', false), 'postmeta: nur meta-Regeln');
+        $this->assertSame([], \WpSync\Anonymizer::columns('options', false), 'options: nur meta-Regeln');
+    }
+
+    /** Auch mit Werten (rows) verlässt eine pseudonymisierte Zeile den Leser ohne row. */
+    public function testAPseudonymizedRowNeverCarriesItsValues(): void
+    {
+        $db = new FakeWpdb();
+        $db->answer('/FROM `wp_options`/', [['option_id' => '1', 'option_name' => 'admin_email', 'option_value' => 'chef@kunde.de']], []);
+        $this->assertSame([['t' => 'options', 'k' => 'admin_email', 'h' => null, 'why' => 'pseudonymized']], $this->all($this->hiding($db), true, ['options']));
+    }
 }
