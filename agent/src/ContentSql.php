@@ -205,6 +205,19 @@ final class ContentSql implements ContentStore
         return $out;
     }
 
+    public function relations(array $objectIds, bool $lock): array
+    {
+        $out = [];
+        foreach (array_chunk(array_values(array_unique(array_map('strval', $objectIds))), self::CHUNK) as $chunk) {
+            $sql = 'SELECT `object_id` AS o, `term_taxonomy_id` AS tt FROM ' . $this->quoted('term_relationships')
+                . ' WHERE `object_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ')' . ($lock ? ' FOR UPDATE' : '');
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                $out[(string) $row['o']][] = (string) $row['tt'];
+            }
+        }
+        return $out;
+    }
+
     public function purge(string $table, string $key): void
     {
         switch ($table) {

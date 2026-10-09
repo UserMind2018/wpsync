@@ -527,4 +527,27 @@ final class ContentCheckTest extends TestCase
         $e = $this->refused('unsafe_value', [ContentFixtures::row('insert', 'postmeta', "219\0_x", 'absent', ['values' => ['harmlos']])], [], $target);
         $this->assertSame([['table' => 'postmeta', 'key' => "219\0_x"]], $e->keys());
     }
+
+    /**
+     * Eine verwaiste Zuordnung auf dem Ziel – (object_id, term_taxonomy_id) ohne term_taxonomy-Zeile –
+     * sieht kein Abdruck. Träfe das Paket dieselbe Stelle, scheiterte das Schreiben am
+     * Primärschlüssel: das fällt vorher auf, mit dem Schlüssel.
+     */
+    public function testAnOrphanedRelationshipInTheWayIsNamed(): void
+    {
+        $rows = [
+            ContentFixtures::row('insert', 'terms', '1000001', 'absent', ['name' => 'Neu', 'slug' => 'neu', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '1000001', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => ['5:0', '1000002:0']]),
+        ];
+        $this->check($rows)->run();
+
+        $this->store->orphans = ['219' => ['1000002']];
+        $e                    = $this->refused('blocked_row', $rows);
+        $this->assertSame([['table' => 'term_relationships', 'key' => "219\0category"]], $e->keys());
+        $this->assertStringContainsString('verwaist', $e->getMessage());
+
+        $this->store->orphans = ['219' => ['77'], '220' => ['1000002']]; // nicht an derselben Stelle
+        $this->check($rows)->run();
+    }
 }

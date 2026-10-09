@@ -56,6 +56,7 @@ final class ContentCheck
         $this->lists();
         $this->values();
         $this->ids();
+        $this->orphans($lock);
         $this->references();
         $this->files($uploads);
     }
@@ -417,6 +418,44 @@ final class ContentCheck
         }
         if ($conflict !== []) {
             throw new ContentException(ContentException::CONFLICT, 'Auf dem Ziel seit dem Pull geändert: ' . count($conflict) . ' Zeile(n) – erneut ziehen.', $conflict);
+        }
+    }
+
+    /**
+     * Eine Zuordnung, die das Paket schreibt, darf auf dem Ziel nicht schon verwaist liegen: eine
+     * Zeile (object_id, term_taxonomy_id) ohne term_taxonomy-Zeile gehört zu keiner Taxonomie, steht
+     * also in keinem Abdruck – und das Schreiben scheiterte an ihrem Primärschlüssel.
+     */
+    private function orphans(bool $lock): void
+    {
+        $objects = [];
+        foreach ($this->rows['term_relationships'] ?? [] as $key => $row) {
+            if ($row['values'] !== []) {
+                $objects[] = ContentState::split((string) $key)[0];
+            }
+        }
+        if ($objects === []) {
+            return;
+        }
+        $raw = $this->target->store->relations($objects, $lock);
+        $bad = [];
+        foreach ($this->rows['term_relationships'] ?? [] as $key => $row) {
+            $key   = (string) $key;
+            $known = [];
+            foreach ((array) (($this->state['term_relationships'][$key] ?? [])['values'] ?? []) as $entry) {
+                $known[] = explode(':', (string) $entry)[0];
+            }
+            foreach ($row['values'] as $entry) {
+                $id = explode(':', (string) $entry)[0];
+                // Auf dem Ziel vorhanden, aber nicht unter dieser Taxonomie sichtbar – und eine andere hat blockedRelations() schon abgelehnt.
+                if (in_array($id, $raw[ContentState::split($key)[0]] ?? [], true) && !in_array($id, $known, true)) {
+                    $bad[] = ContentException::key('term_relationships', $key);
+                    continue 2;
+                }
+            }
+        }
+        if ($bad !== []) {
+            throw new ContentException(ContentException::BLOCKED, 'Auf dem Ziel liegen an denselben Stellen verwaiste Zuordnungen (ohne term_taxonomy-Zeile) – erst dort aufräumen.', $bad);
         }
     }
 

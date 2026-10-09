@@ -425,6 +425,13 @@ final class ContentSqlTest extends TestCase
         ], $this->db->queries);
     }
 
+    public function testReadsTheRawRelationshipsOfAnObject(): void
+    {
+        $this->db->answer('/FROM `wp_term_relationships`/', [['o' => '219', 'tt' => '3'], ['o' => '219', 'tt' => '77'], ['o' => '220', 'tt' => '3']]);
+        $this->assertSame(['219' => ['3', '77'], '220' => ['3']], $this->sql()->relations(['219', '220', '219'], true));
+        $this->assertSame('SELECT `object_id` AS o, `term_taxonomy_id` AS tt FROM `wp_term_relationships` WHERE `object_id` IN (219,220) FOR UPDATE', $this->db->queries[0], 'ohne JOIN: auch Zuordnungen ohne term_taxonomy-Zeile');
+    }
+
     /** §7.8: auf Staging nur die Tabellen der Kopie – der Store kennt keine anderen Namen. */
     public function testUsesExactlyTheGivenTables(): void
     {

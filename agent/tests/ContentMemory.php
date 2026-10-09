@@ -22,6 +22,8 @@ final class ContentMemory implements ContentStore
     public $locked = [];
     /** @var list<string> "write tabelle:schlüssel", "delete …", "purge …", "begin", "commit", "rollback" */
     public $log = [];
+    /** @var array<string, list<string>> object_id → term_taxonomy_ids verwaister Zuordnungen (ohne term_taxonomy-Zeile) */
+    public $orphans = [];
     /** @var int|null der wievielte write() scheitert (1 = der erste) */
     public $failWrite = null;
     /** @var bool jedes read() scheitert */
@@ -130,6 +132,25 @@ final class ContentMemory implements ContentStore
         foreach ($this->data['term_taxonomy'] ?? [] as $row) {
             if (in_array((string) $row['term_id'], array_map('strval', $termIds), true)) {
                 $out[(string) $row['term_id']][] = (string) $row['taxonomy'];
+            }
+        }
+        return $out;
+    }
+
+    public function relations(array $objectIds, bool $lock): array
+    {
+        $out = [];
+        foreach ($objectIds as $id) {
+            $id = (string) $id;
+            foreach ($this->data['term_relationships'] ?? [] as $pair => $state) {
+                if (ContentState::split((string) $pair)[0] === $id) {
+                    foreach ($state['values'] as $entry) {
+                        $out[$id][] = explode(':', (string) $entry)[0];
+                    }
+                }
+            }
+            foreach ($this->orphans[$id] ?? [] as $tt) {
+                $out[$id][] = (string) $tt;
             }
         }
         return $out;

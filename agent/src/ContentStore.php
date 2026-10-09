@@ -59,6 +59,17 @@ interface ContentStore
     public function aliases(string $table, array $keys): array;
 
     /**
+     * Alle Zuordnungen der Objekte, roh: auch die ohne term_taxonomy-Zeile (verwaist), die read()
+     * keiner Taxonomie zuordnen kann.
+     *
+     * @param list<string> $objectIds
+     * @param bool         $lock      wie bei read()
+     * @return array<string, list<string>> object_id → term_taxonomy_ids
+     * @throws ContentException
+     */
+    public function relations(array $objectIds, bool $lock): array;
+
+    /**
      * Was an einem eingefügten Objekt hängt, wenn es wieder verschwindet: posts → alle Meta und
      * Zuordnungen des Beitrags, terms → alle Meta des Terms, term_taxonomy → alle Zuordnungen.
      *
