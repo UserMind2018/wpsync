@@ -171,6 +171,51 @@ final class ContentPostActionsTest extends TestCase
         $this->assertSame([], $none);
         exec('rm -rf ' . escapeshellarg($dir));
     }
+
+    /** P4 A15, AC-193: hat ein Push active_plugins geändert, gehen die Option aus dem Object-Cache, der Plugin-Cache und die Rewrite-Regeln. */
+    public function testAChangedPluginListClearsItsCaches(): void
+    {
+        $changes = [
+            'posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => true,
+            'plugins' => ['added' => ['kunde/kunde.php'], 'removed' => [], 'h' => str_repeat('a', 64)],
+        ];
+        $this->assertSame([
+            ['step' => 'object_cache', 'ok' => true],
+            ['step' => 'plugins_cache', 'ok' => true],
+            ['step' => 'rewrite_rules', 'ok' => true],
+        ], ContentPostActions::live($changes, $this->db, 'wp_yoast_indexable'));
+        $this->assertSame([
+            'wp_cache_delete ["active_plugins","options"]',
+            'wp_cache_delete ["alloptions","options"]',
+            'wp_cache_delete ["notoptions","options"]',
+            'wp_cache_delete ["plugins","plugins"]',
+            'delete_option ["rewrite_rules"]',
+        ], $this->calls());
+        $this->assertSame([], $this->db->queries);
+
+        // Ein Fehlschlag steht in post_actions und hält nichts auf.
+        $GLOBALS['wpsync_post_actions']      = [];
+        $GLOBALS['wpsync_post_actions_fail'] = ['wp_cache_delete'];
+        $this->assertSame([
+            ['step' => 'object_cache', 'ok' => false],
+            ['step' => 'plugins_cache', 'ok' => false],
+            ['step' => 'rewrite_rules', 'ok' => true],
+        ], ContentPostActions::live($changes, $this->db, ''));
+        $GLOBALS['wpsync_post_actions_fail'] = [];
+
+        // In der Kopie gibt es weder Object-Cache noch Plugin-Cache: dort nur die Rewrite-Regeln, per SQL.
+        $store = new ContentMemory(['options' => ['rewrite_rules' => ['option_id' => '9', 'option_name' => 'rewrite_rules', 'option_value' => 'a:0:{}', 'autoload' => 'yes']]]);
+        $this->assertSame([['step' => 'rewrite_rules', 'ok' => true]], ContentPostActions::staging($changes, $store, $this->db, '', '', false));
+        $this->assertArrayNotHasKey('rewrite_rules', $store->data['options']);
+    }
+
+    /** Ein Satz, der an der Liste nichts geändert hat (A11), löst keinen der Schritte aus. */
+    public function testAnUnchangedPluginListNeedsNoPluginSteps(): void
+    {
+        $changes = ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => [], 'rewrite' => false, 'plugins' => ['added' => [], 'removed' => [], 'h' => null]];
+        $this->assertSame([['step' => 'object_cache', 'ok' => true]], ContentPostActions::live($changes, $this->db, ''));
+        $this->assertNotContains('wp_cache_delete ["plugins","plugins"]', $this->calls());
+    }
 }
 
 /** Nur was dieser Test braucht – ContentFixtures.php zieht Klassen nach, die hier nicht geladen sind. */

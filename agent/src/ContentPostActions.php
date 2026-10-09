@@ -57,6 +57,14 @@ final class ContentPostActions
             wp_cache_delete('alloptions', 'options');
             wp_cache_delete('notoptions', 'options');
         });
+        if (in_array(ContentPlugins::OPTION, $options, true)) {
+            // Der Push hat die Liste der aktiven Plugins geändert (P4 A15): was get_plugins() sich gemerkt hat,
+            // gilt nicht mehr. Im Core ist die Gruppe nicht persistent – der Schritt ist für Drop-ins, die das
+            // nicht beachten. Die Option selbst samt alloptions hat object_cache eben geleert.
+            self::step($steps, 'plugins_cache', static function (): void {
+                wp_cache_delete('plugins', 'plugins');
+            });
+        }
         if (class_exists('\Elementor\Plugin', false)) {
             self::step($steps, 'elementor_css', static function (): void {
                 \Elementor\Plugin::$instance->files_manager->clear_cache();
