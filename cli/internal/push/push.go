@@ -931,12 +931,15 @@ func Run(o Options) error {
 		return err
 	}
 	if sw.any() {
+		// Not checked: the agent names no page in the admin context at all (NR-8), or one that is not
+		// of the paired site and was dropped.
+		checked := len(plan.Plugins.HealthURLs) > 0
 		for _, admin := range plan.Plugins.HealthURLs {
-			if !slices.Contains(urls, admin) {
-				fmt.Fprintln(o.Out, "  ! Plugins im Admin-Kontext prüft dieser Push nicht: die Seite, die der Agent dafür nennt, gehört nicht zur gekoppelten Adresse (http/https, www?)")
-				report.Warnings = append(report.Warnings, WarningAdminCheckSkipped)
-				break
-			}
+			checked = checked && slices.Contains(urls, admin)
+		}
+		if !checked {
+			fmt.Fprintln(o.Out, "  ! Plugins im Admin-Kontext prüft dieser Push nicht: der Agent nennt dafür keine Seite, oder sie gehört nicht zur gekoppelten Adresse (http/https, www?)")
+			report.Warnings = append(report.Warnings, WarningAdminCheckSkipped)
 		}
 	}
 	before := check(o.ctx(), o.HTTP, urls, o.pause, acc)
@@ -1103,6 +1106,18 @@ func Run(o Options) error {
 	if sw.any() && committed.Content != nil && len(worse) == 0 {
 		if step := cacheStepFailed(committed.Content.PostActions); step != "" {
 			worse = []string{fmt.Sprintf("die Nacharbeit %s ist auf der Site nicht gelungen – ob die neue Liste der Plugins schon gilt, ist offen; ungeprüft wird nicht bestätigt", step)}
+		}
+	}
+	// And a missing read-back is no passed one (Nach-Review NR-3): on live, a push that really switched
+	// something needs the agent's word that WordPress loads the new list. The copy has no object cache
+	// of its own and no such step.
+	if target != TargetStaging && report.Plugins != nil && len(report.Plugins.Activated)+len(report.Plugins.Deactivated) > 0 && len(worse) == 0 {
+		var steps []agentapi.PostAction
+		if committed.Content != nil {
+			steps = committed.Content.PostActions
+		}
+		if !slices.ContainsFunc(steps, func(a agentapi.PostAction) bool { return a.Step == "plugins_effective" && a.OK }) {
+			worse = []string{"der Agent hat nicht bestätigt, dass WordPress die neue Liste der Plugins lädt (Nacharbeit plugins_effective fehlt) – ungeprüft wird nicht bestätigt"}
 		}
 	}
 	if len(worse) > 0 {

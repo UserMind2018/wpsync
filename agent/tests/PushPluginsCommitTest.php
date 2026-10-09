@@ -58,6 +58,7 @@ final class PushPluginsCommitTest extends PushPluginsFlowCase
         $this->assertSame([
             ['step' => 'object_cache', 'ok' => true],
             ['step' => 'plugins_cache', 'ok' => true],
+            ['step' => 'plugins_effective', 'ok' => true], // S4/NR-3: zurückgelesen, was WordPress als Nächstes lädt
             ['step' => 'rewrite_rules', 'ok' => true],
         ], $data['content']['post_actions']);
         $this->assertContains('wp_cache_delete ["active_plugins","options"]', $GLOBALS['wpsync_post_actions']);

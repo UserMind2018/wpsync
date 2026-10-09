@@ -413,7 +413,7 @@ func TestRunReportsThePluginsItSwitched(t *testing.T) {
 			t.Errorf("warnings = %v, want %s", report.Warnings, w)
 		}
 	}
-	if len(report.PostActions) != 1 || report.PostActions[0].Step != "plugins_cache" {
+	if len(report.PostActions) != 2 || report.PostActions[0].Step != "plugins_cache" || report.PostActions[1].Step != "plugins_effective" {
 		t.Errorf("post actions = %+v", report.PostActions)
 	}
 	for _, want := range []string{"aktiviert: plugins/kunde (kunde/kunde.php)", "deaktiviert: plugins/alt (alt/alt.php)", "Aktivierungsroutine", "im WP-Admin einmal deaktivieren und aktivieren"} {
@@ -845,7 +845,7 @@ func TestRunNeverConfirmsAPluginStateWhoseCacheStepFailed(t *testing.T) {
 	}
 	// Ein anderer gescheiterter Schritt (Rewrite-Regeln, ein Cache-Plugin) bleibt, was er war: eine Zeile, kein Abbruch.
 	f := newFakeSite(t)
-	f.actions = []agentapi.PostAction{{Step: "object_cache", OK: true}, {Step: "rewrite_rules", OK: false}}
+	f.actions = []agentapi.PostAction{{Step: "object_cache", OK: true}, {Step: "plugins_effective", OK: true}, {Step: "rewrite_rules", OK: false}}
 	o, _, out := pluginSite(t, f)
 	o.Activate = []string{"plugins/kunde"}
 	if err := Run(o); err != nil {
@@ -996,5 +996,61 @@ func TestPluginsErrorSaysEachReasonOnce(t *testing.T) {
 	// Ohne Einheiten spricht der Agent.
 	if got := (&PluginsError{Reason: "plugins_unsupported", Message: "Auf einer Multisite schaltet wpsync keine Plugins."}).Error(); got != "Auf einer Multisite schaltet wpsync keine Plugins. (plugins_unsupported)" {
 		t.Errorf("message = %s", got)
+	}
+}
+
+// Nach-Review NR-3: ein fehlender Schritt plugins_effective ist nicht „bestanden“. Hat der Push auf Live
+// wirklich etwas geschaltet, verlangt die CLI den Schritt mit ok: true – sonst Rücknahme (Exit 43).
+func TestRunNeedsTheReadBackOfTheListOnLive(t *testing.T) {
+	for name, actions := range map[string][]agentapi.PostAction{
+		"no such step":     {{Step: "object_cache", OK: true}, {Step: "plugins_cache", OK: true}},
+		"no steps at all":  {},
+		"the step, failed": {{Step: "object_cache", OK: true}, {Step: "plugins_effective", OK: false}},
+	} {
+		f := newFakeSite(t)
+		f.actions = actions
+		o, _, out := pluginSite(t, f)
+		o.Activate = []string{"plugins/kunde"}
+		var rolled *RolledBackError
+		if err := Run(o); !errors.As(err, &rolled) || len(rolled.Reasons) != 1 || !strings.Contains(rolled.Reasons[0], "plugins_effective") {
+			t.Fatalf("%s: err = %v\n%s", name, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback") {
+			t.Errorf("%s: routes = %s", name, got)
+		}
+	}
+	// Hat der Satz an der Liste nichts geändert, gibt es nichts zurückzulesen.
+	f := newFakeSite(t)
+	f.inactive = map[string]bool{"plugins/schon-aus": true}
+	f.actions = []agentapi.PostAction{{Step: "object_cache", OK: true}}
+	o, _, out := pluginSite(t, f)
+	o.NoCode, o.Deactivate = true, []string{"plugins/schon-aus"}
+	if err := Run(o); err != nil {
+		t.Fatalf("unchanged: %v\n%s", err, out)
+	}
+	// In der Kopie gibt es keinen Object-Cache und keinen Schritt: dort wird nichts verlangt.
+	f = newFakeSite(t)
+	f.actions = []agentapi.PostAction{{Step: "rewrite_rules", OK: true}}
+	o, _, out = pluginSite(t, f)
+	o.Target = TargetStaging
+	o.Activate = []string{"plugins/kunde"}
+	if err := Run(o); err != nil {
+		t.Fatalf("staging: %v\n%s", err, out)
+	}
+}
+
+// Nach-Review NR-8: nennt der Agent gar keine Seite im Admin-Kontext, fehlt der Check ebenfalls – mit Warnung.
+func TestRunWarnsWhenTheAgentNamesNoAdminPage(t *testing.T) {
+	f := newFakeSite(t)
+	f.adminURL = "-"
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	var report Result
+	o.Report = &report
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !slices.Contains(report.Warnings, WarningAdminCheckSkipped) || !strings.Contains(out.String(), "Plugins im Admin-Kontext prüft dieser Push nicht") {
+		t.Errorf("warnings = %v\n%s", report.Warnings, out)
 	}
 }

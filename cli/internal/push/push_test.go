@@ -456,11 +456,15 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(last.Activate)+len(last.Deactivate) > 0 && !f.noPlugins && !f.noSwitch {
 			if answer["content"] == nil { // the database step ran for the plugin state alone
-				steps := []agentapi.PostAction{{Step: "plugins_cache", OK: true}}
+				steps := []agentapi.PostAction{{Step: "plugins_cache", OK: true}, {Step: "plugins_effective", OK: true}}
 				if f.actions != nil {
 					steps = f.actions
 				}
 				answer["content"] = &agentapi.ContentApplied{PostActions: steps, Seconds: 0.01}
+			}
+			if applied, ok := answer["content"].(*agentapi.ContentApplied); ok && f.actions == nil && last.Content != nil {
+				// with a package the steps are those of the content – plus the read-back of the list
+				applied.PostActions = append(append([]agentapi.PostAction{}, applied.PostActions...), agentapi.PostAction{Step: "plugins_effective", OK: true})
 			}
 			switched := f.switched(last)
 			if f.tamperPlugins != nil {
@@ -543,7 +547,9 @@ func (f *fakeSite) pluginsPlan(req agentapi.PushBeginRequest) *agentapi.PluginsP
 	if req.Target == "staging" {
 		plan.HealthURLs = []string{f.srv.URL + testStaging + "/wp-admin/admin-ajax.php"}
 	}
-	if f.adminURL != "" {
+	if f.adminURL == "-" { // an agent that names no page in the admin context
+		plan.HealthURLs = []string{}
+	} else if f.adminURL != "" {
 		plan.HealthURLs = []string{f.adminURL}
 	}
 	label := func(unit string) (name, version *string) {

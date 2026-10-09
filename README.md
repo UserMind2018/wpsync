@@ -478,8 +478,10 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
   der nicht mehr antwortet, über `rescue.php`. Dasselbe gilt, wenn offen ist, ob die neue Liste
   überhaupt schon geladen wird: Die Liste geht per SQL am Object-Cache vorbei, der Agent leert ihn
   danach (`object_cache`, `plugins_cache`) und liest zurück, was WordPress als Nächstes lädt
-  (`plugins_effective`). Scheitert einer dieser drei Schritte, wird nicht bestätigt, sondern
-  zurückgenommen – sonst hätte der Health-Check den alten Stand geprüft.
+  (`plugins_effective`). Scheitert einer dieser drei Schritte – oder fehlt `plugins_effective` auf
+  Live, obwohl der Push etwas geschaltet hat –, wird nicht bestätigt, sondern zurückgenommen: sonst
+  hätte der Health-Check den alten Stand geprüft. Auf einer Site ohne persistenten Object-Cache
+  ist der Schritt immer `ok`.
 - **Rücknahme.** Für die Liste gilt ein **Delta**, kein Abdruck: Zurückgenommen wird, was der Push
   hinzugefügt hat und noch in der Liste steht; zurück kommt, was er gestrichen hat und noch fehlt.
   Was ein Administrator seither im WP-Admin geschaltet hat, bleibt – und sperrt die Rücknahme nicht.
@@ -558,6 +560,18 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   `[A-Za-z0-9._/ -]` (Klammern, Umlaute), nennt die CLI den Eintrag in der Ausgabe in
   Anführungszeichen; in `--json` steht er unverändert. Zeigt eine Liste nicht alle Einträge (mehr
   als 100), steht daneben `<liste>_total`.
+- **`plugins_effective` kann fälschlich scheitern.** Liefert ein Plugin über die Filter
+  `pre_wp_load_alloptions` oder `alloptions` eine andere Liste, oder schreibt ein gleichzeitiger
+  Request einen veralteten `alloptions`-Stand in den Object-Cache (die bekannte Race von
+  WordPress), sieht der Agent nicht die neue Liste: Der Push geht zurück (Exit 43), ein neuer
+  Versuch geht in der Regel durch. Kommt das veraltete Zurückschreiben erst nach der Prüfung,
+  bleibt es unbemerkt.
+- **Das Recht für die Rücknahme kann verloren gehen.** Hat niemand mehr `activate_plugins` (der
+  einzige Administrator wurde herabgestuft oder gelöscht), lässt sich ein bestätigter Push, der
+  Plugins geschaltet hat, nicht mehr zurückrollen – gewollt.
+- **Ein späterer Push sperrt schon, wenn er eine Einheit nur nennt.** Auch ein Satz, der ein Plugin
+  im gewünschten Zustand vorfand (`unchanged`) oder es auf der Kopie übersprang, zählt für
+  „überholt“; die Sperre löst sich, sobald er zurückgerollt ist.
 - **Kein Downgrade des Agents mit offenen Plugin-Pushes.** Ein Agent 0.8.x kennt das Delta nicht:
   Er nähme einen Push von 0.9.0 zurück, ohne die Liste der Plugins anzufassen – Code zurück, Plugin
   weiter aktiv bzw. weiter aus. Solange Pushes mit Plugin-Zustand unbestätigt sind oder ihr Snapshot
@@ -574,8 +588,8 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   Rücknahme und dem Vermerk dazu, rechnet die Wiederholung das Delta noch einmal: Das Ergebnis
   bleibt der Stand vor dem Push, auch wenn dazwischen niemand die Einträge des Pushs angefasst hat;
   wer sie in diesen Sekunden von Hand schaltet, wird überschrieben.
-- **`admin_check_skipped`.** Nennt der Agent `admin-ajax.php` unter einer anderen Adresse als der
-  gekoppelten (http statt https, mit/ohne www), fällt die Seite aus dem Health-Check; der Push geht
+- **`admin_check_skipped`.** Nennt der Agent `admin-ajax.php` gar nicht oder unter einer anderen
+  Adresse als der gekoppelten (http statt https, mit/ohne www), fällt die Seite aus dem Health-Check; der Push geht
   durch, das Ergebnis trägt die Warnung. Abhilfe: mit der Adresse koppeln, unter der WordPress läuft
   (`siteurl`).
 - Themes schaltet ein Push nicht; `mu-plugins` sind immer aktiv; Einzeldatei-Plugins (`hello.php`)

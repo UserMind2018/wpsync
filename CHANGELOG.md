@@ -33,8 +33,9 @@ Agent ≥ 0.9.0 wie bisher.
 - Der Health-Check prüft zusätzlich `wp-admin/admin-ajax.php` (Plugins im Admin-Kontext)
 - `rescue.hardening` nennt ein Sicherheits-Plugin auch dann, wenn der Satz es erst aktiviert
 - Nacharbeit `plugins_effective`: der Agent liest nach dem Leeren des Object-Cache zurück, welche
-  Liste WordPress als Nächstes lädt. Scheitert sie oder `object_cache`/`plugins_cache`, bestätigt die
-  CLI einen Satz mit Plugin-Zustand nicht, sondern nimmt ihn zurück (Exit 43)
+  Liste WordPress als Nächstes lädt (alloptions, sonst Cache der Option, sonst die Zeile). Scheitert
+  sie oder `object_cache`/`plugins_cache` – oder fehlt sie auf Live, obwohl etwas geschaltet wurde –,
+  bestätigt die CLI einen Satz mit Plugin-Zustand nicht, sondern nimmt ihn zurück (Exit 43)
 - `--to staging`: nur die Tabelle der Kopie; was die Kopie abschaltet, wird dort nicht aktiviert
   (`skipped`)
 - `--json`: im `plan` `plugins` und `hooks_skipped`; im Ergebnis `plugins`, nach einer Rücknahme

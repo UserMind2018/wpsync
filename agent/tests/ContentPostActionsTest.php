@@ -233,9 +233,24 @@ final class ContentPostActionsTest extends TestCase
         $this->assertSame(['object_cache' => true, 'plugins_cache' => true, 'plugins_effective' => false], $steps());
         $GLOBALS['wpsync_alloptions'] = ['active_plugins' => 'kaputt'];
         $this->assertFalse($steps()['plugins_effective']);
-        // Nicht in alloptions (autoload aus) oder ohne Erwartung: der Schritt hat nichts zu beurteilen und fehlt.
+        // Nach-Review NR-3: mit einer Erwartung fehlt der Schritt nie. Steht die Option nicht in alloptions
+        // (autoload aus), zählt, was WordPress dann liest: der Cache der einzelnen Option, sonst die Zeile der Datenbank.
         $GLOBALS['wpsync_alloptions'] = [];
-        $this->assertArrayNotHasKey('plugins_effective', $steps());
+        $GLOBALS['wpsync_cache']      = ['options' => ['active_plugins' => serialize(['kunde/kunde.php'])]];
+        $this->assertTrue($steps()['plugins_effective'], 'aus dem Cache der Option');
+        $GLOBALS['wpsync_cache'] = ['options' => ['active_plugins' => ['old/old.php']]];
+        $this->assertFalse($steps()['plugins_effective'], 'der Cache hält den alten Stand');
+        $GLOBALS['wpsync_cache'] = [];
+        $good = serialize(['kunde/kunde.php']);
+        $this->db->answer('/^SELECT option_value FROM wp_options WHERE option_name = \'active_plugins\'/', $good, serialize(['old/old.php']), '');
+        $this->assertTrue($steps()['plugins_effective'], 'aus der Zeile der Datenbank');
+        $this->assertFalse($steps()['plugins_effective'], 'die Zeile trägt den alten Stand');
+        // Die Option steht als „gibt es nicht“ im Cache: WordPress lüde gar kein Plugin – die Zeile wird dann nicht einmal gefragt.
+        $GLOBALS['wpsync_cache'] = ['options' => ['notoptions' => ['active_plugins' => true]]];
+        $this->assertFalse($steps()['plugins_effective']);
+        $GLOBALS['wpsync_cache'] = [];
+        $this->assertFalse($steps()['plugins_effective'], 'nichts lesbar: nicht geprüft ist nicht bestanden');
+        // Ohne Erwartung (der Push hat nichts geschaltet, oder kein Plugin-Zustand): kein Schritt.
         $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['kunde/kunde.php'])];
         unset($changes['plugins_expect']);
         $this->assertArrayNotHasKey('plugins_effective', array_column(ContentPostActions::live($changes, $this->db, ''), 'ok', 'step'));

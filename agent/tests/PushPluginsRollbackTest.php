@@ -55,7 +55,7 @@ final class PushPluginsRollbackTest extends PushPluginsFlowCase
         $this->assertSame([
             'ok'           => true,
             'status'       => 'rolled_back',
-            'post_actions' => [['step' => 'object_cache', 'ok' => true], ['step' => 'plugins_cache', 'ok' => true], ['step' => 'rewrite_rules', 'ok' => true]],
+            'post_actions' => [['step' => 'object_cache', 'ok' => true], ['step' => 'plugins_cache', 'ok' => true], ['step' => 'plugins_effective', 'ok' => true], ['step' => 'rewrite_rules', 'ok' => true]],
             'plugins'      => ['deactivated' => ['kunde/kunde.php'], 'reactivated' => ['old/old.php']],
         ], $data);
         $this->assertSame([true, 'new'], $seen, 'als die Liste zurückging, lag der neue Code noch (DB → Code)');

@@ -36,9 +36,16 @@ namespace {
     }
 
     /** @return array<string, mixed> was WordPress beim nächsten Laden aus alloptions liest – im Test gesetzt */
-    function wp_load_alloptions(): array
+    function wp_load_alloptions(bool $force_cache = false): array
     {
-        return (array) ($GLOBALS['wpsync_alloptions'] ?? []);
+        $all = $GLOBALS['wpsync_alloptions'] ?? [];
+        return (array) (is_callable($all) ? $all() : $all);
+    }
+
+    /** @return mixed der Object-Cache im Test: $GLOBALS['wpsync_cache'][gruppe][schlüssel], sonst false */
+    function wp_cache_get(string $key, string $group = '', bool $force = false)
+    {
+        return $GLOBALS['wpsync_cache'][$group][$key] ?? false;
     }
 
     function delete_option(string $name): bool

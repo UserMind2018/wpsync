@@ -31,6 +31,11 @@ abstract class PushPluginsFlowCase extends PushRescueFlowCase
             file_put_contents($content . '/plugins/old/old.php', self::OLD);
         }
         PushPlugins::$site = ['php' => '8.1.0', 'wp' => '6.5.2', 'multisite' => false];
+        // Was WordPress auf Live als Nächstes aus alloptions läse: die Zeile des Stores (Schritt plugins_effective).
+        $GLOBALS['wpsync_alloptions'] = function (): array {
+            $row = $this->liveDb->data['options']['active_plugins'] ?? null;
+            return $row === null ? [] : ['active_plugins' => $row['option_value']];
+        };
         PushPlugins::$can  = static function (int $id): bool {
             return $id === 7;
         };
