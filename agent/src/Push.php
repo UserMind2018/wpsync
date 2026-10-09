@@ -782,9 +782,21 @@ final class Push
             }
         }
         try {
-            if (is_array($dirs)) {
-                // Unter der Sperre noch einmal: zwischen sync() oben und der Sperre kann rescue.php den Push
-                // ganz zurückgenommen haben. Dann gibt es nichts mehr zu bestätigen – übernehmen wie sync().
+            if ($dirs !== null) {
+                // Die Zeile im Protokoll noch einmal – unter der Sperre und auch, wenn es keine mehr zu
+                // nehmen gab: eine Rücknahme über den Agent, die inzwischen fertig wurde, hat den Ordner des
+                // Pushs samt Datensatz und Sperrdatei gelöscht und die Zeile abgeschlossen (discard()
+                // schreibt sie, bevor der Ordner verschwindet). Mit der Zeile von vorhin würde sonst
+                // „bestätigt“, was auf der Platte zurückgetauscht ist.
+                $fresh = Store::getPush($push['push_id']);
+                if ($fresh === null) {
+                    return self::error('wpsync_push_state', 'Der Stand von Push ' . $push['push_id'] . ' liess sich nicht lesen – noch einmal versuchen.', 409);
+                }
+                $push = $fresh;
+            }
+            if (is_array($dirs) && $push['status'] === PushRescue::COMMITTED && !$push['pruned']) {
+                // Und der Datensatz: zwischen sync() oben und der Sperre kann rescue.php den Push ganz
+                // zurückgenommen haben. Dann gibt es nichts mehr zu bestätigen – übernehmen wie sync().
                 $record = PushRescue::read($dirs[1], $push['push_id']);
                 if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
                     self::afterRescue($push, $dirs[0], $dirs[1], $record);
@@ -837,7 +849,14 @@ final class Push
             if ($dirs instanceof \WP_Error) {
                 return $dirs;
             }
-            PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
+            // Ohne Datensatz gibt es hier nur noch den Push, dessen Ordner verloren ging (von Hand gelöscht):
+            // eine Rücknahme hätte seine Zeile abgeschlossen, bevor der Ordner verschwand, und confirm()
+            // hat die Zeile eben neu gelesen. Der gepushte Code steht dann unverändert – bestätigen ist
+            // richtig und der einzige Ausweg, sonst sperrte der Push jeden weiteren. Gibt es den Datensatz,
+            // muss er den Status auch tragen.
+            if (PushRescue::read($dirs[1], $push['push_id']) !== null && !PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED)) {
+                return self::error('wpsync_push_state', 'Push ' . $push['push_id'] . ' liess sich nicht bestätigen – noch einmal versuchen.', 409);
+            }
             // Einen bestätigten Push nimmt rescue.php nie zurück: der Umschlag mit den Zugangsdaten hat ausgedient (P3 R14).
             RescueSeal::forget($dirs[1], $push['push_id']);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
@@ -1524,14 +1543,18 @@ final class Push
     {
         $push    = Store::getPush($pushId);
         $content = self::content($push === null ? 'live' : $push['target']);
-        if ($content !== '') {
-            PushSwap::remove($content . '/' . Store::pushDirName() . '/' . $pushId);
-        }
-        $fields = ['status' => $status, 'pruned' => 1];
+        $fields  = ['status' => $status, 'pruned' => 1];
         if ($push !== null && $push['finished'] === null) {
             $fields['finished'] = time();
         }
+        // Erst das Protokoll, dann der Ordner: wer den Ordner (und mit ihm Datensatz und Sperrdatei) nicht
+        // mehr findet, liest in der Zeile nie mehr den Stand von davor (confirm()). Stirbt PHP dazwischen,
+        // bleibt der Ordner einer abgeschlossenen Zeile liegen; pruneOrphans() räumt ihn später weg, soweit
+        // sein Datensatz zurückgerollt oder bestätigt sagt.
         Store::updatePush($pushId, $fields);
+        if ($content !== '') {
+            PushSwap::remove($content . '/' . Store::pushDirName() . '/' . $pushId);
+        }
         self::release($pushId);
     }
 

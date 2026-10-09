@@ -185,6 +185,71 @@ final class PushRescueFlowTest extends PushRescueFlowCase
         $this->assertNull(Push::pending());
     }
 
+    /** @return array<string, array{0: bool}> */
+    public static function agentRollbackWays(): array
+    {
+        return [
+            'die Rücknahme ist fertig, der Ordner des Pushs weg: keine Sperre mehr zu haben' => [false],
+            'confirm hält die Sperre auf der gelöschten Datei: sie gelingt, der Datensatz fehlt' => [true],
+        ];
+    }
+
+    /**
+     * Security-Review P3, NR-1: die Rücknahme über den Agent überholt confirm – nach dessen Blick in
+     * das Protokoll (committed), vor dessen Sperre. Sie endet mit gelöschtem Arbeitsordner und der
+     * Zeile rolled_back. confirm liest die Zeile unter (oder ohne) Sperre neu und bestätigt nichts:
+     * nie „bestätigt“ im Protokoll und der alte Code auf der Platte.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('agentRollbackWays')]
+    public function testAConfirmThatTheAgentRollbackOvertookConfirmsNothing(bool $lockable): void
+    {
+        $old      = $this->liveDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $back     = null;
+        PushRescue::$onLock = function (string $pushId) use ($id, $lockable, &$back): void {
+            if ($pushId !== $id) {
+                return;
+            }
+            PushRescue::$onLock = null;
+            $back               = Push::rollbackPush($id);
+            if ($lockable) {
+                mkdir($this->work($this->live) . '/' . $id); // wie eine Sperre auf der schon gelöschten Datei: sie gelingt, rescue.json ist weg
+            }
+        };
+
+        $error = $this->assertRefused('wpsync_push_state', 409, Push::confirm(['push_id' => $id], self::KEY));
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $back);
+        $this->assertStringContainsString('rolled_back', $error->message);
+        $push = Store::getPush($id);
+        $this->assertSame(['rolled_back', true], [$push['status'], $push['pruned']], 'nicht bestätigt');
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertFileDoesNotExist($this->work($this->live) . '/' . $id . '/rescue.json', 'confirm legt keinen Datensatz neu an');
+    }
+
+    /**
+     * NR-1: beim Aufräumen eines Pushs steht sein Ausgang im Protokoll, bevor sein Ordner verschwindet –
+     * wer den Ordner nicht mehr findet, liest dort nie mehr „committed“. Fehlt der Ordner eines
+     * unbestätigten Pushs wirklich (von Hand gelöscht), bleibt confirm der Ausweg: sonst sperrte er jeden weiteren Push.
+     */
+    public function testAPushWhoseFolderWasLostCanStillBeConfirmed(): void
+    {
+        $source = (string) file_get_contents(__DIR__ . '/../src/Push.php');
+        $body   = substr($source, (int) strpos($source, 'private static function discard('), 900);
+        $this->assertLessThan(strpos($body, 'PushSwap::remove('), strpos($body, 'Store::updatePush('), 'erst das Protokoll, dann der Ordner');
+
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        exec('rm -rf ' . escapeshellarg($this->work($this->live) . '/' . $id));
+        $confirm = Push::confirm(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $confirm, $confirm instanceof \WP_Error ? $confirm->code . ' ' . $confirm->message : '');
+        $this->assertSame('confirmed', Store::getPush($id)['status']);
+        $this->assertNull(Push::pending());
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id);
+    }
+
     /**
      * M1, U18: ein confirm überholt die Rücknahme über den Agent – nach deren Prüfung (unbestätigt:
      * kein Fenster nötig), vor deren Sperre. Unter der Sperre ist der Push bestätigt: die Rücknahme

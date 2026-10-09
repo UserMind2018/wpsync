@@ -74,6 +74,11 @@ sich wie bisher (`content_not_rolled_back`).
   inzwischen zurückgenommen, antwortet es mit 409 `wpsync_push_state`. Die Rücknahme lehnt einen
   bestätigten Push unter der Sperre selbst ab (`rescue.php`: 409 `confirmed`; `/push/rollback`
   für einen eben erst bestätigten: 409 `wpsync_push_state`, danach gilt das Push-Fenster)
+- Wettlauf `confirm` ↔ Rücknahme über den Agent: `/push/confirm` liest die Zeile des Pushs nach dem
+  Warten auf die Sperre neu (auch wenn es keine Sperre mehr zu nehmen gab, weil der Ordner des
+  Pushs schon weg ist) und bestätigt nur noch einen Push, der dann weiter unbestätigt ist – sonst
+  409 `wpsync_push_state`. Beim Aufräumen eines Pushs schreibt der Agent erst das Protokoll, dann
+  löscht er den Ordner
 - Der Vermerk „von einem späteren Push überholt“ (`superseded_by`) wird nur noch unter der Sperre
   des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme
 - Die CLI wertet eine Antwort von `rescue.php` nur noch als Rücknahme, wenn sie
