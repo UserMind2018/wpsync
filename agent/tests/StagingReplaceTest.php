@@ -182,4 +182,54 @@ final class StagingReplaceTest extends TestCase
         $this->assertSame($value, $r->value($value));
         $this->assertSame(1, $r->skipped());
     }
+
+    /**
+     * Security-Review H1.2, H1.3: 40 = strlen('https://example.com' . TAIL) + … – die Längenangabe
+     * stimmt erst, nachdem der Staging-Pfad als Text eingefügt wurde.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function crafted(): array
+    {
+        $len  = strlen('https://example.com' . self::TAIL);
+        $core = 'a:2:{i:0;s:' . $len . ':"https://example.com";i:1;O:8:"stdClass":0:{}}';
+        return [
+            'ohne Leerraum'      => [$core],
+            'Leerzeichen davor'  => [' ' . $core],
+            'Zeilenende danach'  => [$core . "\n"],
+            'als String'         => ['s:' . strlen($core) . ':"' . $core . '";'],
+            'im Array'           => [serialize(['v' => $core, 'u' => 'https://example.com/x'])],
+            'im Array, Leerraum' => [serialize(['v' => "\n" . $core . ' '])],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('crafted')]
+    public function testAnInvalidSerializedValueStaysAsItIsAndIsCounted(string $value): void
+    {
+        $r = $this->r();
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+    }
+
+    public function testWhitespaceAroundASerializedValueKeepsItValid(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            ' ' . serialize(['https://example.com' . self::TAIL . '/x']) . "\n",
+            $r->value(' ' . serialize(['https://example.com/x']) . "\n")
+        );
+        $this->assertSame(0, $r->skipped());
+        $this->assertSame(' ' . serialize(['https://example.com/x']) . "\n", $r->stripValue(' ' . serialize(['https://example.com' . self::TAIL . '/x']) . "\n"));
+    }
+
+    /** Ein verschachtelter, unlesbarer Wert ohne Live-URL hält den Rest nicht auf. */
+    public function testAnUnreadableNestedValueWithoutTheLiveUrlIsNoObstacle(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            serialize(['v' => 's:99:"xyz";', 'u' => 'https://example.com' . self::TAIL . '/x']),
+            $r->value(serialize(['v' => 's:99:"xyz";', 'u' => 'https://example.com/x']))
+        );
+        $this->assertSame(0, $r->skipped());
+    }
 }

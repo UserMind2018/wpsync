@@ -158,4 +158,96 @@ final class ContentOriginTest extends TestCase
             $o->normalize(SerializedWalkerTest::nested('https://kunde.de/x', 3))
         );
     }
+
+    /**
+     * Werte, deren Längenangaben erst mit einer anders langen Origin stimmen (Security-Review H1.2,
+     * H1.3): 24 = strlen('https://staging.kunde.de'), 44 = mit Staging-Pfad hinter https://kunde.de.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function crafted(): array
+    {
+        $out = [];
+        foreach ([24, 44] as $len) {
+            $core = 'a:2:{i:0;s:' . $len . ':"https://kunde.de";i:1;O:8:"stdClass":0:{}}';
+            $out += [
+                "$len ohne Leerraum"      => [$core],
+                "$len Leerzeichen davor"  => [' ' . $core],
+                "$len Zeilenende danach"  => [$core . "\n"],
+                "$len Leerraum beidseits" => ["\t" . $core . " \0"],
+                "$len als String"         => ['s:' . strlen($core) . ':"' . $core . '";'],
+                "$len als String, Leerraum" => ['s:' . (strlen($core) + 1) . ':" ' . $core . '";'],
+                "$len im Array"           => [serialize(['v' => $core, 'u' => 'https://kunde.de/x'])],
+                "$len im Array, Leerraum" => [serialize(['v' => "\n" . $core . ' '])],
+                "$len drei Ebenen"        => [serialize(serialize(['v' => ' ' . $core]))],
+                "$len escaped"            => [' a:1:{i:0;s:' . ($len + 2) . ':"https:\/\/kunde.de";}'],
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Wie viele Strings in diesem Wert WordPress deserialisieren könnte – maybe_unserialize() auf
+     * den Wert selbst und auf jeden String darin.
+     */
+    private static function readable(string $value): int
+    {
+        $data = @unserialize(trim($value), ['allowed_classes' => false]);
+        if ($data === false) {
+            return 0;
+        }
+        $count = 1;
+        $todo  = [$data];
+        while ($todo !== []) {
+            $item = array_pop($todo);
+            if (is_string($item)) {
+                $count += self::readable($item);
+            } elseif (is_array($item) || is_object($item)) {
+                foreach ((array) $item as $member) {
+                    $todo[] = $member;
+                }
+            }
+        }
+        return $count;
+    }
+
+    /**
+     * Invariante: Was sich vorher nicht deserialisieren liess, lässt sich auch nach
+     * normalize → insert mit einer anders langen Origin nicht deserialisieren.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('crafted')]
+    public function testAnInvalidSerializedValueNeverBecomesValid(string $value): void
+    {
+        $live    = new ContentOrigin('https://kunde.de');
+        $targets = [
+            new ContentOrigin('https://staging.kunde.de'),
+            new ContentOrigin('https://kunde.de', new StagingReplace('https://kunde.de', self::TAIL)),
+        ];
+        $normal = $live->normalize($value);
+        foreach ($targets as $target) {
+            $inserted = $normal === null ? null : $target->insert($normal);
+            $this->assertTrue($inserted === null || self::readable($inserted) <= self::readable($value), 'readable after insert: ' . json_encode($inserted));
+        }
+        $this->assertNull($normal, 'the whole value is unreadable');
+
+        // Dasselbe, wenn der Wert schon mit Platzhalter ankommt – etwa aus einem Paket.
+        foreach ([ContentOrigin::PLAIN, ContentOrigin::ESC1] as $mark) {
+            $marked = str_replace(['https://kunde.de', 'https:\/\/kunde.de'], $mark, $value);
+            foreach ($targets as $target) {
+                $inserted = $target->insert($marked);
+                $this->assertTrue($inserted === null || self::readable($inserted) <= self::readable($marked), 'readable after insert: ' . json_encode($inserted));
+            }
+        }
+    }
+
+    public function testWhitespaceAroundASerializedValueSurvivesNormalizeAndInsert(): void
+    {
+        $live   = new ContentOrigin('https://kunde.de');
+        $target = new ContentOrigin('https://staging.kunde.de');
+        $value  = " a:1:{i:0;s:16:\"https://kunde.de\";}\n";
+        $normal = $live->normalize($value);
+        $this->assertSame(' ' . serialize([ContentOrigin::PLAIN]) . "\n", $normal);
+        $this->assertSame($value, $live->insert((string) $normal));
+        $this->assertSame(' ' . serialize(['https://staging.kunde.de']) . "\n", $target->insert((string) $normal));
+    }
 }

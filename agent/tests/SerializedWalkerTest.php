@@ -137,4 +137,45 @@ final class SerializedWalkerTest extends TestCase
         $this->assertLessThan(40 * 1024 * 1024, memory_get_peak_usage() - $before);
         $this->assertSame(self::nested(str_repeat('x', 4 * 1024 * 1024) . 'ABCDEF', 40), $new);
     }
+
+    /** Security-Review H1.2: WordPress beurteilt einen Wert nach trim() – is_serialized() */
+    public function testLooksSerializedJudgesTheTrimmedValue(): void
+    {
+        foreach ([' a:0:{}', "a:0:{}\n", "\t\r\n s:1:\"a\"; \0\x0B", ' N; ', ' i:5;'] as $value) {
+            $this->assertTrue(SerializedWalker::looksSerialized($value), json_encode($value));
+        }
+        foreach ([' ', "\n\n", ' abc ', ' s:1:"a" ', "a:0:{}\u{00A0}"] as $value) {
+            $this->assertFalse(SerializedWalker::looksSerialized($value), json_encode($value));
+        }
+    }
+
+    public function testWhitespaceAroundAValueStaysWhereItIs(): void
+    {
+        $this->assertSame(" a:1:{i:0;s:6:\"ABCDEF\";}\n", SerializedWalker::rewrite(" a:1:{i:0;s:3:\"abc\";}\n", [self::class, 'upper']));
+        $this->assertSame("\ta:0:{} ", SerializedWalker::rewrite("\ta:0:{} ", [self::class, 'upper']));
+        $inner = " a:1:{i:0;s:3:\"abc\";}\r\n";
+        $this->assertSame(
+            serialize(['v' => " a:1:{i:0;s:6:\"ABCDEF\";}\r\n"]),
+            SerializedWalker::rewrite(serialize(['v' => $inner]), [self::class, 'upper'])
+        );
+        $this->assertNull(SerializedWalker::rewrite(' s:99:"abc";', [self::class, 'upper']));
+    }
+
+    /** Security-Review H1.3: ein verschachtelter Wert, der serialisiert aussieht und es nicht ist, wird nie als Text ersetzt */
+    public function testAnUnreadableNestedValueWithAHitMakesTheWholeValueUnreadable(): void
+    {
+        foreach (['s:99:"abc";', ' s:99:"abc";', 'C:3:"Cfg":3:{abc}', 'a:1:{i:0;s:9:"abc";}'] as $broken) {
+            $this->assertNull(SerializedWalker::rewrite(serialize(['v' => $broken]), [self::class, 'upper']), $broken);
+            $this->assertNull(SerializedWalker::rewrite(serialize(['v' => serialize(['w' => $broken])]), [self::class, 'upper']), $broken);
+        }
+    }
+
+    public function testAnUnreadableNestedValueWithoutAHitStaysAsItIs(): void
+    {
+        $value = serialize(['v' => 's:99:"xyz";', 'w' => 'abc', 'c' => 'C:3:"Cfg":3:{xyz}']);
+        $this->assertSame(
+            serialize(['v' => 's:99:"xyz";', 'w' => 'ABCDEF', 'c' => 'C:3:"Cfg":3:{xyz}']),
+            SerializedWalker::rewrite($value, [self::class, 'upper'])
+        );
+    }
 }

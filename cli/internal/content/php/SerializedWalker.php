@@ -18,12 +18,20 @@ final class SerializedWalker
     /** Ziffern einer Länge oder Anzahl: mehr passt in keinen Wert, und als int liefe die Zahl über. */
     private const MAX_DIGITS = 10;
 
+    /** Was trim() an den Rändern entfernt. */
+    private const SPACE = " \n\r\t\v\0";
+
+    /**
+     * Wie is_serialized() von WordPress: beurteilt wird der Wert ohne Leerraum an den Rändern –
+     * maybe_unserialize() liest ihn auch so.
+     */
     public static function looksSerialized(string $value): bool
     {
-        return self::looksAt($value, 0, strlen($value));
+        list($from, $to) = self::trimmed($value, 0, strlen($value));
+        return self::looksAt($value, $from, $to);
     }
 
-    /** looksSerialized() für den Abschnitt [$from, $to) von $s. */
+    /** looksSerialized() für den Abschnitt [$from, $to) von $s, der schon ohne Leerraum ist. */
     private static function looksAt(string $s, int $from, int $to): bool
     {
         return $to > $from
@@ -32,23 +40,37 @@ final class SerializedWalker
             && in_array($s[$to - 1], [';', '}'], true);
     }
 
+    /** @return array{0: int, 1: int} der Abschnitt [$from, $to) ohne das, was trim() an den Rändern entfernt */
+    private static function trimmed(string $s, int $from, int $to): array
+    {
+        $from += strspn($s, self::SPACE, $from, $to - $from);
+        while ($to > $from && strpos(self::SPACE, $s[$to - 1]) !== false) {
+            $to--;
+        }
+        return [$from, $to];
+    }
+
     /**
+     * Leerraum an den Rändern bleibt, wie er ist.
+     *
      * @param callable(string): string $text bekommt den Inhalt jedes Strings, der nicht selbst serialisiert ist
-     * @return string|null der neu geschriebene Wert; null, wenn er sich nicht vollständig lesen liess
+     * @return string|null der neu geschriebene Wert; null, wenn er sich nicht vollständig lesen liess –
+     *                     oder ein String darin serialisiert aussieht, sich nicht lesen lässt und $text ihn ändern würde
      */
     public static function rewrite(string $value, callable $text): ?string
     {
-        $pos = 0;
-        $end = strlen($value);
+        list($pos, $end) = self::trimmed($value, 0, strlen($value));
+        $from = $pos;
         try {
             $new = self::parse($value, $pos, $end, 0, $text);
         } catch (\OverflowException $e) {
             return null; // tiefer als MAX_DEPTH
         }
-        if ($new === null || $pos !== $end || ($new !== $value && !self::valid($new))) {
+        if ($new === null || $pos !== $end) {
             return null;
         }
-        return $new;
+        $out = substr($value, 0, $from) . $new . substr($value, $end);
+        return $out === $value || self::valid($new) ? $out : null;
     }
 
     private static function valid(string $value): bool
@@ -59,18 +81,24 @@ final class SerializedWalker
 
     /**
      * Inhalt eines Strings, der Abschnitt [$from, $to) von $s: selbst serialisiert (doppelt
-     * serialisiert) oder Text.
+     * serialisiert) oder Text. Sieht er serialisiert aus und lässt sich nicht lesen, wird er nie
+     * als Text ersetzt – eine Ersetzung ohne Längenkorrektur könnte aus einem ungültigen Wert einen
+     * gültigen machen.
      *
+     * @return string|null null: unlesbar, und $text würde ihn ändern – der ganze Wert ist dann unlesbar
      * @throws \OverflowException wenn die Verschachtelung MAX_DEPTH übersteigt
      */
-    private static function inner(string $s, int $from, int $to, int $depth, callable $text): string
+    private static function inner(string $s, int $from, int $to, int $depth, callable $text): ?string
     {
-        if (self::looksAt($s, $from, $to)) {
-            $pos = $from;
-            $new = self::parse($s, $pos, $to, $depth + 1, $text);
-            if ($new !== null && $pos === $to) {
-                return $new;
+        list($start, $end) = self::trimmed($s, $from, $to);
+        if (self::looksAt($s, $start, $end)) {
+            $pos = $start;
+            $new = self::parse($s, $pos, $end, $depth + 1, $text);
+            if ($new !== null && $pos === $end) {
+                return substr($s, $from, $start - $from) . $new . substr($s, $end, $to - $end);
             }
+            $whole = substr($s, $from, $to - $from);
+            return (string) $text($whole) === $whole ? $whole : null;
         }
         return (string) $text(substr($s, $from, $to - $from));
     }
@@ -116,7 +144,7 @@ final class SerializedWalker
                 }
                 $pos = $start + $len + 2;
                 $new = self::inner($s, $start, $start + $len, $depth, $text);
-                return 's:' . strlen($new) . ':"' . $new . '";';
+                return $new === null ? null : 's:' . strlen($new) . ':"' . $new . '";';
             case 'E':
                 if (preg_match('/\GE:(\d{1,' . self::MAX_DIGITS . '}):"/', $s, $m, 0, $pos) !== 1) {
                     return null;

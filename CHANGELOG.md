@@ -34,6 +34,18 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   und `staging refresh` schreiben sie jetzt ebenfalls um (bisher blieben sie auf Live gerichtet)
 - Ein Pull ohne `--content`, der eine der sieben Inhaltstabellen neu lädt, verwirft einen
   vorhandenen Inhaltsstand; der nächste `pull --content` baut ihn neu (`reloaded: true`)
+- `staging create`/`staging refresh`: Serialisierte Werte mit Leerraum an den Rändern werden wie
+  von WordPress (`is_serialized()`) als serialisiert erkannt und mit korrigierten Längen
+  umgeschrieben (bisher als Text ersetzt und damit zerstört). Sieht ein String **in** einem
+  serialisierten Wert serialisiert aus, lässt sich nicht lesen und enthält die Live-URL, bleibt
+  der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
+
+### Sicherheit
+- Agent: Serialisierte Werte mit übergrossen Längenangaben oder tausenden verschachtelten
+  Ebenen brechen weder das Manifest noch `staging create` ab – sie gelten als nicht lesbar
+  (Tiefe insgesamt höchstens 64, verschachtelte serialisierte Strings zählen mit)
+- Agent: Eine URL-Ersetzung macht aus einem ungültigen serialisierten Wert nie einen gültigen –
+  weder mit Leerraum an den Rändern noch eine Ebene tiefer
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

@@ -471,7 +471,10 @@ Zeilen.
 - **Normalisiert** heisst: Die eigene Origin der Site ist durch einen Platzhalter ersetzt –
   `⟦wpsync:origin⟧` (Klartext), `⟦wpsync:origin:esc1⟧` (`https:\/\/…`) und `⟦wpsync:origin:esc2⟧`
   (`https:\\\/\\\/…`). Derselbe Inhalt hat damit auf Live, in der Staging-Kopie und in der
-  Arbeitskopie denselben Fingerabdruck. Serialisierte Werte werden strukturerhaltend ersetzt.
+  Arbeitskopie denselben Fingerabdruck. Serialisierte Werte werden strukturerhaltend ersetzt –
+  beurteilt wie `is_serialized()` von WordPress, also ohne Leerraum an den Rändern. Sieht ein
+  Wert oder ein String darin serialisiert aus, lässt sich aber nicht lesen (falsche Länge, `C:`,
+  tiefer als 64 Ebenen), und enthält er die Origin, gilt der ganze Wert als nicht normalisierbar.
   Normalisiert wird nur `home`.
 - **Fingerabdruck** (`canon_version` 1): `sha256(Tabelle "\n" Schlüssel "\n" Werte)` über die
   normalisierten Werte. Nie im Abdruck sind `post_author`, `post_modified(_gmt)`, `guid`,
@@ -686,7 +689,9 @@ abbilden lässt, sofern das Profil sie kopiert.
 - **Login-Token im Access-Log:** Der Einmal-Link trägt sein Token in der Adresse; es steht nach
   dem Einlösen – verbraucht – im Access-Log des Webservers.
 - **Live-URLs, die bleiben:** Kaputte serialisierte Werte werden nicht umgeschrieben und zeigen
-  weiter auf Live; bis Agent 0.6.0 galt das auch für doppelt escaptes JSON (`https:\\\/\\\/…`).
+  weiter auf Live – ab Agent 0.7.0 auch dann, wenn nur ein String **in** einem serialisierten
+  Wert serialisiert aussieht, sich nicht lesen lässt und die Live-URL enthält; der ganze Wert
+  bleibt dann unverändert. Bis Agent 0.6.0 galt das auch für doppelt escaptes JSON (`https:\\\/\\\/…`).
   `skipped_values` im Ergebnis zählt die übersprungenen serialisierten Werte und ist eine
   Obergrenze. Absolute Dateipfade werden nicht umgeschrieben.
 - **Was als Live gilt:** nur die Domain der Site mit und ohne `www.` auf demselben Port. Andere
