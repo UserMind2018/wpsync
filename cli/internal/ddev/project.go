@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/usermind/wpsync/internal/localenv"
 )
 
 // Guarded runs ddev only after Before passed and calls After once a call succeeded. Every
@@ -45,6 +47,21 @@ func (g *Guarded) RunStdin(stdin io.Reader, args ...string) error {
 		return err
 	}
 	if err := g.Inner.RunStdin(stdin, args...); err != nil {
+		return err
+	}
+	return g.After(args)
+}
+
+// Stream implements localenv.Streamer when the inner runner does; checked like every other call.
+func (g *Guarded) Stream(stdin io.Reader, stdout io.Writer, args ...string) error {
+	s, ok := g.Inner.(localenv.Streamer)
+	if !ok {
+		return errors.New("ddev: runner cannot stream")
+	}
+	if err := g.Before(args); err != nil {
+		return err
+	}
+	if err := s.Stream(stdin, stdout, args...); err != nil {
 		return err
 	}
 	return g.After(args)

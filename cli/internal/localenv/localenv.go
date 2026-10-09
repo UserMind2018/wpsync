@@ -31,6 +31,12 @@ type Runner interface {
 	RunStdin(stdin io.Reader, args ...string) error
 }
 
+// Streamer is implemented by runners that can feed stdin and deliver stdout of one command at
+// once – `wp eval-file -` for the content export (Spec Content-Push §4.4).
+type Streamer interface {
+	Stream(stdin io.Reader, stdout io.Writer, args ...string) error
+}
+
 // Driver is the local runtime of a site. The post-setup stays in package pull and runs through
 // Runner, so it exists only once.
 type Driver interface {

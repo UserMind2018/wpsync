@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/localenv"
 )
 
 // fakeDocker answers ps/inspect for the containers of one project and records every call.
@@ -430,5 +431,59 @@ func TestStartFailsIfContainersStayWritable(t *testing.T) {
 	after, _, _ := store.Load("kunde")
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("state accepted although the containers can write to .ddev")
+	}
+}
+
+type streamInner struct {
+	calls []string
+	err   error
+}
+
+func (s *streamInner) Run(args ...string) error              { return nil }
+func (s *streamInner) Output(args ...string) (string, error) { return "", nil }
+func (s *streamInner) RunStdin(io.Reader, ...string) error   { return nil }
+func (s *streamInner) Stream(stdin io.Reader, stdout io.Writer, args ...string) error {
+	s.calls = append(s.calls, strings.Join(args, " "))
+	if s.err != nil {
+		return s.err
+	}
+	_, err := io.Copy(stdout, stdin)
+	return err
+}
+
+type plainInner struct{}
+
+func (plainInner) Run(args ...string) error              { return nil }
+func (plainInner) Output(args ...string) (string, error) { return "", nil }
+func (plainInner) RunStdin(io.Reader, ...string) error   { return nil }
+
+func TestGuardedStreamRunsBetweenBeforeAndAfter(t *testing.T) {
+	inner := &streamInner{}
+	var order []string
+	g := &Guarded{Inner: inner,
+		Before: func([]string) error { order = append(order, "before"); return nil },
+		After:  func([]string) error { order = append(order, "after"); return nil }}
+	var _ localenv.Streamer = g
+	var out strings.Builder
+	if err := g.Stream(strings.NewReader("in"), &out, "wp", "eval-file", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "in" || strings.Join(order, ",") != "before,after" || len(inner.calls) != 1 {
+		t.Fatalf("out=%q order=%v calls=%v", out.String(), order, inner.calls)
+	}
+}
+
+func TestGuardedStreamStopsWhenTheCheckFails(t *testing.T) {
+	inner := &streamInner{}
+	g := &Guarded{Inner: inner, Before: func([]string) error { return errors.New("untrusted") }, After: func([]string) error { return nil }}
+	if err := g.Stream(strings.NewReader("in"), io.Discard, "wp"); err == nil || len(inner.calls) != 0 {
+		t.Fatalf("err=%v calls=%v", err, inner.calls)
+	}
+}
+
+func TestGuardedStreamNeedsAStreamingInner(t *testing.T) {
+	g := &Guarded{Inner: plainInner{}, Before: func([]string) error { return nil }, After: func([]string) error { return nil }}
+	if err := g.Stream(strings.NewReader("in"), io.Discard, "wp"); err == nil {
+		t.Fatal("expected an error for an inner runner without Stream")
 	}
 }

@@ -456,6 +456,10 @@ func (r *runner) exec(stdin io.Reader, stdout io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
+	if stdin != nil && args[0] == "wp" {
+		// WP-CLI reads a script from stdin (wp eval-file -): docker run needs -i for that.
+		dockerArgs = append([]string{dockerArgs[0], dockerArgs[1], "-i"}, dockerArgs[2:]...)
+	}
 	started := r.d.ctx().Err() == nil // cancelled before: docker does not even start
 	if err := r.d.docker(stdin, stdout, env, dockerArgs...); err != nil {
 		if started && r.d.ctx().Err() != nil {
@@ -504,3 +508,8 @@ func (r *runner) Output(args ...string) (string, error) {
 }
 
 func (r *runner) RunStdin(stdin io.Reader, args ...string) error { return r.exec(stdin, r.d.Out, args) }
+
+// Stream implements localenv.Streamer: stdin goes to the command, its stdout to stdout.
+func (r *runner) Stream(stdin io.Reader, stdout io.Writer, args ...string) error {
+	return r.exec(stdin, stdout, args)
+}
