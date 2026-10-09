@@ -23,7 +23,7 @@ const WPSYNC_VERSION = '0.7.0';
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
-    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'RescueSeal', 'RescueLink', 'MysqliLink', 'RescueDb', 'PushRescueStub', 'PushWindow', 'Push',
+    'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'RescueSeal', 'RescueLink', 'MysqliLink', 'RescueDb', 'RescueContent', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'ContentException', 'ContentStore', 'ContentState', 'ContentPackage', 'ContentSql', 'ContentTarget', 'ContentRepair', 'ContentCheck', 'ContentImage', 'ContentApply', 'ContentRollback', 'ContentPostActions', 'StagingConfig', 'StagingAccess', 'StagingHosts',
     'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'Rest', 'Admin',
 ] as $wpsync_class) {

@@ -13,13 +13,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class RescueGuardTest extends TestCase
 {
-    /** Vor der Schlüsselprüfung, der Einstieg in die Rücknahme der Inhalte und dessen feste Liste (RescueContent::CLASSES). */
-    private const RESCUE = [
-        'PushSwap', 'PushRescue', 'RescueContent',
-        'Canon', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'ContentException', 'ContentStore', 'ContentState', 'ContentLists',
-        'ContentReader', 'ContentImage', 'ContentTarget', 'ContentSql', 'ContentRepair', 'ContentRollback', 'RescueSeal', 'RescueLink',
-        'MysqliLink', 'RescueDb',
-    ];
+    /** Vor der Schlüsselprüfung geladen, und der Einstieg in die Rücknahme der Inhalte; dazu dessen feste Liste. */
+    private const ALWAYS = ['PushSwap', 'PushRescue', 'RescueContent'];
 
     private const STRICT = "defined('ABSPATH') || exit;";
     private const WIDE   = "defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;";
@@ -37,9 +32,7 @@ final class RescueGuardTest extends TestCase
                 $wide[] = basename($file, '.php');
             }
         }
-        $expected = array_values(array_filter(self::RESCUE, static function (string $name): bool {
-            return is_file(__DIR__ . '/../src/' . $name . '.php');
-        }));
+        $expected = array_merge(self::ALWAYS, \WpSync\RescueContent::CLASSES);
         sort($wide);
         sort($expected);
         $this->assertSame($expected, $wide);
