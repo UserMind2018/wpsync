@@ -132,11 +132,12 @@ func DefaultSince(uploads []agentapi.UploadYear, budget int64) string {
 	return since
 }
 
-// TableModes resolves every table: explicit override, else the preset rule of its class.
+// TableModes resolves every table: explicit override, else the preset rule of its class. An
+// essential table is always full – no override, wherever it comes from, takes its data away.
 func (p *Profile) TableModes(tables []agentapi.TableInfo) map[string]string {
 	out := make(map[string]string, len(tables))
 	for _, t := range tables {
-		if m, ok := p.Tables.Overrides[t.Name]; ok {
+		if m, ok := p.Tables.Overrides[t.Name]; ok && !t.Essential {
 			out[t.Name] = m
 			continue
 		}

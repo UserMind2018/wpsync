@@ -237,3 +237,23 @@ func TestProfileJSONUsesSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// W1: ein Override stuft eine Kern-Tabelle nie herab – egal ob er aus einem alten Profil, einer
+// von Hand bearbeiteten Datei oder der Auswahl stammt.
+func TestOverrideNeverDowngradesEssential(t *testing.T) {
+	s := testSheet()
+	for _, preset := range []string{PresetNoTransactions, PresetContent, PresetFull} {
+		p := mustNew(t, preset)
+		p.Tables.Overrides = map[string]string{"wp_posts": ModeSkip, "wp_users": ModeStructure, "wp_custom_thing": ModeSkip}
+		modes := p.TableModes(s.Tables)
+		if modes["wp_posts"] != ModeFull || modes["wp_users"] != ModeFull {
+			t.Errorf("%s: essential tables = %s/%s, want full", preset, modes["wp_posts"], modes["wp_users"])
+		}
+		if modes["wp_custom_thing"] != ModeSkip {
+			t.Errorf("%s: wp_custom_thing = %s, want skip", preset, modes["wp_custom_thing"])
+		}
+		if tables := p.Scope(s).Tables; tables["wp_posts"] != "" || tables["wp_users"] != "" {
+			t.Errorf("%s: scope carries an essential table: %v", preset, tables)
+		}
+	}
+}

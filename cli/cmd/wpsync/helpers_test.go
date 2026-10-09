@@ -38,7 +38,9 @@ type agent struct {
 	OnFiles func()
 	// Staging is env.staging as JSON; empty: the site has no staging copy.
 	Staging string
-	srv     *httptest.Server
+	// Tables is sheet.tables as JSON; empty: wp_options alone.
+	Tables string
+	srv    *httptest.Server
 }
 
 func newAgent(t *testing.T) *agent {
@@ -58,6 +60,10 @@ func (a *agent) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	env := fmt.Sprintf(`{"php_version":"8.3.35","wp_version":"6.8.1","db_server":"10.11.14-MariaDB","table_prefix":"wp_","home":%q,"siteurl":%q,"agent_version":%q,"anon":%q,"staging":%s}`,
 		a.srv.URL, a.srv.URL, a.AgentVersion, a.Anon, staging)
+	tables := `[{"name":"wp_options","class":"config","essential":true}]`
+	if a.Tables != "" {
+		tables = a.Tables
+	}
 	switch r.URL.Query().Get("rest_route") {
 	case "/wpsync/v1":
 		w.Write([]byte(`{"namespace":"wpsync/v1"}`))
@@ -69,8 +75,8 @@ func (a *agent) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"key_id":"0123456789abcdef","secret":%q,"home":%q,"agent_version":%q}`, testSecret, a.srv.URL, a.AgentVersion)
 	case "/wpsync/v1/infosheet":
-		fmt.Fprintf(w, `{"sheet":{"env":%s,"tables":[{"name":"wp_options","class":"config","essential":true}],
-"post_types":[],"plugins":[],"themes":[],"uploads":[],"findings":[],"orphan_meta":{}},"job":{}}`, env)
+		fmt.Fprintf(w, `{"sheet":{"env":%s,"tables":%s,
+"post_types":[],"plugins":[],"themes":[],"uploads":[],"findings":[],"orphan_meta":{}},"job":{}}`, env, tables)
 	case "/wpsync/v1/delta":
 		fmt.Fprintf(w, `{"env":%s,"tables":[{"name":"wp_options","checksum":"c1","rows":1,"bytes":40}],
 "files":[{"path":"wp-content/plugins/a/a.php","size":%d,"mtime":%d}],"skipped":[],"next":null}`, env, len(testFileBody), testMTime)

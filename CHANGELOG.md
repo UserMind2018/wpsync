@@ -87,6 +87,25 @@ Agent ≥ 0.9.0 wie bisher.
 - Stirbt `rescue.php` zwischen dem COMMIT seiner Rücknahme und dem Vermerk, kann ein persistenter
   Object-Cache `active_plugins` im gepushten Stand behalten
 
+### Tabellen-Overrides beim Scan
+
+**Nur die CLI ändert sich**, der Agent bleibt, wie er ist.
+
+**Neu**
+- `wpsync scan <site> --preset <p> --table <tabelle>=structure|skip` (mehrfach): stuft einzelne
+  Tabellen herab, ohne die Profil-Datei von Hand zu bearbeiten – `scan --preset` baut das Profil
+  jedes Mal neu und verwarf gespeicherte `tables.overrides`. Voller Tabellenname mit Präfix; nur
+  zusammen mit `--preset`
+- Exit 2, nichts gespeichert: kein `=`, leerer Name, anderer Modus als `structure`/`skip`, dieselbe
+  Tabelle mit zwei verschiedenen Modi, eine Kern-Tabelle
+- Eine Tabelle, die das Infosheet nicht nennt, wird gespeichert und gemeldet: Zeile auf stderr, mit
+  `--json` `data.warnings: ["table_unknown"]` und `data.unknown_tables`
+
+**Behoben**
+- Ein Eintrag unter `tables.overrides` konnte eine Kern-Tabelle (`posts`, `options`, `users` …)
+  herabstufen – etwa aus einer von Hand bearbeiteten Profil-Datei. Für Kern-Tabellen wird ein
+  Override jetzt ignoriert, sie kommen immer mit Daten
+
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld
