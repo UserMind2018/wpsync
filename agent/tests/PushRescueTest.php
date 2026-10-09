@@ -305,6 +305,36 @@ final class PushRescueTest extends TestCase
     }
 
     /**
+     * Security-Review P3, NR-5: blieb der Vermerk stehen, weil die Sperre des älteren Pushs beim Lösen
+     * belegt war, sperrt er ihn nicht auf Dauer. Überholt ist ein Push nur, solange der spätere noch
+     * getauscht ist – nicht mehr, wenn dessen Datensatz zurückgerollt sagt oder fehlt.
+     */
+    public function testAStaleSupersededMarkNoLongerBlocksTheOlderPush(): void
+    {
+        PushRescue::$linkWait = 0.0;
+        $this->write($this->work . '/' . self::OTHER . '/old/0/main.php', 'new');
+        $this->write($this->content . '/plugins/x/main.php', 'newer');
+        PushRescue::write($this->work, self::OTHER, 'unused', [$this->pair(self::OTHER, 'plugins/x', true)], PushRescue::COMMITTED);
+        PushRescue::supersede($this->work, self::OTHER, ['plugins/x']);
+        $this->assertSame(self::OTHER, PushRescue::supersededBy($this->work, (array) PushRescue::read($this->work, self::ID)));
+        $this->assertSame([409, ['ok' => false, 'error' => 'superseded', 'by' => self::OTHER]], $this->post(self::ID, $this->key), 'solange der spätere Push steht');
+
+        $held = PushRescue::lock($this->work, self::ID); // das Lösen wird übersprungen
+        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::OTHER)[0]);
+        PushRescue::unlock($held);
+        $stale = (array) PushRescue::read($this->work, self::ID);
+        $this->assertSame(self::OTHER, $stale['superseded_by'], 'der Vermerk steht noch');
+        $this->assertNull(PushRescue::supersededBy($this->work, $stale), 'der spätere Push ist zurückgerollt');
+
+        exec('rm -rf ' . escapeshellarg($this->work . '/' . self::OTHER)); // und aufgeräumt
+        $this->assertNull(PushRescue::supersededBy($this->work, $stale), 'sein Datensatz fehlt');
+        $this->assertSame(200, $this->post(self::ID, $this->key)[0]);
+        $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
+        $this->assertNull(PushRescue::supersededBy($this->work, ['superseded_by' => null]));
+        $this->assertNull(PushRescue::supersededBy($this->work, ['superseded_by' => '../x']), 'keine Push-ID');
+    }
+
+    /**
      * M1: der Datensatz des anderen Pushs wird unter der Sperre neu gelesen. Ist sein Ordner
      * inzwischen weg (zurückgerollt und aufgeräumt), entsteht er durch supersede() nicht neu.
      */

@@ -83,7 +83,8 @@ sich wie bisher (`content_not_rolled_back`).
   409 `wpsync_push_state`. Beim Aufräumen eines Pushs schreibt der Agent erst das Protokoll, dann
   löscht er den Ordner
 - Der Vermerk „von einem späteren Push überholt“ (`superseded_by`) wird nur noch unter der Sperre
-  des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme
+  des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme. Ein Vermerk, dessen
+  späterer Push zurückgerollt ist oder nicht mehr existiert, sperrt den älteren nicht mehr
 - Die CLI wertet eine Antwort von `rescue.php` nur noch als Rücknahme, wenn sie
   `status: "rolled_back"` trägt (das tut `rescue.php` seit Agent 0.4.0) – HTTP 200 mit `ok` allein
   genügt nicht mehr. Sonst: „ROLLBACK FEHLGESCHLAGEN“ (Health-Rücknahme) bzw. „Rollback über

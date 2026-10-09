@@ -295,11 +295,30 @@ final class PushRescue
     }
 
     /**
+     * Der spätere Push, der diesen überholt hat (U6) – solange er noch getauscht ist. Ein Vermerk,
+     * dessen Push inzwischen zurückgerollt ist oder dessen Datensatz fehlt (zurückgerollt und
+     * aufgeräumt), gilt nicht mehr: er kann stehen geblieben sein, weil beim Lösen die Sperre dieses
+     * Pushs belegt war (amend()), und sperrte ihn sonst auf Dauer.
+     *
+     * @param array<string, mixed> $record Datensatz des älteren Pushs
+     */
+    public static function supersededBy(string $workDir, array $record): ?string
+    {
+        $by = $record['superseded_by'] ?? null;
+        if (!is_string($by) || preg_match(self::ID, $by) !== 1) {
+            return null;
+        }
+        $later = self::read($workDir, $by);
+        return $later !== null && $later['status'] !== self::ROLLED_BACK ? $by : null;
+    }
+
+    /**
      * Ändert den Datensatz eines anderen Pushs: unter dessen Sperre, an dem Stand, der dort dann
      * steht – nicht an einer Kopie von vorher. Sonst überschriebe der eine Lauf, was ein anderer
      * (Rücknahme, confirm) eben geschrieben hat, oder legte den Datensatz eines schon aufgeräumten
      * Pushs neu an. Bleibt die Sperre belegt, geschieht nichts: der Lauf, der sie hält, schreibt
-     * seinen Stand selbst. Wo sich nicht sperren lässt (false), wie vor P3.
+     * seinen Stand selbst – ein Vermerk superseded_by, der deshalb stehen bleibt, gilt nicht mehr,
+     * sobald sein Push zurückgerollt ist (supersededBy()). Wo sich nicht sperren lässt (false), wie vor P3.
      *
      * @param callable(array<string, mixed>): (array<string, mixed>|null) $change der geänderte Datensatz; null: nichts zu tun
      */
@@ -404,8 +423,9 @@ final class PushRescue
                 }
                 // Was die Rücknahme des Codes ablehnte, vor Sperre und Datenbank: sonst gingen die Inhalte
                 // zurück und der Code bliebe stehen.
-                if ($record['status'] !== self::ROLLED_BACK && $record['superseded_by'] !== null) {
-                    return [409, ['ok' => false, 'error' => 'superseded', 'by' => $record['superseded_by']]];
+                $by = $record['status'] === self::ROLLED_BACK ? null : self::supersededBy($workDir, $record);
+                if ($by !== null) {
+                    return [409, ['ok' => false, 'error' => 'superseded', 'by' => $by]];
                 }
                 $lock = self::lock($workDir, $pushId);
                 if ($lock === null) {
@@ -487,8 +507,9 @@ final class PushRescue
         if ($record['status'] === self::ROLLED_BACK && !($want && self::contentOpen($record))) {
             return [200, self::answer($record, $want, null, [])];
         }
-        if ($record['status'] !== self::ROLLED_BACK && $record['superseded_by'] !== null) {
-            return [409, ['ok' => false, 'error' => 'superseded', 'by' => $record['superseded_by']]];
+        $by = $record['status'] === self::ROLLED_BACK ? null : self::supersededBy($workDir, $record);
+        if ($by !== null) {
+            return [409, ['ok' => false, 'error' => 'superseded', 'by' => $by]];
         }
         // Der Arbeitsordner und jeder Pfad des Datensatzes müssen in genau diesem wp-content liegen:
         // ein Datensatz der Staging-Kopie tauscht nichts auf Live und umgekehrt (Spec 2b 5.8).

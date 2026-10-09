@@ -963,8 +963,9 @@ final class Push
         if ($record !== null && PushRescue::contentOpen($record)) {
             // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
             // und der Code bliebe stehen.
-            if ($record['status'] !== PushRescue::ROLLED_BACK && $record['superseded_by'] !== null) {
-                return self::error('wpsync_push_rollback', self::superseded((string) $record['superseded_by']), 409);
+            $by = $record['status'] === PushRescue::ROLLED_BACK ? null : PushRescue::supersededBy($dirs[1], $record);
+            if ($by !== null) {
+                return self::error('wpsync_push_rollback', self::superseded($by), 409);
             }
             try {
                 $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
