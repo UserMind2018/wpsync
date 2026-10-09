@@ -27,7 +27,7 @@ final class AgentBootstrapTest extends TestCase
         require_once __DIR__ . '/AgentHarness.php';
         require self::PLUGIN;
 
-        $this->assertSame('0.6.0', WPSYNC_VERSION);
+        $this->assertSame('0.7.0', WPSYNC_VERSION);
         foreach (glob(__DIR__ . '/../src/*.php') ?: [] as $file) {
             $name = 'WpSync\\' . basename($file, '.php');
             $this->assertTrue(class_exists($name, false) || interface_exists($name, false), basename($file) . ' fehlt in der Klassenliste');
@@ -95,7 +95,7 @@ final class AgentBootstrapTest extends TestCase
         $source = $this->source();
         $this->assertSame(1, preg_match('/^ \* Version:\s+(\S+)$/m', $source, $header));
         $this->assertSame(1, preg_match("/^const WPSYNC_VERSION = '([^']+)';$/m", $source, $const));
-        $this->assertSame('0.6.0', $header[1]);
+        $this->assertSame('0.7.0', $header[1]);
         $this->assertSame($header[1], $const[1]);
     }
 }

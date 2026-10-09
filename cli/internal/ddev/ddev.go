@@ -65,6 +65,16 @@ func (e *Exec) RunStdin(stdin io.Reader, args ...string) error {
 	return nil
 }
 
+// Stream runs ddev with stdin and writes its stdout to stdout, e.g. `ddev wp eval-file -`.
+func (e *Exec) Stream(stdin io.Reader, stdout io.Writer, args ...string) error {
+	c := e.cmd(args...)
+	c.Stdin, c.Stdout = stdin, stdout
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("ddev %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
 // Exists reports whether siteDir already has a DDEV project.
 func Exists(siteDir string) bool {
 	_, err := os.Stat(filepath.Join(siteDir, ".ddev", "config.yaml"))

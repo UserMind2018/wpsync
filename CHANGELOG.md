@@ -5,6 +5,66 @@ Agent-Version steht pro Release dabei.
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 
+**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` braucht Agent ≥ 0.7.0; ohne
+`--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter „Geändert“. Vorstufe
+des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
+
+### Neu
+- `wpsync pull <site> --content`: Manifest der sieben Inhaltstabellen (Fingerabdruck je Zeile,
+  Meta-Paar und Zuordnung, keine Werte; für Zeilen, die der Pull pseudonymisiert, auch kein
+  Fingerabdruck – `h: null`, `why: "pseudonymized"`), `map.json`, Baseline, `unfaithful.jsonl`
+  (Gründe `differs`, `pseudonymized`, `unnormalizable`, `key_encoding`, `unnormalizable_local`,
+  `local_only`), `env.json` und
+  `summary.json` unter `<site>/.wpsync/content/`; Ergebnis zusätzlich
+  `content: {rows, unfaithful, id_max, canon_version, reloaded}`, Phase `content`. Lädt alle
+  sieben Inhaltstabellen neu, sobald sich eine geändert hat oder der Stand fehlt. Braucht
+  Agent ≥ 0.7.0 (sonst Exit 11) und ein Profil mit allen sieben Tabellen samt Daten (sonst Exit 2)
+- `wpsync content export <site>`: normalisierte Zeilen und Fingerabdrücke der Arbeitskopie als
+  JSON-Lines auf stdout – dieselbe PHP-Implementierung wie auf der Site, per `wp eval-file -`;
+  je Zeile `p` (pushbar laut Listen des Agents, ohne Projekt-Erweiterungen) und sonst `why`
+  (`key`, `post_type`, `taxonomy`, `meta_key`, `meta_word`, `option`, `no_object`, `unnormalizable`,
+  `key_encoding`). Läuft ohne Request an die Site, auch im Container-Modus (PHP-Version und
+  Tabellenpräfix aus `env.json`); Meldungen immer auf stderr, mit `--json` das Ergebnisobjekt
+  als letzte Zeile. Braucht einen aktuellen Inhaltsstand (sonst Exit 2)
+- Agent: Endpunkt `/content/manifest` (JSON-Lines, seitenweise mit Zeitbudget und höchstens rund
+  20 000 Datensätzen je Seite, im Umfang des
+  Pull-Profils, ohne Transients und `wpsync_*`-Optionen); im Kopf `id_max` und `engines` (nur
+  für Tabellen im Umfang des Profils), die Listen
+  des Agents und die Pseudonym-Muster, dazu `pushable: false` mit `why` bei Multisite oder
+  abweichender WordPress-/Website-Adresse
+- `error.reason` bei Exit 1: `manifest_incomplete`, `content_export_failed`, `canon_version`
+
+### Geändert
+- Jeder Pull ersetzt auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON); `staging create`
+  und `staging refresh` schreiben sie jetzt ebenfalls um (bisher blieben sie auf Live gerichtet)
+- Ein Pull ohne `--content`, der eine der sieben Inhaltstabellen neu lädt, verwirft einen
+  vorhandenen Inhaltsstand; der nächste `pull --content` baut ihn neu (`reloaded: true`)
+- `staging create`/`staging refresh`: Serialisierte Werte mit Leerraum an den Rändern werden wie
+  von WordPress (`is_serialized()`) als serialisiert erkannt und mit korrigierten Längen
+  umgeschrieben (bisher als Text ersetzt und damit zerstört). Sieht ein String **in** einem
+  serialisierten Wert serialisiert aus, lässt sich nicht lesen und enthält die Live-URL, bleibt
+  der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
+
+### Sicherheit
+- CLI: Die lokale URL aus `map.json` wird geprüft, bevor sie als Argument an `wp eval-file`
+  geht (http(s)-URL ohne Leerraum und Steuerzeichen, sonst Exit 20), und in Meldungen nur
+  bereinigt genannt
+- CLI: Zeilen des Manifests (Kopf 1 MiB, sonst 64 KiB), von `manifest.jsonl`/`baseline.jsonl`
+  und des Exports (256 MiB) sind in der Länge begrenzt – eine Site oder ein Skript kann die CLI
+  nicht mehr mit einer endlosen Zeile den Speicher füllen lassen (`manifest_incomplete` bzw.
+  `content_export_failed`)
+- Agent: `/content/manifest` liefert für Zeilen, die der Pull pseudonymisiert (Bestellungen,
+  pseudonymisierte Meta-Schlüssel, `admin_email`/`new_admin_email`), keinen Fingerabdruck des
+  echten Werts – ein ungesalzener Abdruck von IP, Postleitzahl, Telefon oder E-Mail liesse sich
+  offline erraten. Mit `--no-anonymize` bleiben die Abdrücke
+- Agent: Serialisierte Werte mit übergrossen Längenangaben oder tausenden verschachtelten
+  Ebenen brechen weder das Manifest noch `staging create` ab – sie gelten als nicht lesbar
+  (Tiefe insgesamt höchstens 64, verschachtelte serialisierte Strings zählen mit)
+- Agent: Eine URL-Ersetzung macht aus einem ungültigen serialisierten Wert nie einen gültigen –
+  weder mit Leerraum an den Rändern noch eine Ebene tiefer
+
+## [0.6.0] – 2026-10-09 · Agent 0.6.0
+
 **Agent und CLI ändern sich.** Uploads pushen braucht Agent ≥ 0.6.0; ohne `--uploads` gilt alles
 wie bisher.
 

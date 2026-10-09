@@ -182,7 +182,8 @@ func saveWithoutProfile(name, url string) error {
 	return sites.Save(&sites.Site{Name: name, URL: url, KeyID: "0123456789abcdef", RPS: 1000})
 }
 
-// fakeDocker logs argv per call; the mailguard check answers ok, docker inspect "true".
+// fakeDocker logs argv per call; the mailguard check answers ok, docker inspect "true", and
+// `wp eval-file -` (content export) prints $FAKE_EXPORT on stdout and a line on stderr.
 const fakeDocker = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1" in
@@ -191,6 +192,7 @@ case "$1" in
 esac
 case "$*" in
   *local_mailguard_collect*) echo "${FAKE_MAILGUARD:-ok}";;
+  *eval-file*) echo "docker noise" >&2; printf '%s' "$FAKE_EXPORT";;
 esac
 [ "$2" = "--rm" ] && [ "$3" = "-i" ] && cat > /dev/null
 exit 0

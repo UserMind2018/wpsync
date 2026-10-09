@@ -310,8 +310,10 @@ func TestPostSetupCallsUnchangedForValidEnv(t *testing.T) {
 	want := strings.Join([]string{
 		"wp search-replace https://kunde.example http://kunde.ddev.site" + tail,
 		`wp search-replace https:\/\/kunde.example http:\/\/kunde.ddev.site` + tail,
+		`wp search-replace https:\\\/\\\/kunde.example http:\\\/\\\/kunde.ddev.site` + tail,
 		"wp search-replace https://kunde.example/wp http://kunde.ddev.site" + tail,
 		`wp search-replace https:\/\/kunde.example\/wp http:\/\/kunde.ddev.site` + tail,
+		`wp search-replace https:\\\/\\\/kunde.example\\\/wp http:\\\/\\\/kunde.ddev.site` + tail,
 		"wp config get WP_ENVIRONMENT_TYPE --type=constant --format=json",
 		"wp config set WP_ENVIRONMENT_TYPE local --type=constant",
 		"wp config get DISABLE_WP_CRON --type=constant --format=json",

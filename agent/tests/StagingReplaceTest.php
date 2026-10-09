@@ -114,4 +114,122 @@ final class StagingReplaceTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new StagingReplace('kein-url', self::TAIL);
     }
+
+    /** Spec Content-Push §5.3: doppelt escaptes JSON (BUG-BACKLOG LOW) */
+    public function testReplacesDoubleEscapedJson(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            '"https:\\\\\\/\\\\\\/example.com\\\\\\/wpsync-staging-0123456789ab\\\\\\/kontakt"',
+            $r->text('"https:\\\\\\/\\\\\\/example.com\\\\\\/kontakt"')
+        );
+        $inner = (string) json_encode(['url' => 'https://example.com/x']);
+        $outer = (string) json_encode(['data' => $inner]);
+        $back  = json_decode((string) json_decode($r->value($outer), true)['data'], true);
+        $this->assertSame('https://example.com/wpsync-staging-0123456789ab/x', $back['url']);
+    }
+
+    /** Spec Content-Push §5.3: Staging-Pfade wieder entfernen – exakte Umkehr */
+    public function testStripIsTheInverseOfText(): void
+    {
+        $r = $this->r();
+        foreach ([
+            '<a href="https://example.com/shop/">',
+            'src="//EXAMPLE.com/x.js"',
+            '{"url":"https:\/\/example.com\/kontakt"}',
+            '"https:\\\\\\/\\\\\\/example.com\\\\\\/kontakt"',
+            'https://example.com',
+            'https://example.com.evil.org/',
+        ] as $live) {
+            $this->assertSame($live, $r->strip($r->text($live)), $live);
+        }
+        $data = serialize(['url' => 'https://example.com/x', 'deep' => ['https://example.com']]);
+        $this->assertSame($data, $r->stripValue($r->value($data)));
+    }
+
+    public function testStripValueReportsUnreadableValues(): void
+    {
+        $r = $this->r();
+        $this->assertNull($r->stripValue('s:99:"https://example.com/wpsync-staging-0123456789ab/x";'));
+        $this->assertSame('C:3:"Cfg":3:{abc}', $r->stripValue('C:3:"Cfg":3:{abc}'), 'ohne Staging-Pfad bleibt der Wert, wie er ist');
+    }
+
+    /** @return list<array{0: string}> Security-Review M2: Längen und Anzahlen, die als int überlaufen */
+    public static function overflowing(): array
+    {
+        return [
+            ['s:9223372036854775807:"https://example.com/x";'],
+            ['E:9223372036854775807:"https://example.com/x";'],
+            ['a:9223372036854775807:{i:0;s:21:"https://example.com/x";}'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('overflowing')]
+    public function testOverflowingLengthsStayAndAreCounted(string $value): void
+    {
+        $r = $this->r();
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+        $withTail = str_replace('example.com', 'example.com' . self::TAIL, $value);
+        $this->assertNull($r->stripValue($withTail));
+    }
+
+    /** Security-Review M3 */
+    public function testDeeplyNestedStringsStayAndAreCounted(): void
+    {
+        $r     = $this->r();
+        $value = SerializedWalkerTest::nested('https://example.com/x', 5000);
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+    }
+
+    /**
+     * Security-Review H1.2, H1.3: 40 = strlen('https://example.com' . TAIL) + … – die Längenangabe
+     * stimmt erst, nachdem der Staging-Pfad als Text eingefügt wurde.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function crafted(): array
+    {
+        $len  = strlen('https://example.com' . self::TAIL);
+        $core = 'a:2:{i:0;s:' . $len . ':"https://example.com";i:1;O:8:"stdClass":0:{}}';
+        return [
+            'ohne Leerraum'      => [$core],
+            'Leerzeichen davor'  => [' ' . $core],
+            'Zeilenende danach'  => [$core . "\n"],
+            'als String'         => ['s:' . strlen($core) . ':"' . $core . '";'],
+            'im Array'           => [serialize(['v' => $core, 'u' => 'https://example.com/x'])],
+            'im Array, Leerraum' => [serialize(['v' => "\n" . $core . ' '])],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('crafted')]
+    public function testAnInvalidSerializedValueStaysAsItIsAndIsCounted(string $value): void
+    {
+        $r = $this->r();
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+    }
+
+    public function testWhitespaceAroundASerializedValueKeepsItValid(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            ' ' . serialize(['https://example.com' . self::TAIL . '/x']) . "\n",
+            $r->value(' ' . serialize(['https://example.com/x']) . "\n")
+        );
+        $this->assertSame(0, $r->skipped());
+        $this->assertSame(' ' . serialize(['https://example.com/x']) . "\n", $r->stripValue(' ' . serialize(['https://example.com' . self::TAIL . '/x']) . "\n"));
+    }
+
+    /** Ein verschachtelter, unlesbarer Wert ohne Live-URL hält den Rest nicht auf. */
+    public function testAnUnreadableNestedValueWithoutTheLiveUrlIsNoObstacle(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            serialize(['v' => 's:99:"xyz";', 'u' => 'https://example.com' . self::TAIL . '/x']),
+            $r->value(serialize(['v' => 's:99:"xyz";', 'u' => 'https://example.com/x']))
+        );
+        $this->assertSame(0, $r->skipped());
+    }
 }

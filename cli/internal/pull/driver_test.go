@@ -122,7 +122,8 @@ func TestRunFirstPullGoesThroughTheDriver(t *testing.T) {
 		t.Fatalf("file = %q, %v", data, err)
 	}
 	runs := drv.runner.joined()
-	for _, want := range []string{"mysql --user=db --password=db --database=db --binary-mode --local-infile=0", "wp search-replace https://kunde.de http://kunde.local", "local_mailguard_collect"} {
+	for _, want := range []string{"mysql --user=db --password=db --database=db --binary-mode --local-infile=0", "wp search-replace https://kunde.de http://kunde.local",
+		`wp search-replace https:\/\/kunde.de http:\/\/kunde.local`, `wp search-replace https:\\\/\\\/kunde.de http:\\\/\\\/kunde.local`, "local_mailguard_collect"} {
 		if !strings.Contains(runs, want) {
 			t.Errorf("missing %q in runner calls\n%s", want, runs)
 		}

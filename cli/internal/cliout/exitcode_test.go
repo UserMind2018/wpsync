@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/content"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/pull"
 	"github.com/usermind/wpsync/internal/push"
@@ -243,6 +244,29 @@ func TestUnknownStagingCasesHaveAReason(t *testing.T) {
 	for _, c := range cases {
 		if f := Classify(c.err); f.Reason != c.reason {
 			t.Errorf("Classify(%v).Reason = %q, want %q", c.err, f.Reason, c.reason)
+		}
+	}
+}
+
+// pull --content: ein Profil ohne alle Inhaltstabellen ist ein Aufruffehler; Manifest, Export und
+// kanonische Form bleiben unknown und sind an error.reason zu erkennen.
+func TestContentCases(t *testing.T) {
+	cases := []struct {
+		err    error
+		exit   int
+		reason string
+	}{
+		{fmt.Errorf("x: %w", pull.ErrContentScope), ExitUsage, ""},
+		{&agentapi.OutdatedError{Installed: "0.6.0", Required: agentapi.MinAgentContent, Err: pull.ErrAgentNoContent}, ExitAgentOutdated, ""},
+		{fmt.Errorf("Inhalts-Manifest: %w", fmt.Errorf("%w: der Kopf fehlt", agentapi.ErrManifest)), ExitUnknown, "manifest_incomplete"},
+		{fmt.Errorf("Inhalts-Manifest: %w", fmt.Errorf("%w: die Schlusszeile fehlt", content.ErrExport)), ExitUnknown, "content_export_failed"},
+		{fmt.Errorf("Inhalts-Manifest: %w", content.ErrNoStream), ExitUnknown, "content_export_failed"},
+		{fmt.Errorf("Inhalts-Manifest: %w", fmt.Errorf("%w (Agent 2, CLI 1)", content.ErrCanonVersion)), ExitUnknown, "canon_version"},
+	}
+	for _, c := range cases {
+		f := Classify(c.err)
+		if f.Exit != c.exit || f.Code != Names[c.exit] || f.Reason != c.reason {
+			t.Errorf("Classify(%v) = %d %s reason %q, want %d reason %q", c.err, f.Exit, f.Code, f.Reason, c.exit, c.reason)
 		}
 	}
 }

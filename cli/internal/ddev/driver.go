@@ -191,6 +191,19 @@ func (r *siteRunner) RunStdin(stdin io.Reader, args ...string) error {
 	return g.RunStdin(stdin, args...)
 }
 
+// Stream implements localenv.Streamer through the site's guarded runner.
+func (r *siteRunner) Stream(stdin io.Reader, stdout io.Writer, args ...string) error {
+	g, err := r.guarded()
+	if err != nil {
+		return err
+	}
+	s, ok := g.(localenv.Streamer)
+	if !ok {
+		return errors.New("ddev: runner cannot stream")
+	}
+	return s.Stream(stdin, stdout, args...)
+}
+
 // LocalURL asks `ddev describe` for the project's HTTP URL.
 func (d *Driver) LocalURL(site string) (string, error) { return LocalURL(d.Runner(site)) }
 

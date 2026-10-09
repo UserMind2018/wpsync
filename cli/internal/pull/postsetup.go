@@ -63,8 +63,13 @@ func PostSetup(r localenv.Runner, env agentapi.Env, localURL string, o PostSetup
 		sources = append(sources, env.SiteURL)
 	}
 	for _, src := range sources {
-		// Plain and JSON-escaped (Elementor & co. store "https:\/\/…").
-		pairs := [][2]string{{src, localURL}, {strings.ReplaceAll(src, "/", `\/`), strings.ReplaceAll(localURL, "/", `\/`)}}
+		// Plain, JSON-escaped (Elementor & co. store "https:\/\/…") and double-escaped JSON
+		// ("https:\\\/\\\/…", JSON inside JSON) – the three variants of Spec Content-Push C3.
+		pairs := [][2]string{
+			{src, localURL},
+			{strings.ReplaceAll(src, "/", `\/`), strings.ReplaceAll(localURL, "/", `\/`)},
+			{strings.ReplaceAll(src, "/", `\\\/`), strings.ReplaceAll(localURL, "/", `\\\/`)},
+		}
 		for _, p := range pairs {
 			if err := r.Run("wp", "search-replace", p[0], p[1], "--all-tables-with-prefix", "--skip-columns=guid",
 				"--report-changed-only", "--skip-plugins", "--skip-themes"); err != nil {

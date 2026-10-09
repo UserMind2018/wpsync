@@ -239,11 +239,11 @@ printf 'RewriteBase /\n' > "$WPC/plugins/e2e-rewrite/base/.htaccess" # ohne Rewr
 printf '<?php echo "e2e-base";\n' > "$WPC/plugins/e2e-rewrite/base/open.php"
 printf 'DB_PASSWORD=live-secret-e2e\n' > "$WPC/plugins/e2e-rewrite/.env"
 ddev wp plugin activate e2e-excluded e2e-health e2e-rewrite
-# Wie ein Shared Host mit knappem Zeitlimit: jeder Request des Agents arbeitet höchstens 3 s
-# (Budget = 60 %), ein Staging-Job läuft also über mehrere Requests. Mit dem DDEV-Standard (600 s)
+# Wie ein Shared Host mit knappem Zeitlimit: jeder Request des Agents arbeitet höchstens 2 s
+# (Budget = 60 %, mindestens 2 s), ein Staging-Job läuft also über mehrere Requests. Mit dem DDEV-Standard (600 s)
 # wäre die kleine Testsite in einem einzigen Schritt kopiert.
 mkdir -p "$WPC/mu-plugins"
-printf "<?php\n// E2E: knappes Zeitlimit für Web-Requests\nif (PHP_SAPI !== 'cli') {\n    @ini_set('max_execution_time', '5');\n}\n" > "$WPC/mu-plugins/e2e-limits.php"
+printf "<?php\n// E2E: knappes Zeitlimit für Web-Requests\nif (PHP_SAPI !== 'cli') {\n    @ini_set('max_execution_time', '4');\n}\n" > "$WPC/mu-plugins/e2e-limits.php"
 printf 'live-only' > "$WPC/uploads/2020/01/live-only.jpg"
 # Erlaubter Pfad (Uploads von Live), der auf einen gesperrten weiterleitet.
 printf '<?php header("Location: http://" . $_SERVER["HTTP_HOST"] . "/wp-json/", true, 302);\n' > "$WPC/uploads/2020/01/e2e-redirect.php"
@@ -1002,4 +1002,4 @@ same "Zusatz 12: Live-Dateien wie vor dem ersten create" "$E2E/inv-files.0" "$E2
 eq "Live erreichbar" "$(code "$SOURCE_URL/")" 200
 
 echo
-echo "Messwerte: staging create ${CREATE_SECONDS}s bei 1 Request/s und 3 s Zeitbudget, $((CREATE_STEPS + 1)) Schritt-Requests; Kopie $((COPY_KB / 1024)) MB Code, $((DB_BYTES / 1048576)) MB Datenbank; ${SECONDS}s gesamt"
+echo "Messwerte: staging create ${CREATE_SECONDS}s bei 1 Request/s und 2 s Zeitbudget, $((CREATE_STEPS + 1)) Schritt-Requests; Kopie $((COPY_KB / 1024)) MB Code, $((DB_BYTES / 1048576)) MB Datenbank; ${SECONDS}s gesamt"

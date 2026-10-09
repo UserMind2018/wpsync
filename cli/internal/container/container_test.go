@@ -494,3 +494,37 @@ func TestRunLabelIsPerSiteFolder(t *testing.T) {
 		}
 	}
 }
+
+// wp eval-file - liest das Skript von stdin: docker run braucht dafür -i, stdout geht an den Aufrufer.
+func TestRunnerStreamsStdinToWPCLI(t *testing.T) {
+	f := installFakeDocker(t)
+	d := testDriver(t)
+	s, ok := d.Runner("vorlage").(localenv.Streamer)
+	if !ok {
+		t.Fatal("container runner does not implement localenv.Streamer")
+	}
+	var out strings.Builder
+	if err := s.Stream(strings.NewReader("<?php echo 1;"), &out, "wp", "eval-file", "-", "http://localhost:8080", "all"); err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := os.ReadFile(f.log)
+	if !strings.Contains(string(calls), "run --rm -i --init") || !strings.Contains(string(calls), "wp eval-file - http://localhost:8080 all") {
+		t.Fatalf("docker call: %s", calls)
+	}
+	stdin, _ := os.ReadFile(f.stdin)
+	if string(stdin) != "<?php echo 1;" {
+		t.Fatalf("stdin did not reach the container: %q", stdin)
+	}
+}
+
+func TestRunnerWithoutStdinStaysNonInteractive(t *testing.T) {
+	f := installFakeDocker(t)
+	d := testDriver(t)
+	if err := d.Runner("vorlage").Run("wp", "option", "get", "home"); err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := os.ReadFile(f.log)
+	if strings.Contains(string(calls), "run --rm -i") {
+		t.Fatalf("wp without stdin must not get -i: %s", calls)
+	}
+}

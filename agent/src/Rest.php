@@ -49,6 +49,8 @@ final class Rest
             'db-bundle'         => 'dbBundle',
             'db'                => 'dbChunk',
             'files'             => 'files',
+            // Inhalts-Manifest (Spec Content-Push §4.2): nur Fingerabdrücke, im Umfang des Pull-Scopes.
+            'content/manifest'  => 'contentManifest',
             'push/begin'        => 'pushBegin',
             'push/upload'       => 'pushUpload',
             'push/commit'       => 'pushCommit',
@@ -484,6 +486,35 @@ final class Rest
     }
 
     /**
+     * Fingerabdrücke der Inhaltszeilen als JSON-Lines, seitenweise (Spec Content-Push §4.2).
+     *
+     * @return \WP_Error|void
+     */
+    public static function contentManifest(\WP_REST_Request $request)
+    {
+        $scope = self::scope($request);
+        if ($scope instanceof \WP_Error) {
+            return $scope;
+        }
+        try {
+            // ContentReader castet den Cursor nur – was nicht von ihm stammt, kommt nicht bis dorthin.
+            $cursor = ContentManifest::cursor(self::param($request, 'cursor'));
+        } catch (\InvalidArgumentException $e) {
+            return new \WP_Error('wpsync_cursor', 'invalid cursor', ['status' => 400]);
+        }
+        $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
+        $lines    = 0;
+        self::beginRaw('application/x-ndjson');
+        ContentManifest::send($cursor, $scope, static function (string $line) use (&$lines): void {
+            echo $line, "\n"; // phpcs:ignore WordPress.Security.EscapeOutput
+            if (++$lines % 2000 === 0) {
+                self::flushOutput();
+            }
+        }, $deadline);
+        exit;
+    }
+
+    /**
      * Mehrere Dateien gerahmt, gestreamt ohne Output-Buffer (Spike B21). Es gelten dieselben
      * festen Ausschlüsse wie in der Dateiliste, geprüft am aufgelösten Pfad (SEC-02).
      *
@@ -689,6 +720,20 @@ final class Rest
     {
         $limit = (int) self::param($request, 'limit');
         return min(20000, max(1, $limit > 0 ? $limit : 2000));
+    }
+
+    /**
+     * Gibt aus, was bis hier geschrieben ist. flush() allein erreicht den eigenen Ausgabepuffer
+     * (gzip aus beginRaw) nicht – ohne ob_flush() wüchse eine ganze Seite darin an. Ein Puffer, der
+     * sich nicht leeren lässt, bleibt, wie er ist.
+     */
+    public static function flushOutput(): void
+    {
+        $status = ob_get_level() > 0 ? ob_get_status() : [];
+        if (((int) ($status['flags'] ?? 0) & PHP_OUTPUT_HANDLER_FLUSHABLE) !== 0) {
+            ob_flush();
+        }
+        flush();
     }
 
     /** Rohausgabe, gzip wenn der Client es anbietet und der Server nicht selbst komprimiert. */

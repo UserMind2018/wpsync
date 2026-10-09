@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/content"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/pull"
 	"github.com/usermind/wpsync/internal/push"
@@ -154,7 +155,8 @@ func Classify(err error) Failure {
 // reason: the local site lock, and what stays unknown although a caller can tell it apart – a
 // staging job that stopped, a copy in a status that does not allow the call, a request that
 // reached the copy instead of the live site, an address of the agent outside the paired site,
-// and the push cases of Spec Container-Push C11 and P-O3.
+// the push cases of Spec Container-Push C11 and P-O3, and what stops pull --content after the
+// tables are loaded (manifest, export of the working copy, canonical form).
 func reason(err error, exit int) string {
 	if errors.Is(err, pull.ErrPullRunning) {
 		return "site_locked"
@@ -192,6 +194,12 @@ func reason(err error, exit int) string {
 		return "upload_exists"
 	case errors.Is(err, push.ErrUploadTypeBlocked), code == "wpsync_upload_type_blocked":
 		return "upload_type_blocked"
+	case errors.Is(err, agentapi.ErrManifest):
+		return "manifest_incomplete"
+	case errors.Is(err, content.ErrExport), errors.Is(err, content.ErrNoStream):
+		return "content_export_failed"
+	case errors.Is(err, content.ErrCanonVersion):
+		return "canon_version"
 	}
 	return ""
 }
@@ -209,6 +217,7 @@ func classify(err error) int {
 		return ExitInterrupted
 	case errors.As(err, &usage), errors.Is(err, pull.ErrNeedsConfirmation), errors.Is(err, pull.ErrPlainNeedsConfirmation),
 		errors.Is(err, pull.ErrUploadsWithoutProxy), errors.Is(err, pull.ErrInvalidDocroot),
+		errors.Is(err, pull.ErrContentScope),
 		errors.Is(err, push.ErrNeedsYes), errors.Is(err, staging.ErrNeedsYes), errors.Is(err, push.ErrTarget):
 		return ExitUsage
 	case errors.Is(err, agentapi.ErrInvalidEnv), errors.Is(err, pull.ErrInvalidTableName),

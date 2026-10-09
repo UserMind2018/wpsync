@@ -26,6 +26,7 @@ Uploads der Live-Site schreibt wpsync nie.
 - [Pull-Profile](#pull-profile)
 - [Was beim Pull passiert](#was-beim-pull-passiert)
 - [Code pushen](#code-pushen)
+- [Inhalte: Manifest, Baseline, Export](#inhalte-manifest-baseline-export)
 - [Staging auf dem Server](#staging-auf-dem-server)
 - [Sicherheit](#sicherheit)
 - [Serverschonung und IP-Sperren](#serverschonung-und-ip-sperren)
@@ -132,8 +133,9 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
 | `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. |
-| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. |
+| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
+| `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
 | `wpsync push <site> code [einheit…] [--uploads <liste>] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
@@ -258,7 +260,8 @@ einmal) und legt sie lokal ab.
    eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
    pseudonymisiert an.
 7. **Post-Setup:**
-   - Search-Replace der Live-URL (Klartext und JSON-escaped), danach ein zweiter Durchlauf
+   - Search-Replace der Live-URL (Klartext, JSON-escaped `https:\/\/…` und doppelt escaped
+     `https:\\\/\\\/…`, JSON in JSON), danach ein zweiter Durchlauf
      mit geladenen Plugins für plugin-serialisierte Objekte (z. B. Borlabs Cookie)
    - `WP_ENVIRONMENT_TYPE=local`, `DISABLE_WP_CRON`
    - Mail-, Security-, Zugriffsschutz- und Caching-Plugins sowie abgewählte Plugins deaktivieren
@@ -267,7 +270,9 @@ einmal) und legt sie lokal ab.
    - lokalen Admin `wpsync` anlegen bzw. dessen Passwort zurücksetzen
 8. **Mailguard-Pflichtprüfung:** Ist im Container kein aktiver `wp_mail`-Filter nachweisbar,
    bricht der Pull ab und das Projekt wird gestoppt.
-9. **Baseline** speichern und Schnappschuss ins interne Git neben dem Site-Ordner.
+9. **Nur mit `--content`:** Inhalts-Manifest der Site holen, Baseline der Inhalte aus der lokalen
+   Site rechnen, beide vergleichen (siehe [Inhalte](#inhalte-manifest-baseline-export)).
+10. **Baseline** speichern und Schnappschuss ins interne Git neben dem Site-Ordner.
 
 Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
 
@@ -412,6 +417,166 @@ Ausgabe nennt sie (`--json`: `warnings: ["upload_changed_since_push"]`).
 - **Nicht unterstützt:** Einzeldatei-Plugins direkt unter `plugins/`, Drop-ins, Sprachdateien
   unter `languages/`, Multisite, ein verschobenes `wp-content/plugins`.
 
+## Inhalte: Manifest, Baseline, Export
+
+Vorstufe des Inhalts-Pushs, ab Agent 0.7.0. **Einen Inhalts-Push gibt es in diesem Stand noch
+nicht** – `wpsync push` überträgt weiter nur Code und neue Uploads und schreibt keine Datenbank.
+Was es gibt: Der Pull hält fest, welche Inhalte auf der Site liegen und wie sie lokal angekommen
+sind, und `content export` rechnet dieselben Fingerabdrücke für die Arbeitskopie. Ein Aufrufer
+(etwa das Website Studio) sieht daran, was sich lokal geändert hat. Nichts davon schreibt auf
+die Site, und nichts davon braucht ein Push-Fenster.
+
+**`wpsync pull <site> --content`** holt zusätzlich zum normalen Pull ein **Manifest** der sieben
+Inhaltstabellen (`posts`, `postmeta`, `terms`, `term_taxonomy`, `term_relationships`, `termmeta`,
+`options`): je Zeile, je Meta-Paar `(Objekt, Schlüssel)` und je Zuordnung `(Objekt, Taxonomie)`
+ein Fingerabdruck, keine Werte. Für Zeilen, die der Pull pseudonymisiert, gibt es auch keinen
+Fingerabdruck.
+
+Voraussetzungen, beide geprüft, bevor etwas eingerichtet oder geladen wird:
+
+- Agent ≥ 0.7.0, sonst Exit 11 (`agent_outdated`).
+- Das Pull-Profil zieht alle sieben Inhaltstabellen **mit Daten**, sonst Exit 2 – die Meldung
+  nennt die fehlenden Tabellen; ändern mit `wpsync scan`.
+
+Unter `<site>/.wpsync/content/` liegen danach:
+
+| Datei | Inhalt |
+|---|---|
+| `manifest.jsonl` | Stand der Site: erst der Kopf `{"head": {…}}`, dann je Zeile `{"t","k","h"}` (Tabelle ohne Präfix, Schlüssel, Fingerabdruck). Ohne Fingerabdruck ist `h` `null` und `why` nennt den Grund: `unnormalizable` (ein Wert liess sich nicht normalisieren), `key_encoding` (der Schlüssel ist kein gültiges UTF-8) oder `pseudonymized` (der Pull pseudonymisiert die Zeile) |
+| `map.json` | Domain-Abbildung des Pulls: `live` (`home`, `siteurl`), `local` (die lokale URL), `variants`, `canon_version`, `pulled_at` |
+| `baseline.jsonl` | normalisierte Zeilen der lokalen Site direkt nach dem Pull, mit Werten und Fingerabdruck – dasselbe Format wie `content export` |
+| `unfaithful.jsonl` | `{"t","k","why"}` je Schlüssel, den der Pull nicht treu übertragen hat – nicht pushbar |
+| `env.json` | PHP-Version und Tabellenpräfix der Quelle, sonst nichts (keine URL, kein Secret) – damit `content export` im Container-Modus ohne Request an die Site läuft |
+| `summary.json` | das Objekt `content` von `pull --json` (dort `reloaded` immer `false`); fehlt die Datei, gilt der ganze Stand als nicht aktuell |
+
+Der Kopf des Manifests nennt `canon_version`, `list_version`, `variants`, `origins` (`home`,
+`siteurl`), `id_max` (je Zähler-Tabelle `posts`, `terms`, `term_taxonomy` das grössere aus
+höchster ID und `AUTO_INCREMENT − 1`), `engines`, `tables`, `prefix`, `charset`, `pseudonym`
+(die Muster der Pseudonymisierung), `lists` (die Listen des Agents für den späteren
+Inhalts-Push, als Daten) und `pushable`. `pushable: false` mit `why: "multisite"` oder
+`why: "origin_mismatch"` (Schema, Host oder Port von `home` und `siteurl` weichen ab) heisst:
+Das Manifest kommt trotzdem, einen Inhalts-Push wird diese Site nicht annehmen.
+`tables` nennt die Inhaltstabellen, die das Pull-Profil mit Daten überträgt; nur für sie stehen
+`engines` und `id_max` im Kopf und Zeilen im Manifest. `term_relationships` gehört nur dazu,
+wenn auch `term_taxonomy` dabei ist.
+
+Gründe in `unfaithful.jsonl`:
+
+| `why` | Bedeutung |
+|---|---|
+| `differs` | lokal ein anderer Fingerabdruck als auf der Site – etwa was das Post-Setup lokal umstellt |
+| `pseudonymized` | der Pull pseudonymisiert die Zeile; das Manifest nennt für sie keinen Abdruck des echten Werts |
+| `unnormalizable` | der Wert auf der Site liess sich nicht normalisieren (das Manifest hat keinen Abdruck) |
+| `key_encoding` | der Schlüssel auf der Site ist kein gültiges UTF-8 (das Manifest hat keinen Abdruck) |
+| `unnormalizable_local` | der lokale Wert liess sich nicht normalisieren |
+| `local_only` | die Zeile gibt es lokal, im Manifest nicht |
+
+Eine Zeile, die im Manifest steht und lokal fehlt, zählt nicht dazu – das Pull-Profil filtert
+Zeilen.
+
+- **Pseudonymisiert** (`why: "pseudonymized"`) sind genau die Zeilen, an denen die Regeln der
+  Pseudonymisierung etwas ersetzen: Beiträge der Typen `shop_order`, `shop_order_refund` und
+  `shop_subscription` als Ganzes, Meta-Paare mit einem pseudonymisierten Schlüssel
+  (`_billing_*`, `_shipping_*`, `_customer_ip_address`, … – an jedem Beitrag) und die Optionen
+  `admin_email` und `new_admin_email`. Ein Abdruck über den echten Wert liesse sich offline
+  erraten (IP, Postleitzahl, Telefon, E-Mail), deshalb fehlt er. Mit `--no-anonymize` zieht der
+  Pull Klartext, und das Manifest nennt auch für diese Zeilen den Abdruck. Pushbar sind sie
+  in keinem Fall.
+
+- **Normalisiert** heisst: Die eigene Origin der Site ist durch einen Platzhalter ersetzt –
+  `⟦wpsync:origin⟧` (Klartext), `⟦wpsync:origin:esc1⟧` (`https:\/\/…`) und `⟦wpsync:origin:esc2⟧`
+  (`https:\\\/\\\/…`). Derselbe Inhalt hat damit auf Live, in der Staging-Kopie und in der
+  Arbeitskopie denselben Fingerabdruck. Serialisierte Werte werden strukturerhaltend ersetzt –
+  beurteilt wie `is_serialized()` von WordPress, also ohne Leerraum an den Rändern. Sieht ein
+  Wert oder ein String darin serialisiert aus, lässt sich aber nicht lesen (falsche Länge, `C:`,
+  tiefer als 64 Ebenen), und enthält er die Origin, gilt der ganze Wert als nicht normalisierbar.
+  Normalisiert wird nur `home`.
+- **Fingerabdruck** (`canon_version` 1): `sha256(Tabelle "\n" Schlüssel "\n" Werte)` über die
+  normalisierten Werte. Nie im Abdruck sind `post_author`, `post_modified(_gmt)`, `guid`,
+  `to_ping`, `pinged`, `comment_count`, `meta_id`, `term_taxonomy.count`, `option_id`,
+  `autoload`. Meta-Werte und Zuordnungen zählen als sortierte Multimenge je Paar.
+- **Umfang:** Das Manifest folgt dem Pull-Profil – abgewählte Beitragstypen fehlen. Transients
+  (`_transient_*`, `_site_transient_*`) und `wpsync_*`-Optionen stehen weder im Manifest noch im
+  Export.
+- **Alle sieben oder keine:** Mit `--content` lädt der Pull **alle sieben** Inhaltstabellen neu,
+  sobald sich eine auf der Site geändert hat, der Ordner fehlt oder unvollständig ist oder der
+  Stand eine andere `canon_version` trägt – und baut Manifest, Baseline und `unfaithful.jsonl`
+  neu. Die Baseline ist damit immer der Stand direkt nach dem Pull, für jede Tabelle. Lokale
+  Änderungen an Inhalten gehen dabei verloren, wie bei jedem Pull einer geänderten Tabelle. Hat
+  sich nichts geändert und ist der Stand aktuell, bleibt alles liegen.
+- **Pull ohne `--content`:** Lädt er eine der sieben Inhaltstabellen neu, verwirft er den
+  Inhaltsstand vor dem Import (`summary.json` wird entfernt) und sagt das – die Baseline gehörte
+  sonst nicht mehr zur Arbeitskopie. Der nächste `pull --content` lädt alle sieben neu und
+  meldet `reloaded: true`; bis dahin lehnt `content export` ab.
+- **Ergebnis:** `pull --json` nennt zusätzlich `content: {rows, unfaithful, id_max,
+  canon_version, reloaded}` – Zeilen im Manifest, Schlüssel in `unfaithful.jsonl`, die
+  Zählerstände aus dem Kopf. `reloaded` sagt, ob **dieser** Pull die Inhaltstabellen neu geladen
+  und die Baseline neu gebaut hat, der lokale Arbeitsstand also überschrieben wurde.
+- **Scheitert der Bau** nach dem Laden der Tabellen (Manifest unvollständig, Export der lokalen
+  Site gescheitert, andere `canon_version`), endet der Pull mit Exit 1 und `error.reason`
+  (siehe [Server-Modus](#server-modus)); der Inhaltsstand gilt dann nicht als aktuell, und der
+  nächste Pull lädt die Tabellen erneut.
+
+**`wpsync content export <site>`** schreibt die normalisierten Zeilen und Fingerabdrücke der
+**aktuellen** Arbeitskopie als JSON-Lines auf stdout – eine Zeile je Datensatz:
+
+```json
+{"t":"posts","k":"219","h":"<sha256>","row":{"post_title":"<base64>","post_parent":"<base64>"},"p":true}
+{"t":"postmeta","k":"219\u0000_edit_lock","h":"<sha256>","row":{"values":["<base64>"]},"p":false,"why":"meta_key"}
+```
+
+- `t` ist die Tabelle ohne Präfix, `k` der Schlüssel: die ID (`posts`, `terms`,
+  `term_taxonomy`), der Optionsname (`options`) oder `<Objekt-ID>\0<Meta-Schlüssel>` bzw.
+  `<Objekt-ID>\0<Taxonomie>` für ein Paar.
+- `row` trägt die Spalten des Abdrucks, Werte base64, `null` für NULL; bei einem Paar die
+  sortierte Menge als `row.values` (Zuordnungen als `<term_taxonomy_id>:<term_order>`).
+- `h` ist der Fingerabdruck – oder `null` ohne `row`, wenn sich die Zeile nicht abbilden liess.
+- `p` sagt, ob die Zeile nach den Listen des Agents pushbar ist, **ohne** Projekt-Erweiterungen;
+  bei `false` nennt `why` den Grund. Ob der Pull die Zeile treu übertragen hat, steckt nicht in
+  `p` – das steht in `unfaithful.jsonl`.
+
+| `why` | Bedeutung |
+|---|---|
+| `key` | die Objekt-ID im Schlüssel ist keine reine Zahl (`219abc`, `0219`, `0`) oder einem Paar fehlt der Trenner `\0` |
+| `post_type` | der Beitragstyp steht nicht auf der Liste (auch für Meta und Zuordnungen des Beitrags) |
+| `taxonomy` | die Taxonomie steht nicht auf der Liste |
+| `meta_key` | Meta-Schlüssel fest gesperrt |
+| `meta_word` | Meta-Schlüssel nur über die Teilstring-Liste gesperrt – per Projekt-Erweiterung ausnehmbar |
+| `option` | die Option ist gesperrt oder steht nicht auf der Liste |
+| `no_object` | der Beitrag bzw. Term zur Zeile fehlt lokal (verwaiste Meta-Zeile oder Zuordnung) |
+| `unnormalizable` | der Wert liess sich nicht normalisieren; `h` ist `null` |
+| `key_encoding` | der Schlüssel ist kein gültiges UTF-8; `h` ist `null` |
+
+Gerechnet wird mit derselben PHP-Implementierung wie auf der Site – sie ist in die CLI
+eingebettet und läuft per `wp eval-file -` in der lokalen Umgebung (DDEV oder Container-Modus),
+ohne Plugins und Themes zu laden.
+
+- **Offline:** Der Export sendet keinen Request an die Site, fasst auf dem Mac die Keychain nicht
+  an und ändert weder die Site noch `.wpsync/content/`. Die lokale URL nimmt er aus `map.json` –
+  geprüft, bevor sie WP-CLI erreicht: Ist sie keine http(s)-URL ohne Leerraum und Steuerzeichen,
+  endet der Export mit Exit 20; neu bauen mit `wpsync pull <site> --content --full`.
+- **stdout gehört den Daten:** Jede Meldung geht auf stderr, auch ohne `--json`. Mit `--json`
+  folgt als letzte Zeile das übliche Ergebnisobjekt (`command: "content export"`,
+  `data: {rows, canon_version}`); ein Aufrufer liest Zeilen, die mit `{"t":` beginnen, als Daten.
+  Bei einem Fehler können vorher schon Datenzeilen geschrieben sein – dann zählt der Exit-Code.
+- **Braucht einen aktuellen Inhaltsstand:** Fehlt er, ist er unvollständig oder verworfen, endet
+  der Export mit Exit 2 und dem Hinweis auf `wpsync pull <site> --content`.
+- **Container-Modus:** dieselben Schalter wie beim Pull (`--driver container --container …
+  --docroot … --db-host … --db-name … --db-user … --local-url …`) und `--secret-stdin` mit
+  Secret und DB-Passwort als erste und zweite Zeile, damit ein Aufrufer jedem Befehl denselben
+  stdin geben kann; das Secret wird nicht benutzt. PHP-Version (für das WP-CLI-Image) und
+  Tabellenpräfix kommen geprüft aus `env.json`. Ist die Datei nicht verwendbar: Exit 20, neu
+  bauen mit `wpsync pull <site> --content --full`.
+- **Site-Sperre:** Der Export hält die Sperre der Site; läuft gerade ein Pull, Push oder
+  Rollback, endet er mit Exit 20 (`error.reason: "site_locked"`).
+- Bricht das Skript ab, fehlt seine Schlusszeile oder ist eine Zeile länger als 256 MiB, ist die
+  Ausgabe unvollständig: Exit 1, `error.reason: "content_export_failed"`.
+
+**Doppelt escapte URLs.** Unabhängig von `--content` ersetzt **jeder** Pull ab dieser Version
+auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON) – bisher blieben sie auf die
+Live-Domain gerichtet. `staging create` und `staging refresh` schreiben sie mit Agent ≥ 0.7.0
+ebenfalls um.
+
 ## Staging auf dem Server
 
 Eine Kopie der Live-Site auf dem Server des Kunden – mit dessen PHP, Datenbank und Plugins –,
@@ -541,9 +706,12 @@ abbilden lässt, sofern das Profil sie kopiert.
   und `wpsync-staging.json`.
 - **Login-Token im Access-Log:** Der Einmal-Link trägt sein Token in der Adresse; es steht nach
   dem Einlösen – verbraucht – im Access-Log des Webservers.
-- **Live-URLs, die bleiben:** Doppelt escaptes JSON und kaputte serialisierte Werte werden nicht
-  umgeschrieben und zeigen weiter auf Live. `skipped_values` im Ergebnis zählt die übersprungenen
-  serialisierten Werte und ist eine Obergrenze. Absolute Dateipfade werden nicht umgeschrieben.
+- **Live-URLs, die bleiben:** Kaputte serialisierte Werte werden nicht umgeschrieben und zeigen
+  weiter auf Live – ab Agent 0.7.0 auch dann, wenn nur ein String **in** einem serialisierten
+  Wert serialisiert aussieht, sich nicht lesen lässt und die Live-URL enthält; der ganze Wert
+  bleibt dann unverändert. Bis Agent 0.6.0 galt das auch für doppelt escaptes JSON (`https:\\\/\\\/…`).
+  `skipped_values` im Ergebnis zählt die übersprungenen serialisierten Werte und ist eine
+  Obergrenze. Absolute Dateipfade werden nicht umgeschrieben.
 - **Was als Live gilt:** nur die Domain der Site mit und ohne `www.` auf demselben Port. Andere
   Subdomains von Live und eine Umlaut-Domain in der jeweils anderen Schreibweise (Punycode) sind
   für den Riegel fremde Hosts und nicht gesperrt.
@@ -610,6 +778,18 @@ abbilden lässt, sofern das Profil sie kopiert.
   WordPress' `sanitize_file_name()` entschärfen würde (`bild.shtml.jpg`). Pfade bleiben
   unter `wp-content/uploads/` ohne Symlink auf dem Weg, nie in Staging- oder Push-Arbeitsordnern.
   Vorhandene Dateien ersetzt ein Push nie.
+- **Inhalts-Manifest:** `/content/manifest` ist signiert wie jeder Request, liest nur und
+  braucht kein Push-Fenster. Die Inhalte verlassen den Server dort nur als Fingerabdruck, ohne
+  Werte, im Umfang des Pull-Profils (abgewählte Tabellen und Beitragstypen fehlen) und ohne
+  Transients und `wpsync_*`-Optionen. Der Fingerabdruck ist ein ungesalzenes SHA-256: Für alles,
+  was der Pull pseudonymisiert, liefert das Manifest deshalb gar keinen (`why: "pseudonymized"`),
+  ausser der Pull läuft mit `--no-anonymize`. Für alle anderen Zeilen gilt: Wer das Manifest
+  hat, kann kurze oder erratbare Werte am Abdruck wiedererkennen. Die Listen des Agents für den späteren Inhalts-Push
+  stehen im Kopf als Daten; sie erweitern keine Rechte. Lokal liegen Manifest und Baseline unter
+  `.wpsync/content/` neben dem Docroot; wpsync schreibt und liest sie, ohne einem Symlink zu
+  folgen, und prüft die Werte aus `env.json`, bevor sie an Docker oder WP-CLI gehen. Die
+  Baseline enthält die Inhalte der lokalen Datenbank im Klartext (nach der Pseudonymisierung
+  des Pulls) – sie gehört wie der Dump nicht in ein Repo.
 - **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
   rollt nur unbestätigte Pushes zurück und sperrt einen Push nach 5 falschen Schlüsseln für
   10 Minuten. Der Schlüssel ist pro Push
@@ -705,6 +885,8 @@ welche Datei genutzt wird.
 ├── .wpsync/
 │   ├── baseline.json                Stand des letzten Pulls
 │   ├── pushes/<push-id>.json        Journal je Push: vorheriger Baseline-Stand, Rescue-URL
+│   ├── content/                     nur nach pull --content: Manifest, map.json, Baseline,
+│   │                                unfaithful.jsonl, env.json, summary.json
 │   └── db/pull.sql                  letzter Dump (wird beim nächsten Pull ersetzt)
 └── .gitignore                       bis CLI 0.4.0 von wpsync geschrieben, seither ohne Wirkung
 ~/wpsync-sites/.wpsync-git/
@@ -792,10 +974,10 @@ als Asset `wpsync_<version>_linux_arm64` mit Prüfsumme `wpsync_<version>_linux_
 
 | Schalter | Befehle | Wirkung |
 |---|---|---|
-| `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version`, `staging`, `push`, `pushes`, `rollback` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
-| `--secret-stdin` | `scan`, `pull`, `status`, `staging`, `push`, `pushes`, `rollback` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus des Pulls DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
+| `--json` | `pair`, `scan`, `pull`, `status`, `unpair`, `doctor`, `version`, `staging`, `push`, `pushes`, `rollback`, `content export` | Ein JSON-Objekt je Zeile auf stdout, menschliche Meldungen auf stderr, keine Rückfragen. Letzte Zeile immer `{"event":"result","command":…,"ok":…,"exit_code":…,"data":…,"error":…}` |
+| `--secret-stdin` | `scan`, `pull`, `status`, `staging`, `push`, `pushes`, `rollback`, `content export` | Kopplungs-Secret als erste Zeile von stdin; im Container-Modus von `pull` und `content export` DB-Passwort als zweite. Nie über Argumente oder Umgebungsvariablen |
 | `--secret-out` | `pair --json` | Secret einmal im Ergebnis-JSON (`data.secret`), nichts in der Keychain |
-| `--driver container` | `pull`, `status`, `list`, `stop`; `push`, `pushes`, `rollback` mit `--docroot` und `--secret-stdin` | Vorhandener WordPress-Container bzw. Site-Ordner neben dem Docroot statt DDEV, siehe unten |
+| `--driver container` | `pull`, `status`, `list`, `stop`, `content export`; `push`, `pushes`, `rollback` mit `--docroot` und `--secret-stdin` | Vorhandener WordPress-Container bzw. Site-Ordner neben dem Docroot statt DDEV, siehe unten |
 | `--server` | `doctor` | Nur Version, Mail-Riegel, Docker-CLI, `WPSYNC_CONFIG_DIR` |
 
 `push`, `pushes` und `rollback` kennen `--json` (ab CLI 0.4.0) und laufen ab CLI 0.5.0 auch im
@@ -804,7 +986,8 @@ Container-Modus (siehe [Push im Container-Modus](#push-im-container-modus)). `tr
 auch im Container.
 
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
-Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`.
+Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`, mit
+`--content` zusätzlich `content`.
 
 Das Ergebnis von `pull --json` (`data`) enthält `warnings`, sobald etwas ohne Abbruch scheiterte;
 fehlt das Feld, gab es keine. Werte:
@@ -813,6 +996,15 @@ fehlt das Feld, gab es keine. Werte:
   internen Git fehlt (Meldung auf stderr). Der nächste Pull committet wieder.
 - `symlink_skipped` – Dateien unter einem symbolischen Link im Docroot wurden nicht geschrieben
   (Pfade auf stderr). Sie fehlen in der Baseline, der nächste Pull fragt sie erneut an.
+
+**`pull --content --json`, `content export --json`** (ab Agent 0.7.0). Mit `--content` enthält
+`data` von `pull` das Objekt `content`: `rows` (Zeilen im Manifest), `unfaithful` (Schlüssel in
+`unfaithful.jsonl`), `id_max` (`posts`, `terms`, `term_taxonomy`), `canon_version` und
+`reloaded` (dieser Pull hat die Inhaltstabellen neu geladen und die Baseline neu gebaut). Ohne
+`--content` fehlt das Feld. `content export` schreibt seine Datenzeilen immer auf stdout und
+Meldungen immer auf stderr; mit `--json` ist die letzte Zeile das Ergebnisobjekt mit
+`command: "content export"` und `data: {rows, canon_version}`. Es gibt keine `phase`-Zeilen.
+Format und Ablage: [Inhalte](#inhalte-manifest-baseline-export).
 
 **`staging --json`** (ab CLI 0.4.0, Agent 0.5.0). `command` im Ergebnis ist `staging create`,
 `staging refresh`, `staging open`, `staging status` oder `staging delete`. Mit `--json` (und ohne
@@ -864,7 +1056,7 @@ verschlechterter Seite `health: [{"url", "before", "after"}]` (z. B. `"HTTP 200"
 `error.reason: "nothing_to_push"` nennt `error.skipped_new` die lokal neuen, nicht genannten
 Einheiten (fehlt, wenn es keine gibt).
 
-**Site-Lock.** Pro Site läuft nur ein `pull`, `push` oder `rollback` gleichzeitig (`flock` auf
+**Site-Lock.** Pro Site läuft nur ein `pull`, `push`, `rollback` oder `content export` gleichzeitig (`flock` auf
 `<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
 sofort mit Exit 20 (`local_env`, `error.reason: "site_locked"`; Aufrufer prüfen `reason`, nicht
 den Meldungstext), ohne die
@@ -879,14 +1071,14 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | Code | Name | Beispiel |
 |---|---|---|
 | 0 | ok | |
-| 1 | unknown | auch: die Quelle meldet unzulässige Werte (Tabellenpräfix, `home`/`siteurl`, PHP-Version, Tabellennamen). Bei Staging mit `error.reason`, siehe unten |
-| 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus, ungültiger `--docroot` |
+| 1 | unknown | auch: die Quelle meldet unzulässige Werte (Tabellenpräfix, `home`/`siteurl`, PHP-Version, Tabellennamen). Bei Staging, Push und Inhalten mit `error.reason`, siehe unten |
+| 2 | usage | unbekannter Schalter, Rückfrage nötig, Jahresgrenze für Uploads im Container-Modus, ungültiger `--docroot`; `pull --content` mit einem Profil ohne alle sieben Inhaltstabellen; `content export` ohne aktuellen Inhaltsstand |
 | 10 | agent_unreachable | Site oder Plugin nicht erreichbar |
 | 11 | agent_outdated | Agent unter der Mindestversion; `error.installed`, `error.required` |
 | 12 | pair_rejected | Pairing-Code falsch oder abgelaufen |
 | 13 | auth_failed | Kopplung widerrufen |
 | 14 | rate_limited | Server bremst oder sperrt; später fortsetzen |
-| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits (`error.reason: "site_locked"`) |
+| 20 | local_env | Container fehlt oder läuft nicht, Datenbank nicht erreichbar, `.ddev` weicht ab, `pull`/`push`/`rollback` der Site läuft bereits (`error.reason: "site_locked"`), `content export`: `env.json` nicht verwendbar |
 | 21 | disk_full | lokal kein Platz – oder der Server meldet keinen (HTTP 507, bei `push` und `staging`) |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort. `push`: nur vor dem Tausch, danach läuft er zu Ende |
@@ -903,7 +1095,7 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 40–44 und 50–53 gibt es ab CLI 0.4.0; bis 0.3.1 endete `push` in diesen Fällen mit 1. Die lokale
 Site-Sperre bleibt Exit 20 mit `error.reason: "site_locked"` – 44 meint nur die Sperre auf dem
 Server. `push --to staging` gegen einen Agent unter 0.5.0 ist Exit 11, ebenso `push --uploads`
-gegen einen Agent unter 0.6.0.
+gegen einen Agent unter 0.6.0 und `pull --content` gegen einen Agent unter 0.7.0.
 
 `error.reason` bei Exit 1 (Aufrufer prüfen `reason`, nicht den Meldungstext):
 
@@ -921,6 +1113,9 @@ gegen einen Agent unter 0.6.0.
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
 | `upload_exists` | `push --uploads`: auf der Site liegt am selben Pfad eine andere Datei – nichts übertragen, nichts getauscht, auch mit `--force` |
 | `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, aktive Typen wie SVG/HTML, von WordPress nicht erlaubt), der Dateiname ist nicht WordPress-konform (Leerzeichen, Sonderzeichen, mittlere Endungen) oder der Inhalt passt nicht zur Endung |
+| `manifest_incomplete` | `pull --content`: das Inhalts-Manifest des Agents ist unvollständig oder nicht in der erwarteten Form (Kopf fehlt, Seite bricht ab, Cursor rückt nicht vor) |
+| `content_export_failed` | `pull --content`, `content export`: das Export-Skript in der lokalen Site lief nicht zu Ende (Abbruch, Schlusszeile fehlt, Zeilenzahl passt nicht), oder die lokale Umgebung kann kein Skript über stdin ausführen |
+| `canon_version` | `pull --content`: der Agent rechnet Fingerabdrücke in einer anderen Form als diese CLI – CLI oder Agent aktualisieren |
 
 **Container-Modus.** wpsync legt keine Container, Netze, Datenbanken oder Benutzer an. Der
 Aufrufer startet einen `wordpress:php<x.y>-apache`-Container mit den Variablen `WORDPRESS_DB_*`
@@ -964,6 +1159,8 @@ nichts davon im Docroot:
     ├── pushes/<id>.json    Journal je Push (0600): Baseline vorher, Rescue-URL, Salt
     ├── staging-base.json   Stempel der Pushes nach Staging (versiegelt)
     ├── lock                Site-Sperre für pull, push, rollback
+    ├── content/            nur nach pull --content: Manifest, map.json, Baseline,
+    │                       unfaithful.jsonl, env.json, summary.json
     ├── db/                 DB-Zwischenablage (Tabellen-Dumps des Pulls)
     └── history.git/        internes Git, Auto-Commit nach Pull, Live-Push und Rollback
 ```
@@ -1067,6 +1264,9 @@ scripts/e2e-security.sh
 
 # Staging-Kopie gegen eine Apache-Quelle mit PHP 7.4 (eigene DDEV-Projekte, braucht jq)
 scripts/e2e-staging.sh
+
+# Inhalte: pull --content und content export (eigene DDEV-Projekte, braucht jq; rund 3 Minuten)
+scripts/e2e-content.sh
 ```
 
 Struktur:
