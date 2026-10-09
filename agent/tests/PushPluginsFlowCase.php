@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace WpSync\Tests;
 
+use WpSync\ContentImage;
 use WpSync\ContentPlugins;
 use WpSync\Push;
 use WpSync\PushPlugins;
@@ -156,5 +157,25 @@ abstract class PushPluginsFlowCase extends PushRescueFlowCase
             }
         }
         return $out;
+    }
+
+    /** rescue.php läuft ohne WordPress: ohne den Schlüssel der Installation. Danach lädt WordPress wieder. */
+    protected function rescued(string $id): array
+    {
+        $keys               = ContentImage::$keys;
+        ContentImage::$keys = [];
+        $answer             = $this->rescueDb($id);
+        ContentImage::$keys = $keys;
+        $this->assertSame(200, $answer[0], (string) json_encode($answer[1]));
+        return $answer[1];
+    }
+
+    /** Wie activate_plugin() im WP-Admin: anhängen, sort(), speichern. */
+    protected function adminActivates(ContentMemory $db, string $entry): void
+    {
+        $current   = (array) unserialize((string) $db->data['options']['active_plugins']['option_value'], ['allowed_classes' => false]);
+        $current[] = $entry;
+        sort($current);
+        $db->data['options']['active_plugins']['option_value'] = serialize($current);
     }
 }

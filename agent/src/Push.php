@@ -939,7 +939,7 @@ final class Push
             if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
                 $units = [];
                 foreach ((array) $push['units'] as $unit) {
-                    $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? $unit + ['kept' => true] : $unit;
+                    $units[] = self::dbUnit($unit) ? $unit + ['kept' => true] : $unit;
                 }
                 Store::updatePush($push['push_id'], ['units' => (string) wp_json_encode($units)]);
                 self::finishRollback($push['push_id']);
@@ -1058,8 +1058,9 @@ final class Push
         $dirs   = [$content, $work];
         // DB → Code → Uploads (§7.6). Hat sich eine Zeile seit dem Push geändert, wird nichts
         // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
-        $actions = [];
-        $record  = PushRescue::read($dirs[1], $pushId);
+        $actions  = [];
+        $switched = null; // was die Rücknahme an der Liste der aktiven Plugins geändert hat (P4 §4.4)
+        $record   = PushRescue::read($dirs[1], $pushId);
         // Unter der Sperre noch einmal: wurde der Push bestätigt, seit der Aufrufer ihn las, gilt für ihn
         // das Push-Fenster (U18), das für einen unbestätigten niemand geprüft hat. Vor der Datenbank –
         // sonst gingen die Inhalte zurück und der Code bliebe.
@@ -1075,13 +1076,19 @@ final class Push
                 return self::error('wpsync_push_rollback', self::superseded($by), 409);
             }
             try {
-                $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
+                // Nur wenn der Commit „applied“ vermerkt hat, steht fest, dass seine Transaktion ankam: sonst
+                // zählt für active_plugins der Abdruck statt des Deltas (P4, V1). Kein Hook läuft (A17).
+                $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId, ($record['content']['state'] ?? '') === PushRescue::CONTENT_APPLIED);
             } catch (ContentException $e) {
                 return $e->toError();
             }
             // Ab hier steht in rescue.json, dass die Inhalte zurück sind: scheitert danach der Code,
             // überspringt ein zweiter Lauf die Datenbank und holt nur Code und Uploads nach.
             PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
+            if (is_array($back['plugins'] ?? null)) {
+                $switched = $back['plugins'];
+                self::notePlugins($pushId, (array) $push['units'], ['back' => $switched]);
+            }
             $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
         }
         list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId, null, $confirmed);
@@ -1105,12 +1112,41 @@ final class Push
         if ($actions !== []) {
             $answer['post_actions'] = $actions; // Nacharbeiten der Rücknahme (§7.7)
         }
+        if ($switched !== null) {
+            $answer['plugins'] = $switched;
+        }
         return new \WP_REST_Response($answer);
     }
 
     /**
+     * Ist das ein Eintrag des Protokolls, der für den DB-Anteil eines Pushs steht – seine Inhalte
+     * oder sein Plugin-Zustand (V12)?
+     *
+     * @param mixed $unit
+     */
+    private static function dbUnit($unit): bool
+    {
+        return is_array($unit) && in_array($unit['path'] ?? '', [PushContent::UNIT, PushPlugins::UNIT], true);
+    }
+
+    /**
+     * Vermerkt etwas an der Einheit plugins im Protokoll eines Pushs.
+     *
+     * @param list<mixed>          $units die Einheiten des Pushs, wie das Protokoll sie nennt
+     * @param array<string, mixed> $note
+     */
+    private static function notePlugins(string $pushId, array $units, array $note): void
+    {
+        $out = [];
+        foreach ($units as $unit) {
+            $out[] = is_array($unit) && ($unit['path'] ?? '') === PushPlugins::UNIT ? array_merge($unit, $note) : $unit;
+        }
+        Store::updatePush($pushId, ['units' => (string) wp_json_encode($out)]);
+    }
+
+    /**
      * Wurde der Push mit confirm abgeschlossen, nachdem rescue.php Code und Uploads zurückgenommen
-     * hatte – die Inhalte stehen also bewusst noch?
+     * hatte – die Inhalte stehen also bewusst noch – oder der Plugin-Zustand?
      *
      * @param array<string, mixed> $push
      */
@@ -1120,7 +1156,7 @@ final class Push
             return false;
         }
         foreach ((array) $push['units'] as $unit) {
-            if (is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT && !empty($unit['kept'])) {
+            if (self::dbUnit($unit) && !empty($unit['kept'])) {
                 return true;
             }
         }
@@ -1269,9 +1305,24 @@ final class Push
             }
             $note['post_actions'] = $actions;
         }
+        // Der Vermerk steht an der Einheit content. Hat der Satz kein Paket, trägt ihn die Einheit plugins;
+        // was an der Liste der aktiven Plugins geschah, steht in jedem Fall dort (V12). plugins_back kommt aus
+        // rescue.json – nicht authentisiert, deshalb nur in fester Form.
+        $back = is_array($stored['plugins_back'] ?? null) ? ['back' => PushRescue::pluginLists($stored['plugins_back'], ['deactivated', 'reactivated'])] : [];
+        $hasContent = false;
+        foreach ((array) $push['units'] as $unit) {
+            $hasContent = $hasContent || (is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT);
+        }
         $units = [];
         foreach ((array) $push['units'] as $unit) {
-            $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? array_merge($unit, $note) : $unit;
+            $path = is_array($unit) ? ($unit['path'] ?? '') : '';
+            if ($path === PushContent::UNIT) {
+                $units[] = array_merge($unit, $note);
+            } elseif ($path === PushPlugins::UNIT) {
+                $units[] = array_merge($unit, $hasContent ? ['via' => PushRescue::VIA_RESCUE] : $note, $back);
+            } else {
+                $units[] = $unit;
+            }
         }
         Store::updatePush($pushId, ['units' => (string) wp_json_encode($units)]);
     }

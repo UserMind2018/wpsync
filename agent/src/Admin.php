@@ -277,6 +277,10 @@ final class Admin
     /** @param array<string, mixed> $unit */
     public static function unitLine(array $unit): string
     {
+        // Der Plugin-Zustand eines Pushs ist keine Einheit mit Dateien (Spec Content-Push P4 §8.5).
+        if (($unit['path'] ?? '') === PushPlugins::UNIT) {
+            return self::pluginLine($unit);
+        }
         $line = (string) ($unit['path'] ?? '');
         $old  = (string) ($unit['old_version'] ?? '');
         $new  = (string) ($unit['new_version'] ?? '');
@@ -319,6 +323,39 @@ final class Admin
                     }
                 }
             }
+        }
+        return $line;
+    }
+
+    /**
+     * Die Zeile der Einheit plugins: was der Push an der Liste der aktiven Plugins vorhatte bzw. getan
+     * hat, und was daraus wurde. Die Namen kommen aus der Datenbank; ausgegeben wird die Zeile escaped.
+     *
+     * @param array<string, mixed> $unit
+     */
+    private static function pluginLine(array $unit): string
+    {
+        $names = static function ($raw): array {
+            return array_values(array_filter(is_array($raw) ? $raw : [], 'is_string'));
+        };
+        $done   = array_key_exists('activated', $unit) || array_key_exists('deactivated', $unit);
+        $labels = $done ? ['activated' => 'aktiviert: ', 'deactivated' => 'deaktiviert: '] : ['activate' => 'aktivieren ', 'deactivate' => 'deaktivieren '];
+        $parts  = [];
+        foreach ($labels as $field => $label) {
+            $list = $names($unit[$field] ?? null);
+            if ($list !== []) {
+                $parts[] = $label . implode(', ', $list);
+            }
+        }
+        if ($done) {
+            $line = 'Plugin-Zustand – ' . ($parts === [] ? 'unverändert' : implode('; ', $parts));
+        } else {
+            $line = 'Plugin-Zustand – vorgesehen: ' . ($parts === [] ? 'nichts' : implode('; ', $parts));
+        }
+        if (is_array($unit['back'] ?? null)) {
+            $line .= ' – Plugin-Zustand zurückgenommen' . (($unit['via'] ?? '') === PushRescue::VIA_RESCUE ? ' (über rescue.php)' : '');
+        } elseif (!empty($unit['kept'])) {
+            $line .= ' – steht noch (mit confirm angenommen)';
         }
         return $line;
     }
