@@ -80,6 +80,11 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   umgeschrieben (bisher als Text ersetzt und damit zerstört). Sieht ein String **in** einem
   serialisierten Wert serialisiert aus, lässt sich nicht lesen und enthält die Live-URL, bleibt
   der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
+- Agent: Für eine Anfrage an den Agent gibt `$wpdb` keinen Datenbankfehler mehr aus. Mit
+  `WP_DEBUG` und `WP_DEBUG_DISPLAY` stand er sonst samt Abfrage als HTML vor dem JSON der
+  Antwort – die CLI konnte sie nicht lesen (ein abgelehnter Inhalts-Push galt als „Stand
+  unklar“ statt `content_failed`), und die Meldung zeigte die Abfrage mit ihren Werten. Im
+  Fehlerprotokoll des Servers steht der Fehler weiter
 
 ### Sicherheit
 - CLI: Die lokale URL aus `map.json` wird geprüft, bevor sie als Argument an `wp eval-file`

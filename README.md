@@ -1425,6 +1425,14 @@ scripts/e2e-staging.sh
 
 # Inhalte: pull --content und content export (eigene DDEV-Projekte, braucht jq; rund 3 Minuten)
 scripts/e2e-content.sh
+
+# Inhalts-Push: push --content nach Staging und Live, Rücknahme, Ablehnungen – gegen eine echte
+# MariaDB (eigene DDEV-Projekte wpsync-e2e-cdb und -cdb-target, braucht jq; rund 5 Minuten)
+scripts/e2e-content-push.sh
+
+# Container-Modus: push, pushes und rollback als Linux-Binary in Wegwerf-Containern
+# (eigenes DDEV-Projekt wpsync-e2e-cpush, braucht jq; rund 15 Minuten)
+scripts/e2e-container-push.sh
 ```
 
 Struktur:
