@@ -80,6 +80,9 @@ sich wie bisher (`content_not_rolled_back`).
   (`content_error.code: "rescue_db_unavailable"`) – unabhängig vom Verfall nach 24 h, den die
   tägliche Wartung des Agents besorgt und der ausbleibt, solange WordPress unten ist. Das Alter
   steht authentisiert im Umschlag
+- Lässt sich ein Push nicht sperren (kein `flock`), schliesst `rescue.php` seinen DB-Anteil nie
+  ab – auch nicht, wenn noch kein Vorher-Abbild liegt: `content_error.code:
+  "rescue_db_unavailable"`, Code und Uploads gehen wie bisher zurück
 - Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
   (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
 

@@ -488,7 +488,8 @@ final class PushRescue
      * Schritt 6 (P3 §7.2): die Inhalte, über RescueContent – das hier und erst hier geladen wird. Der
      * Ausgang steht danach in rescue.json. Steht der DB-Anteil auf „pending“ und gibt es kein
      * Vorher-Abbild, wurde nie geschrieben (§7.1): dann ist nichts zu tun, ohne Umschlag und ohne
-     * Verbindung – ein Commit, der noch läuft, lehnt an seiner Naht ab.
+     * Verbindung – ein Commit, der noch läuft, lehnt an seiner Naht ab. Auch das nur unter der
+     * Sperre des Pushs: ohne sie bleibt der DB-Anteil offen (rescue_db_unavailable).
      *
      * @param array<string, mixed>              $record
      * @param array{key: string, locked: bool} $content
@@ -498,11 +499,12 @@ final class PushRescue
     {
         $before = $workDir . '/' . $pushId . '/content/before.json';
         clearstatcache(true, $before);
-        if (($record['content']['state'] ?? '') === self::CONTENT_PENDING && !file_exists($before) && !is_link($before)) {
-            $result = ['state' => 'nothing', 'wrote' => false];
-        } elseif (empty($content['locked'])) {
-            // Ohne Sperre könnte ein laufender Commit die Inhalte nach der Rücknahme festschreiben (R10).
+        if (empty($content['locked'])) {
+            // Ohne Sperre könnte ein laufender Commit die Inhalte nach der Rücknahme festschreiben (R10) –
+            // auch den, der sein Vorher-Abbild eben erst schreibt: keine Abkürzung ohne Sperre.
             $result = ['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'rescue_db_unavailable']];
+        } elseif (($record['content']['state'] ?? '') === self::CONTENT_PENDING && !file_exists($before) && !is_link($before)) {
+            $result = ['state' => 'nothing', 'wrote' => false];
         } elseif (!class_exists(__NAMESPACE__ . '\\RescueContent', false) && !is_file(__DIR__ . '/RescueContent.php')) {
             // Ein halb aktualisierter Agent: lieber Code und Uploads zurück als ein Fatal ohne Antwort.
             $result = ['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'rescue_db_unavailable']];

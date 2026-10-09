@@ -500,6 +500,29 @@ final class PushRescueDbTest extends ContentApplyCase
         $this->assertSame('old', $this->code());
     }
 
+    /**
+     * Security-Review P3, N4: die Abkürzung „pending ohne Vorher-Abbild ⇒ nichts zu tun“ gilt nur
+     * unter der Sperre des Pushs. Ohne sie (kein flock) könnte der Commit sein Vorher-Abbild genau
+     * jetzt schreiben und danach festschreiben – der DB-Anteil gälte als erledigt, die Inhalte
+     * stünden. Dann bleibt er offen, wie überall sonst ohne Sperre.
+     */
+    public function testPendingWithoutABeforeImageStaysOpenWithoutTheLock(): void
+    {
+        $this->assertSame('pending', $this->record()['content']['state']);
+        symlink($this->root . '/irgendwo', $this->work . '/' . self::ID . '/' . PushRescue::LOCK_FILE); // hier lässt sich nicht sperren
+        $this->assertFalse(PushRescue::lock($this->work, self::ID));
+
+        list($status, $body) = $this->rescue();
+        $this->assertSame(200, $status);
+        $this->assertSame(['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], $body['content']);
+        $this->assertSame(['content_not_rolled_back'], $body['warnings']);
+        $record = $this->record();
+        $this->assertSame(['state' => 'pending', 'sha256' => self::SHA, 'error' => 'rescue_db_unavailable'], $record['content']);
+        $this->assertTrue(PushRescue::contentOpen($record), 'der DB-Anteil ist nicht abgeschlossen');
+        $this->assertSame(0, $this->connected);
+        $this->assertSame('old', $this->code(), 'Code und Uploads gehen trotzdem zurück (R7)');
+    }
+
     /** R15: Fremdes an eingefügten Objekten bleibt stehen; Antwort und Datensatz nennen es. */
     public function testWhatGrewOnInsertedObjectsIsLeftAndNamed(): void
     {
