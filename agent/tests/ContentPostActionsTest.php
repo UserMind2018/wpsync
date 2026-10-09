@@ -141,8 +141,10 @@ final class ContentPostActionsTest extends TestCase
     /** §7.8: in der Kopie nur SQL und Dateien – über den Store der Kopie. */
     public function testStagingStepsUseOnlyTheStoreAndFiles(): void
     {
-        $dir = sys_get_temp_dir() . '/wpsync-postactions-' . bin2hex(random_bytes(4));
+        // Mit Zeichen im Pfad, die für glob() Muster wären (Security-Review P3, H1).
+        $dir = sys_get_temp_dir() . '/wpsync-postactions-[' . bin2hex(random_bytes(4)) . ']';
         mkdir($dir . '/elementor/css', 0777, true);
+        file_put_contents($dir . '/elementor/css/.versteckt.css', 'x');
         file_put_contents($dir . '/elementor/css/post-219.css', 'alt');
         file_put_contents($dir . '/elementor/css/bleibt.txt', 'x');
         $store = new ContentMemory([
@@ -161,6 +163,7 @@ final class ContentPostActionsTest extends TestCase
         $this->assertSame('2', $store->data['term_taxonomy']['5']['count']);
         $this->assertFileDoesNotExist($dir . '/elementor/css/post-219.css');
         $this->assertFileExists($dir . '/elementor/css/bleibt.txt');
+        $this->assertFileExists($dir . '/elementor/css/.versteckt.css');
         $this->assertSame(["DELETE FROM `stgabcdef_yoast_indexable` WHERE `object_type` = 'post' AND `object_id` IN (219,1000001)"], $this->db->queries);
         $this->assertSame([], $this->calls(), 'keine WordPress-Funktion von Live für die Kopie');
 

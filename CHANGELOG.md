@@ -59,6 +59,9 @@ sich wie bisher (`content_not_rolled_back`).
 - Ein aufgeräumter Rescue-Stub, an dessen Stelle der Server umleitet (3xx statt 404), ist jetzt
   „Notfallweg vorbei“ (`ErrRescueGone`) statt eines rohen HTTP-Fehlers
 - Antworten von `rescue.php` über 4.000 Bytes (viele Schlüssel) liest die CLI jetzt vollständig
+- Ein Webroot, dessen Pfad `[`, `]`, `*` oder `?` enthält: `rescue.php` fand den Push nicht (404
+  `unknown push`), der Agent weder den Marker `rescue.pending` noch – beim Deaktivieren – seine
+  Arbeitsordner, und Plugin-Versionen blieben leer. Der Agent listet Ordner jetzt ohne `glob()`
 
 **Sicherheit**
 - Vor bestandener Schlüsselprüfung lädt `rescue.php` nichts ausser `PushSwap` und `PushRescue`,

@@ -41,7 +41,7 @@ abstract class PushContentFlowCase extends TestCase
         require_once __DIR__ . '/ContentFixtures.php';
         require_once __DIR__ . '/ContentMemory.php';
 
-        $this->root    = (string) realpath(sys_get_temp_dir()) . '/wpsync-contentflow-' . bin2hex(random_bytes(4));
+        $this->root    = (string) realpath(sys_get_temp_dir()) . '/wpsync-contentflow-' . bin2hex(random_bytes(4)) . $this->rootSuffix();
         $this->live    = $this->root . '/wp-content';
         $this->staging = $this->root . '/' . Staging::DIR . '/wp-content';
         foreach ([$this->live . '/plugins/wpsync-agent', $this->live . '/plugins/x', $this->live . '/uploads/2026/10', $this->staging . '/plugins/x'] as $dir) {
@@ -66,6 +66,12 @@ abstract class PushContentFlowCase extends TestCase
                 ? ContentFixtures::staging($this->stagingDb, $content . '/uploads')
                 : ContentFixtures::live($this->liveDb, $content . '/uploads');
         };
+    }
+
+    /** Hängt am Namen des temporären Webroots – für Tests mit Zeichen im Pfad, die glob() als Muster läse. */
+    protected function rootSuffix(): string
+    {
+        return '';
     }
 
     protected function tearDown(): void

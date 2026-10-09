@@ -31,6 +31,8 @@ final class PushRescue
     public const ID           = '/^p_[0-9]{8}_[a-f0-9]{12}\z/';
     /** Ordner einer Staging-Kopie im Webroot – wie StagingGuard::DIR_RE, das rescue.php nicht lädt. */
     public const STAGING_DIR  = '/^wpsync-staging-[a-f0-9]{12}\z/';
+    /** Name eines Arbeitsordners in wp-content, wie Store::pushDirName() ihn vergibt (und jeder ältere mit diesem Anfang). */
+    public const WORK_DIR     = '/^wpsync-push-/';
     /** Warnung der Rücknahme: eine hinzugefügte Datei wurde seit dem Push geändert und bleibt (§8.4). */
     public const UPLOAD_CHANGED = 'upload_changed_since_push';
     /**
@@ -296,6 +298,23 @@ final class PushRescue
     }
 
     /**
+     * Die Arbeitsordner in einem wp-content (wpsync-push-<zufall>): nur echte Ordner – der Agent legt
+     * sie so an –, nie ein Symlink. Ohne glob(): ein Pfad mit [ ] * ? wäre dort selbst ein Muster.
+     *
+     * @return list<string>
+     */
+    public static function workDirs(string $contentDir): array
+    {
+        $out = [];
+        foreach (PushSwap::entries(rtrim(str_replace('\\', '/', $contentDir), '/'), self::WORK_DIR) as $dir) {
+            if (!is_link($dir) && is_dir($dir)) {
+                $out[] = $dir;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Einstieg für rescue.php. Sucht den Push in wp-content von Live und der Staging-Kopie (V8);
      * jeder Datensatz wird nur gegen das wp-content geprüft, in dem er liegt.
      *
@@ -320,13 +339,8 @@ final class PushRescue
             return [400, ['ok' => false, 'error' => 'bad request']];
         }
         foreach ($contentDirs as $contentDir) {
-            // glob() liefert bei einem Fehler false – (array) false wäre [false] und damit der Pfad ''.
-            foreach (glob($contentDir . '/wpsync-push-*', GLOB_ONLYDIR) ?: [] as $workDir) {
-                if (is_link((string) $workDir)) {
-                    continue; // der Agent legt den Arbeitsordner als echten Ordner an
-                }
-                $workDir = (string) $workDir;
-                $record  = self::read($workDir, $pushId);
+            foreach (self::workDirs((string) $contentDir) as $workDir) {
+                $record = self::read($workDir, $pushId);
                 if ($record === null) {
                     continue;
                 }

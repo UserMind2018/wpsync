@@ -64,8 +64,10 @@ final class Push
     /** Deaktivieren entfernt Arbeitsordner, Snapshots und Rescue-Stubs; bestätigte Stände bleiben live. */
     public static function uninstall(): void
     {
-        foreach ((array) glob(self::content() . '/wpsync-push-*', GLOB_ONLYDIR) as $dir) {
-            PushSwap::remove((string) $dir);
+        foreach (self::content() === '' ? [] : PushSwap::entries(self::content(), PushRescue::WORK_DIR) as $dir) {
+            if (is_dir($dir)) {
+                PushSwap::remove($dir); // einen Symlink an der Stelle entfernt es, ohne ihm zu folgen
+            }
         }
         if (self::content() !== '') {
             PushRescueStub::remove(dirname(self::content()));
@@ -94,8 +96,9 @@ final class Push
             return;
         }
         $found = false;
-        foreach (glob($live . '/wpsync-push-*/' . PushRescue::PENDING_FILE) ?: [] as $marker) {
-            if (is_file((string) $marker) && !is_link((string) $marker) && @unlink((string) $marker)) {
+        foreach (PushRescue::workDirs($live) as $work) {
+            $marker = PushRescue::pendingFile($work);
+            if (is_file($marker) && !is_link($marker) && @unlink($marker)) {
                 $found = true;
             }
         }

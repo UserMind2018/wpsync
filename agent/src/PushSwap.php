@@ -91,6 +91,26 @@ final class PushSwap
         return true;
     }
 
+    /**
+     * Die Einträge von $dir, deren Name auf $pattern passt – volle Pfade, nach Namen sortiert, nie
+     * „.“ und „..“. Ohne glob(): dort sind [ ] * ? auch im Pfad davor Muster, und unter einem
+     * Webroot wie /kunden/[alt]/htdocs fände es nichts.
+     *
+     * @param string $pattern regulärer Ausdruck für den Namen allein
+     * @return list<string>
+     */
+    public static function entries(string $dir, string $pattern): array
+    {
+        $names = @scandir($dir);
+        $out   = [];
+        foreach ($names === false ? [] : $names as $name) {
+            if ($name !== '.' && $name !== '..' && preg_match($pattern, $name) === 1) {
+                $out[] = $dir . '/' . $name;
+            }
+        }
+        return $out;
+    }
+
     /** Löscht rekursiv; Symlinks werden entfernt, nie verfolgt. */
     public static function remove(string $path): void
     {

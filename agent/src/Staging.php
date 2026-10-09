@@ -1322,7 +1322,7 @@ final class Staging
     private static function write(StagingGuard $guard, string $file, string $content, ?int $mode = null): void
     {
         $file = $guard->path($file);
-        foreach (glob($file . '.*.tmp') ?: [] as $stale) {
+        foreach (PushSwap::entries(dirname($file), '/^' . preg_quote(basename($file), '/') . '\..*\.tmp\z/') as $stale) {
             @unlink($guard->path((string) $stale)); // Rest eines abgebrochenen Schreibens
         }
         $tmp = $guard->path($file . '.' . bin2hex(random_bytes(6)) . '.tmp');
