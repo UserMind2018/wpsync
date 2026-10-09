@@ -14,6 +14,10 @@ final class FakeWpdb
     /** @var string */
     public $base_prefix = 'wp_';
     /** @var string */
+    public $prefix = 'wp_';
+    /** @var string */
+    public $charset = 'utf8mb4';
+    /** @var string */
     public $posts = 'wp_posts';
     /** @var string */
     public $postmeta = 'wp_postmeta';

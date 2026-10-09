@@ -59,7 +59,39 @@ final class RestRoutesTest extends TestCase
             }
             $this->assertSame($signed, $args['permission_callback'], $route);
         }
-        $this->assertGreaterThanOrEqual(18, count($routes));
+        $this->assertGreaterThanOrEqual(19, count($routes));
+    }
+
+    /** Spec Content-Push §4.2: das Manifest hängt an derselben Signaturprüfung wie /db. */
+    public function testContentManifestIsASignedRoute(): void
+    {
+        $this->boot();
+        $routes = $this->routes();
+        $this->assertArrayHasKey('wpsync/v1/content/manifest', $routes);
+        $this->assertSame('POST', $routes['wpsync/v1/content/manifest']['methods']);
+        $this->assertSame([Rest::class, 'contentManifest'], $routes['wpsync/v1/content/manifest']['callback']);
+        $this->assertSame($routes['wpsync/v1/db']['permission_callback'], $routes['wpsync/v1/content/manifest']['permission_callback']);
+
+        $result = Rest::auth(new \WP_REST_Request('/wpsync/v1/content/manifest'));
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertSame(401, $result->status);
+    }
+
+    /** Ungültige Eingaben enden mit 400, bevor der Stream beginnt und bevor eine Abfrage läuft. */
+    public function testContentManifestRejectsAnInvalidCursorOrScope(): void
+    {
+        $this->boot();
+        foreach (['{"cursor":"x"}', '{"cursor":{"t":7,"a":""}}', '{"cursor":{"t":2,"a":["1"]}}', '{"cursor":{"t":2,"a":"1 OR 1"}}'] as $body) {
+            $result = Rest::contentManifest(new \WP_REST_Request('/wpsync/v1/content/manifest', [], $body));
+            $this->assertInstanceOf(\WP_Error::class, $result, $body);
+            $this->assertSame('wpsync_cursor', $result->code, $body);
+            $this->assertSame(400, $result->status, $body);
+        }
+        $result = Rest::contentManifest(new \WP_REST_Request('/wpsync/v1/content/manifest', [], '{"scope":{"tables":{"wp_posts":"all"}}}'));
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertSame('wpsync_scope', $result->code);
+        $this->assertSame(400, $result->status);
+        $this->assertSame([], $GLOBALS['wpdb']->queries);
     }
 
     public function testStagingRoutesRejectAnUnsignedCall(): void

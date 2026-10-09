@@ -77,6 +77,12 @@ final class Scope
         return !$this->plainPii;
     }
 
+    /** @return list<string> abgewählte Beitragstypen – für das Inhalts-Manifest (Spec Content-Push §4.2) */
+    public function excludedPostTypes(): array
+    {
+        return $this->postTypes;
+    }
+
     /** Pfad relativ zu wp-content ohne führenden Slash; entschieden wird nur auf der obersten Ebene. */
     public function excludesPath(string $rel, bool $isDir): bool
     {

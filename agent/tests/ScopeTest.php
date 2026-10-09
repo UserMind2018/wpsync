@@ -123,4 +123,10 @@ final class ScopeTest extends TestCase
         $this->assertTrue(Scope::fromArray(['plain_pii' => false])->anonymize());
         $this->assertFalse(Scope::fromArray(['plain_pii' => true])->anonymize());
     }
+
+    public function testExcludedPostTypesAreReadable(): void
+    {
+        $this->assertSame([], Scope::fromArray(null)->excludedPostTypes());
+        $this->assertSame(['shop_order', 'revision'], Scope::fromArray(['exclude_post_types' => ['shop_order', 'revision']])->excludedPostTypes());
+    }
 }

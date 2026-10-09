@@ -49,6 +49,8 @@ final class Rest
             'db-bundle'         => 'dbBundle',
             'db'                => 'dbChunk',
             'files'             => 'files',
+            // Inhalts-Manifest (Spec Content-Push §4.2): nur Fingerabdrücke, im Umfang des Pull-Scopes.
+            'content/manifest'  => 'contentManifest',
             'push/begin'        => 'pushBegin',
             'push/upload'       => 'pushUpload',
             'push/commit'       => 'pushCommit',
@@ -480,6 +482,35 @@ final class Rest
         }
         self::beginRaw('application/sql; charset=utf-8');
         echo $chunk['sql']; // phpcs:ignore WordPress.Security.EscapeOutput
+        exit;
+    }
+
+    /**
+     * Fingerabdrücke der Inhaltszeilen als JSON-Lines, seitenweise (Spec Content-Push §4.2).
+     *
+     * @return \WP_Error|void
+     */
+    public static function contentManifest(\WP_REST_Request $request)
+    {
+        $scope = self::scope($request);
+        if ($scope instanceof \WP_Error) {
+            return $scope;
+        }
+        try {
+            // ContentReader castet den Cursor nur – was nicht von ihm stammt, kommt nicht bis dorthin.
+            $cursor = ContentManifest::cursor(self::param($request, 'cursor'));
+        } catch (\InvalidArgumentException $e) {
+            return new \WP_Error('wpsync_cursor', 'invalid cursor', ['status' => 400]);
+        }
+        $deadline = microtime(true) + Budget::seconds((int) ini_get('max_execution_time'));
+        $lines    = 0;
+        self::beginRaw('application/x-ndjson');
+        ContentManifest::send($cursor, $scope, static function (string $line) use (&$lines): void {
+            echo $line, "\n"; // phpcs:ignore WordPress.Security.EscapeOutput
+            if (++$lines % 2000 === 0) {
+                flush();
+            }
+        }, $deadline);
         exit;
     }
 
