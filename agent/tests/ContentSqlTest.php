@@ -392,6 +392,35 @@ final class ContentSqlTest extends TestCase
         }
     }
 
+    public function testADatabaseErrorIsNeverPrintedIntoTheAnswer(): void
+    {
+        // WP_DEBUG mit WP_DEBUG_DISPLAY: $wpdb gibt einen Fehler samt Abfrage – und damit samt der
+        // Werte des Pakets – als HTML aus, vor dem JSON der Antwort.
+        $this->db = $this->connection();
+        $this->db->show_errors();
+        $this->db->fail('/^INSERT INTO `wp_postmeta`/', 'e2e boom');
+        $sql = $this->sql();
+        try {
+            $sql->transaction(static function () use ($sql): void {
+                $sql->write('postmeta', "5\0_e2e", ['values' => ['ein Wert des Pakets']]);
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertSame([], $this->db->shown, 'kein Schreibfehler steht in der Antwort');
+        $this->assertTrue($this->db->show_errors, 'danach gilt wieder die Einstellung der Site');
+
+        $this->db->fail('/FROM `wp_posts`/', 'Table is marked as crashed');
+        try {
+            $sql->read('posts', ['219'], false);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame([], $this->db->shown, 'kein Lesefehler steht in der Antwort');
+        }
+        $this->assertTrue($this->db->show_errors);
+    }
+
     public function testAFailedReadIsNotAnEmptyResult(): void
     {
         $this->db->fail('/FROM `wp_posts`/', 'Table is marked as crashed');

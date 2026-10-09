@@ -33,8 +33,24 @@ final class FakeWpdb
     public $observer = null;
     /** @var list<mixed> jeder Wert, der durch prepare() ging */
     public $prepared = [];
+    /** @var bool wie $wpdb->show_errors: ein Fehler wird samt Abfrage in die Antwort ausgegeben */
+    public $show_errors = false;
+    /** @var list<string> Abfragen, deren Fehler $wpdb ausgegeben hätte */
+    public $shown = [];
     /** @var list<array{pattern: string, results: list<mixed>, error: string|null}> */
     private $answers = [];
+
+    public function show_errors(bool $show = true): bool
+    {
+        $before            = $this->show_errors;
+        $this->show_errors = $show;
+        return $before;
+    }
+
+    public function hide_errors(): bool
+    {
+        return $this->show_errors(false);
+    }
 
     /** Antworten in dieser Reihenfolge; die letzte gilt für alle weiteren Treffer. Eine Closure wird mit dem SQL gefragt. */
     public function answer(string $pattern, ...$results): void
@@ -144,6 +160,9 @@ final class FakeWpdb
             }
             if ($answer['error'] !== null) {
                 $this->last_error = $answer['error'];
+                if ($this->show_errors) {
+                    $this->shown[] = $sql;
+                }
                 return [false, null];
             }
             $results = $answer['results'];

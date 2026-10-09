@@ -122,6 +122,20 @@ final class Rest
         );
     }
 
+    /**
+     * Die Antworten des Agents sind JSON. Mit WP_DEBUG und WP_DEBUG_DISPLAY schriebe $wpdb einen
+     * Datenbankfehler samt Abfrage als HTML davor – auch aus Code, den der Agent nur aufruft
+     * (Nacharbeiten, Cache-Plugins): die CLI könnte die Antwort nicht lesen, und in der Abfrage
+     * stehen Werte. Für diese Anfrage bleibt der Fehler im Protokoll des Servers.
+     */
+    private static function quietDatabase(): void
+    {
+        global $wpdb;
+        if (is_object($wpdb) && method_exists($wpdb, 'hide_errors')) {
+            $wpdb->hide_errors();
+        }
+    }
+
     /** @return true|\WP_Error */
     private static function authenticate(\WP_REST_Request $request)
     {
@@ -129,6 +143,7 @@ final class Rest
         if ($tls !== null) {
             return $tls;
         }
+        self::quietDatabase();
         Store::install();
         $keyId  = (string) $request->get_header('x-wpsync-key');
         $secret = preg_match('/^[a-f0-9]{16}\z/', $keyId) ? Store::secretFor($keyId) : null;

@@ -16,6 +16,11 @@ defined('ABSPATH') || exit;
  * und was folgt, liefe einzeln im Autocommit. Die neue Verbindung kennt die Marke nicht. alive()
  * fragt sie ab, und jede schreibende Anweisung in einer Transaktion trägt sie als Bedingung: auf
  * einer neuen Verbindung schreibt sie nichts.
+ *
+ * Kein Fehler der Datenbank geht in die Antwort: mit WP_DEBUG und WP_DEBUG_DISPLAY gäbe $wpdb ihn
+ * samt der Abfrage – und damit samt der Werte des Pakets – als HTML aus, vor dem JSON. Jede
+ * Abfrage läuft deshalb mit abgeschalteter Ausgabe (quiet()); im Fehlerprotokoll des Servers
+ * steht er weiter.
  */
 final class ContentSql implements ContentStore
 {
@@ -265,7 +270,9 @@ final class ContentSql implements ContentStore
                 }
                 $this->exec('COMMIT');
             } catch (\Throwable $e) {
-                $this->db->query('ROLLBACK');
+                $this->quiet(function (): void {
+                    $this->db->query('ROLLBACK');
+                });
                 throw $e;
             }
             // Ging die Verbindung im COMMIT selbst verloren, hat $wpdb ihn auf einer neuen wiederholt –
@@ -276,13 +283,17 @@ final class ContentSql implements ContentStore
             return $result;
         } finally {
             $this->mark = null;
-            $this->db->query('SET @wpsync_tx = NULL');
+            $this->quiet(function (): void {
+                $this->db->query('SET @wpsync_tx = NULL');
+            });
         }
     }
 
     public function alive(): bool
     {
-        return $this->mark !== null && (string) $this->db->get_var('SELECT @wpsync_tx') === $this->mark;
+        return $this->mark !== null && (string) $this->quiet(function () {
+            return $this->db->get_var('SELECT @wpsync_tx');
+        }) === $this->mark;
     }
 
     /** Bedingung jeder schreibenden Anweisung in einer Transaktion: nur auf der Verbindung, die sie begann. */
@@ -411,9 +422,30 @@ final class ContentSql implements ContentStore
         return $value === null ? 'NULL' : (string) $this->db->prepare('%s', (string) $value);
     }
 
+    /**
+     * Fragt die Datenbank, ohne dass $wpdb einen Fehler in die Antwort schreibt; danach gilt wieder
+     * die Einstellung der Site.
+     *
+     * @return mixed was $ask liefert
+     */
+    private function quiet(callable $ask)
+    {
+        $shown = (bool) $this->db->hide_errors();
+        try {
+            return $ask();
+        } finally {
+            if ($shown) {
+                $this->db->show_errors();
+            }
+        }
+    }
+
     private function exec(string $sql): void
     {
-        if ($this->db->query($sql) === false) {
+        $done = $this->quiet(function () use ($sql) {
+            return $this->db->query($sql);
+        });
+        if ($done === false) {
             throw new ContentException(ContentException::FAILED, 'Die Datenbank hat einen Schreibzugriff abgelehnt – nichts wurde übernommen.');
         }
     }
@@ -421,8 +453,10 @@ final class ContentSql implements ContentStore
     /** @return list<array<string, string|null>> */
     private function results(string $sql): array
     {
-        $rows = $this->db->get_results($sql, 'ARRAY_A');
-        if ((string) $this->db->last_error !== '') {
+        list($rows, $error) = $this->quiet(function () use ($sql): array {
+            return [$this->db->get_results($sql, 'ARRAY_A'), (string) $this->db->last_error];
+        });
+        if ($error !== '') {
             throw new ContentException(ContentException::FAILED, 'Die Datenbank liess sich nicht lesen.');
         }
         return is_array($rows) ? array_values($rows) : [];
