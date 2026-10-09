@@ -428,6 +428,60 @@ final class ContentSqlTest extends TestCase
         $this->sql()->read('posts', ['219'], false);
     }
 
+    /**
+     * M2: hide_errors() unterdrückt nur die Ausgabe – wpdb::print_error() schriebe die ganze Abfrage
+     * samt der Werte des Pakets per error_log() ins Protokoll des Servers. Jede Abfrage des Kanals
+     * läuft deshalb mit suppress_errors(true); danach gilt wieder die Einstellung der Site, und
+     * last_error bleibt lesbar.
+     */
+    public function testNoQueryOfTheChannelReachesTheErrorLog(): void
+    {
+        $secret = 'geheimer-wert-des-pakets';
+        $this->db->fail('/^(INSERT|UPDATE|DELETE)/', 'Deadlock found');
+        try {
+            $sql = $this->sql();
+            $sql->transaction(static function () use ($sql, $secret): void {
+                $sql->write('postmeta', "219\0_x", ['values' => [$secret]]);
+            });
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame('content_failed', $e->reason());
+        }
+        $this->assertSame([], $this->db->logged, 'kein Schreibfehler steht im Fehlerprotokoll');
+        $this->assertSame([], $this->db->unsuppressed, 'auch SET, START TRANSACTION und ROLLBACK laufen unterdrückt');
+        $this->assertNotSame([], $this->db->suppressCalls);
+        $this->assertFalse($this->db->suppress_errors, 'danach gilt wieder die Einstellung der Site');
+
+        // Lesen – auch unter Sperre –, Zähler, Zwillinge, Zuordnungen, Engines.
+        $this->db = new FakeWpdb();
+        $this->db->suppress_errors(true); // die Site unterdrückt schon selbst
+        $this->db->suppressCalls = [];
+        $this->db->fail('/^(SELECT|SHOW)/', 'Table is marked as crashed');
+        $asks = [
+            function (): void { $this->sql()->read('posts', ['219'], true); },
+            function (): void { $this->sql()->read('postmeta', ["219\0_x"], true); },
+            function (): void { $this->sql()->read('term_relationships', ["219\0category"], false); },
+            function (): void { $this->sql()->aliases('options', ['blogname']); },
+            function (): void { $this->sql()->relations(['219'], true); },
+            function (): void { $this->sql()->taxonomies(['5']); },
+            function (): void { $this->sql()->engines(['posts']); },
+            function (): void { $this->sql()->idMax('posts'); },
+        ];
+        foreach ($asks as $i => $ask) {
+            try {
+                $ask();
+                $this->fail('no exception in ask ' . $i);
+            } catch (ContentException $e) {
+                $this->assertSame('content_failed', $e->reason(), 'last_error wird weiter gelesen (ask ' . $i . ')');
+            }
+        }
+        $this->assertSame([], $this->db->logged);
+        $this->assertSame([], $this->db->unsuppressed);
+        $this->assertTrue($this->db->suppress_errors, 'die Einstellung der Site bleibt, wie sie war');
+        $this->assertFalse($this->sql()->alive());
+        $this->assertSame([], $this->db->unsuppressed);
+    }
+
     public function testEnginesTaxonomiesPurgeRecountDropMeta(): void
     {
         $this->db->answer('/^SHOW TABLE STATUS LIKE \'wp\\\\\\\\_options\'/', [['Engine' => 'MyISAM']]);

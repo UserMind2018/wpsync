@@ -953,7 +953,10 @@ abbilden lässt, sofern das Profil sie kopiert.
   in den geschützten Push-Arbeitsordner: höchstens fünf Dateien je Kopplung, je höchstens 16 MB,
   24 Stunden. Dort liegt auch das Vorher-Abbild eines Pushs (`before.json`, Inhalte der Site im
   Klartext) – es wird mit dem Snapshot aufgeräumt. Fehlerantworten nennen Tabelle und
-  Schlüssel, nie einen Wert. Die Transaktion trägt eine Sitzungsmarke: baut WordPress eine
+  Schlüssel, nie einen Wert. Auch ins Fehlerprotokoll des Servers schreibt der Kanal keine Werte:
+  seine Abfragen und seine Nacharbeiten laufen mit unterdrücktem `$wpdb`-Fehler (sonst schriebe
+  WordPress eine gescheiterte Abfrage samt allen Werten per `error_log()` mit); dort steht nur
+  die Fehlernummer der Datenbank. Die Transaktion trägt eine Sitzungsmarke: baut WordPress eine
   verlorene Datenbankverbindung mittendrin neu auf, schreibt keine weitere Anweisung (jede ist an
   die Marke gebunden), es gibt keinen `COMMIT`, und der Push endet mit `content_failed`. Liess
   sich dabei eine einzelne Zeile nicht auf ihren Stand davor zurücksetzen, nennt `error.keys` sie.

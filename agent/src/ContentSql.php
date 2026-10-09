@@ -17,10 +17,12 @@ defined('ABSPATH') || exit;
  * fragt sie ab, und jede schreibende Anweisung in einer Transaktion trägt sie als Bedingung: auf
  * einer neuen Verbindung schreibt sie nichts.
  *
- * Kein Fehler der Datenbank geht in die Antwort: mit WP_DEBUG und WP_DEBUG_DISPLAY gäbe $wpdb ihn
- * samt der Abfrage – und damit samt der Werte des Pakets – als HTML aus, vor dem JSON. Jede
- * Abfrage läuft deshalb mit abgeschalteter Ausgabe (quiet()); im Fehlerprotokoll des Servers
- * steht er weiter.
+ * Kein Fehler der Datenbank geht in die Antwort oder ins Fehlerprotokoll: mit WP_DEBUG und
+ * WP_DEBUG_DISPLAY gäbe $wpdb ihn samt der Abfrage – und damit samt der Werte des Pakets – als
+ * HTML aus, vor dem JSON, und wpdb::print_error() schreibt die ganze Abfrage in jedem Fall per
+ * error_log() ins Protokoll des Servers. Jede Abfrage läuft deshalb mit abgeschalteter Ausgabe
+ * und unterdrücktem Fehler (silent()); $wpdb->last_error bleibt gesetzt. Im Protokoll steht nur
+ * die Fehlernummer der Datenbank, nie die Abfrage.
  */
 final class ContentSql implements ContentStore
 {
@@ -88,8 +90,11 @@ final class ContentSql implements ContentStore
      */
     public static function status($db, string $table): array
     {
-        $rows = (array) $db->get_results($db->prepare('SHOW TABLE STATUS LIKE %s', $db->esc_like($table)), 'ARRAY_A');
-        if ((string) $db->last_error !== '') {
+        $sql              = $db->prepare('SHOW TABLE STATUS LIKE %s', $db->esc_like($table));
+        list($rows, $bad) = self::silent($db, static function () use ($db, $sql): array {
+            return [(array) $db->get_results($sql, 'ARRAY_A'), (string) $db->last_error !== ''];
+        });
+        if ($bad) {
             throw new \RuntimeException('content read failed');
         }
         return is_array($rows[0] ?? null) ? $rows[0] : [];
@@ -111,8 +116,10 @@ final class ContentSql implements ContentStore
         if (preg_match(self::NAME, $table) !== 1 || preg_match(self::NAME, $column) !== 1) {
             throw new \InvalidArgumentException('invalid content table ' . $table);
         }
-        $max = (int) $db->get_var('SELECT MAX(`' . $column . '`) FROM `' . $table . '`');
-        if ((string) $db->last_error !== '') {
+        list($max, $bad) = self::silent($db, static function () use ($db, $table, $column): array {
+            return [(int) $db->get_var('SELECT MAX(`' . $column . '`) FROM `' . $table . '`'), (string) $db->last_error !== ''];
+        });
+        if ($bad) {
             throw new \RuntimeException('content read failed');
         }
         return max($max, (int) ($status['Auto_increment'] ?? 0) - 1);
@@ -477,21 +484,55 @@ final class ContentSql implements ContentStore
     }
 
     /**
-     * Fragt die Datenbank, ohne dass $wpdb einen Fehler in die Antwort schreibt; danach gilt wieder
-     * die Einstellung der Site.
+     * Fragt die Datenbank, ohne dass $wpdb einen Fehler in die Antwort oder – samt der Abfrage und
+     * ihrer Werte – ins Fehlerprotokoll schreibt (wpdb::print_error()); danach gilt wieder die
+     * Einstellung der Site. $wpdb->last_error bleibt gesetzt: wer fragt, prüft ihn selbst. Ein
+     * Fehler steht mit seiner Nummer im Protokoll, ohne Abfrage.
      *
+     * @param object            $db  $wpdb
+     * @param callable(): mixed $ask
      * @return mixed was $ask liefert
      */
-    private function quiet(callable $ask)
+    public static function silent($db, callable $ask)
     {
-        $shown = (bool) $this->db->hide_errors();
+        $shown      = is_object($db) && method_exists($db, 'hide_errors') && (bool) $db->hide_errors();
+        $suppressed = is_object($db) && method_exists($db, 'suppress_errors') ? (bool) $db->suppress_errors(true) : null;
         try {
-            return $ask();
+            $result = $ask();
+            self::note($db);
+            return $result;
         } finally {
+            if ($suppressed !== null) {
+                $db->suppress_errors($suppressed);
+            }
             if ($shown) {
-                $this->db->show_errors();
+                $db->show_errors();
             }
         }
+    }
+
+    /**
+     * Protokolliert einen Datenbankfehler ohne Abfrage und ohne Meldung – beide können Werte tragen
+     * („Duplicate entry '…'“). Nur die Fehlernummer, soweit die Verbindung sie nennt.
+     *
+     * @param object $db $wpdb
+     */
+    private static function note($db): void
+    {
+        if (!is_object($db) || (string) ($db->last_error ?? '') === '') {
+            return;
+        }
+        $link  = $db->dbh ?? null;
+        $errno = $link instanceof \mysqli ? (int) mysqli_errno($link) : 0;
+        if ($errno > 0) {
+            error_log('wpsync: a query of the content channel failed (MySQL error ' . $errno . '); query and values are withheld');
+        }
+    }
+
+    /** @return mixed was $ask liefert */
+    private function quiet(callable $ask)
+    {
+        return self::silent($this->db, $ask);
     }
 
     private function exec(string $sql): void

@@ -69,6 +69,10 @@ namespace {
     function wp_save_post_revision(int $id): void
     {
         wpsync_note('wp_save_post_revision', $id);
+        if (isset($GLOBALS['wpsync_test_revision_db'])) {
+            // Wie WordPress: die Revision trägt den Inhalt des Beitrags durch $wpdb.
+            $GLOBALS['wpsync_test_revision_db']->query("INSERT INTO `wp_posts` (`post_content`) VALUES ('Inhalt von " . $id . "')");
+        }
     }
 
     /** @param mixed ...$args */

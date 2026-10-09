@@ -24,6 +24,20 @@ final class ContentPostActions
      */
     public static function live(array $changes, $db, string $indexables): array
     {
+        // Revisionen, Indexables, Caches: was hier durch $wpdb geht, trägt Werte des Pakets. Kein
+        // Fehler daraus steht samt Abfrage im Fehlerprotokoll (ContentSql::silent()).
+        return ContentSql::silent($db, static function () use ($changes, $db, $indexables): array {
+            return self::liveSteps($changes, $db, $indexables);
+        });
+    }
+
+    /**
+     * @param array<string, mixed> $changes
+     * @param object               $db
+     * @return list<array{step: string, ok: bool}>
+     */
+    private static function liveSteps(array $changes, $db, string $indexables): array
+    {
         $posts   = self::ints($changes['posts'] ?? []);
         $terms   = self::ints($changes['terms'] ?? []);
         $tts     = self::ints($changes['term_taxonomy'] ?? []);
@@ -121,6 +135,18 @@ final class ContentPostActions
      * @return list<array{step: string, ok: bool}>
      */
     public static function staging(array $changes, ContentStore $store, $db, string $indexables, string $uploadsDir, bool $elementor): array
+    {
+        return ContentSql::silent($db, static function () use ($changes, $store, $db, $indexables, $uploadsDir, $elementor): array {
+            return self::stagingSteps($changes, $store, $db, $indexables, $uploadsDir, $elementor);
+        });
+    }
+
+    /**
+     * @param array<string, mixed> $changes
+     * @param object               $db
+     * @return list<array{step: string, ok: bool}>
+     */
+    private static function stagingSteps(array $changes, ContentStore $store, $db, string $indexables, string $uploadsDir, bool $elementor): array
     {
         $posts = self::ints($changes['posts'] ?? []);
         $tts   = self::ints($changes['term_taxonomy'] ?? []);

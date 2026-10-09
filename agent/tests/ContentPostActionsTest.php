@@ -38,6 +38,29 @@ final class ContentPostActionsTest extends TestCase
         return $GLOBALS['wpsync_post_actions'];
     }
 
+    /**
+     * M2: auch die Nacharbeiten schreiben Werte des Pakets (Revisionen, Indexables) – ein
+     * Datenbankfehler darin landet nicht samt Abfrage im Fehlerprotokoll.
+     */
+    public function testNoQueryOfThePostActionsReachesTheErrorLog(): void
+    {
+        $this->db->fail('/^DELETE FROM `wp_yoast_indexable`/', 'Table is marked as crashed');
+        $GLOBALS['wpsync_test_revision_db'] = $this->db; // wp_save_post_revision() fragt $wpdb wie WordPress
+        $steps = ContentPostActions::live(self::CHANGES, $this->db, 'wp_yoast_indexable');
+        $this->assertContains(['step' => 'seo_indexables', 'ok' => false], $steps);
+        $this->assertSame([], $this->db->logged);
+        $this->assertSame([], $this->db->unsuppressed, 'jede Abfrage der Nacharbeiten läuft unterdrückt');
+        $this->assertNotSame([], $this->db->queries);
+        $this->assertFalse($this->db->suppress_errors, 'danach gilt wieder die Einstellung der Site');
+
+        $this->db = new FakeWpdb();
+        $this->db->fail('/^DELETE FROM `stg_yoast_indexable`/', 'Table is marked as crashed');
+        $steps = ContentPostActions::staging(self::CHANGES, new ContentMemory(), $this->db, 'stg_yoast_indexable', '', false);
+        $this->assertContains(['step' => 'seo_indexables', 'ok' => false], $steps);
+        $this->assertSame([], $this->db->logged);
+        $this->assertFalse($this->db->suppress_errors);
+    }
+
     public function testLiveStepsInOrderWithoutPlugins(): void
     {
         $steps = ContentPostActions::live(self::CHANGES, $this->db, '');

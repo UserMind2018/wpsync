@@ -126,7 +126,9 @@ final class Rest
      * Die Antworten des Agents sind JSON. Mit WP_DEBUG und WP_DEBUG_DISPLAY schriebe $wpdb einen
      * Datenbankfehler samt Abfrage als HTML davor – auch aus Code, den der Agent nur aufruft
      * (Nacharbeiten, Cache-Plugins): die CLI könnte die Antwort nicht lesen, und in der Abfrage
-     * stehen Werte. Für diese Anfrage bleibt der Fehler im Protokoll des Servers.
+     * stehen Werte. Das schaltet nur die Ausgabe ab; ins Fehlerprotokoll schreibt $wpdb weiter – die
+     * Abfragen des Inhaltskanals, die Werte eines Pakets tragen, unterdrücken auch das selbst
+     * (ContentSql::silent()).
      */
     private static function quietDatabase(): void
     {

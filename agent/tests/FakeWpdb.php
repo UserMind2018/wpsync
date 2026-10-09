@@ -37,6 +37,14 @@ final class FakeWpdb
     public $show_errors = false;
     /** @var list<string> Abfragen, deren Fehler $wpdb ausgegeben hätte */
     public $shown = [];
+    /** @var bool wie $wpdb->suppress_errors: ein Fehler wird weder ausgegeben noch per error_log() protokolliert */
+    public $suppress_errors = false;
+    /** @var list<bool> jeder Aufruf von suppress_errors(), in dieser Reihenfolge */
+    public $suppressCalls = [];
+    /** @var list<string> Abfragen, die $wpdb samt ihrer Werte ins Fehlerprotokoll geschrieben hätte (print_error()) */
+    public $logged = [];
+    /** @var list<string> Abfragen, die liefen, während Fehler nicht unterdrückt waren */
+    public $unsuppressed = [];
     /** @var list<array{pattern: string, results: list<mixed>, error: string|null}> */
     private $answers = [];
 
@@ -44,6 +52,15 @@ final class FakeWpdb
     {
         $before            = $this->show_errors;
         $this->show_errors = $show;
+        return $before;
+    }
+
+    /** Wie wpdb::suppress_errors(): liefert die Einstellung davor. */
+    public function suppress_errors(bool $suppress = true): bool
+    {
+        $before                = $this->suppress_errors;
+        $this->suppress_errors = $suppress;
+        $this->suppressCalls[] = $suppress;
         return $before;
     }
 
@@ -151,6 +168,9 @@ final class FakeWpdb
     {
         $this->last_error = '';
         $this->queries[]  = $sql;
+        if (!$this->suppress_errors) {
+            $this->unsuppressed[] = $sql;
+        }
         if ($this->observer !== null) {
             ($this->observer)($sql);
         }
@@ -160,6 +180,9 @@ final class FakeWpdb
             }
             if ($answer['error'] !== null) {
                 $this->last_error = $answer['error'];
+                if (!$this->suppress_errors) {
+                    $this->logged[] = $sql; // wpdb::print_error(): error_log() mit der ganzen Abfrage
+                }
                 if ($this->show_errors) {
                     $this->shown[] = $sql;
                 }

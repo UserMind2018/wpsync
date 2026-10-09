@@ -112,6 +112,12 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   `insert` mit einer ID wie 999999999999999999 verschob sonst den `AUTO_INCREMENT` von Live
   dauerhaft (auch eine Rücknahme setzt ihn nicht zurück). `limits` nennt die Grenze als
   `id_headroom`, auch im `plan`-Ereignis der CLI
+- Agent: Eine gescheiterte Abfrage des Inhaltskanals landet nicht mehr samt allen Werten im
+  PHP-Fehlerprotokoll. `hide_errors()` schaltete nur die Ausgabe ab; `wpdb::print_error()`
+  schrieb die ganze Abfrage weiter per `error_log()`. Schreiben, Lesen (auch unter Sperre),
+  Rücknahme, Reparatur und die Nacharbeiten laufen jetzt mit `suppress_errors(true)` und
+  stellen danach die Einstellung der Site wieder her; im Protokoll steht nur noch die
+  Fehlernummer der Datenbank
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 
