@@ -59,6 +59,15 @@ sich wie bisher (`content_not_rolled_back`).
 - Ein aufgeräumter Rescue-Stub, an dessen Stelle der Server umleitet (3xx statt 404), ist jetzt
   „Notfallweg vorbei“ (`ErrRescueGone`) statt eines rohen HTTP-Fehlers
 - Antworten von `rescue.php` über 4.000 Bytes (viele Schlüssel) liest die CLI jetzt vollständig
+- Wettlauf `confirm` ↔ `rescue.php`: `/push/confirm` nimmt jetzt die Sperre des Pushs
+  (`rescue.lock`) und prüft seinen Stand darunter neu. Ein Push kann nicht mehr „bestätigt“ in der
+  Datenbank stehen, während `rescue.php` ihn zurücktauscht: läuft eine Rücknahme, wartet `confirm`
+  bis zu 15 s und antwortet sonst mit HTTP 423 `wpsync_push_busy`; hat `rescue.php` den Push
+  inzwischen zurückgenommen, antwortet es mit 409 `wpsync_push_state`. Die Rücknahme lehnt einen
+  bestätigten Push unter der Sperre selbst ab (`rescue.php`: 409 `confirmed`; `/push/rollback`
+  für einen eben erst bestätigten: 409 `wpsync_push_state`, danach gilt das Push-Fenster)
+- Der Vermerk „von einem späteren Push überholt“ (`superseded_by`) wird nur noch unter der Sperre
+  des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme
 - Die CLI wertet eine Antwort von `rescue.php` nur noch als Rücknahme, wenn sie
   `status: "rolled_back"` trägt (das tut `rescue.php` seit Agent 0.4.0) – HTTP 200 mit `ok` allein
   genügt nicht mehr. Sonst: „ROLLBACK FEHLGESCHLAGEN“ (Health-Rücknahme) bzw. „Rollback über

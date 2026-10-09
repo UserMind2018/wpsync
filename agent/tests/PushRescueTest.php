@@ -28,6 +28,8 @@ final class PushRescueTest extends TestCase
 
     protected function tearDown(): void
     {
+        PushRescue::$linkWait = null;
+        PushRescue::$onLock   = null;
         exec('rm -rf ' . escapeshellarg($this->content));
     }
 
@@ -158,7 +160,7 @@ final class PushRescueTest extends TestCase
         $this->write($this->content . '/plugins/neu/main.php', 'new');
         PushRescue::write($this->work, self::OTHER, 'unused', [$this->pair(self::OTHER, 'plugins/neu', false)], PushRescue::CONFIRMED);
 
-        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::OTHER)[0]);
+        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::OTHER, null, true)[0]);
         $this->assertDirectoryDoesNotExist($this->content . '/plugins/neu');
     }
 
@@ -225,13 +227,84 @@ final class PushRescueTest extends TestCase
         $this->assertSame(403, $this->post(self::ID, str_repeat('0', 64))[0], 'the key is checked first');
     }
 
-    /** U18: der Agent (REST mit Fenster, WP-Admin) rollt auch einen bestätigten Push zurück. */
+    /**
+     * U18: der Agent (REST mit Fenster, WP-Admin) rollt auch einen bestätigten Push zurück – und sagt
+     * es rollback() ausdrücklich. Security-Review P3, M1: ohne dieses Wort lehnt rollback() einen
+     * bestätigten Push selbst ab, an dem Datensatz, den es unter der Sperre liest – nicht nur handle()
+     * davor. Ein confirm, das zwischen Prüfung und Rücknahme ankommt, wird so nie überschrieben.
+     */
     public function testAgentRollbackStillTakesBackAConfirmedPush(): void
     {
         PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
 
-        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::ID)[0]);
+        $this->assertSame([409, ['ok' => false, 'error' => 'confirmed']], PushRescue::rollback($this->content, $this->work, self::ID));
+        $this->assertSame([409, ['ok' => false, 'error' => 'confirmed']], PushRescue::rollback($this->content, $this->work, self::ID, ['key' => $this->key, 'locked' => true]));
+        $this->assertSame('new', file_get_contents($this->content . '/plugins/x/main.php'));
+        $this->assertSame(PushRescue::CONFIRMED, PushRescue::read($this->work, self::ID)['status']);
+
+        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::ID, null, true)[0]);
         $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
+    }
+
+    /**
+     * M1: supersede() ändert die Datensätze anderer Pushes – jeden nur unter dessen Sperre und so,
+     * wie er dort gerade steht. Hält ein anderer Lauf (seine Rücknahme) die Sperre, bleibt der
+     * Datensatz unberührt: der Lauf schreibt seinen Stand selbst.
+     */
+    public function testSupersedeWritesAnotherRecordOnlyUnderItsLock(): void
+    {
+        PushRescue::$linkWait = 0.0;
+        PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
+        PushRescue::write($this->work, self::OTHER, 'unused', [$this->pair(self::OTHER, 'plugins/x', true)], PushRescue::COMMITTED);
+        $before = file_get_contents(PushRescue::file($this->work, self::ID));
+
+        $held = PushRescue::lock($this->work, self::ID);
+        $this->assertIsResource($held);
+        PushRescue::supersede($this->work, self::OTHER, ['plugins/x']);
+        $this->assertSame($before, file_get_contents(PushRescue::file($this->work, self::ID)), 'gesperrt: nichts geschrieben');
+        PushRescue::unlock($held);
+
+        PushRescue::supersede($this->work, self::OTHER, ['plugins/x']);
+        $this->assertSame(self::OTHER, PushRescue::read($this->work, self::ID)['superseded_by']);
+        $again = PushRescue::lock($this->work, self::ID);
+        $this->assertIsResource($again, 'danach ist die Sperre wieder frei');
+        PushRescue::unlock($again);
+    }
+
+    /** M1: dasselbe beim Lösen – die Rücknahme des späteren Pushs gibt den älteren nur unter dessen Sperre frei. */
+    public function testReleasingASupersededPushHappensUnderItsLock(): void
+    {
+        PushRescue::$linkWait = 0.0;
+        $this->write($this->work . '/' . self::OTHER . '/old/0/main.php', 'new');
+        $this->write($this->content . '/plugins/x/main.php', 'newer');
+        PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
+        PushRescue::write($this->work, self::OTHER, 'unused', [$this->pair(self::OTHER, 'plugins/x', true)], PushRescue::COMMITTED);
+        PushRescue::supersede($this->work, self::OTHER, ['plugins/x']);
+        $before = file_get_contents(PushRescue::file($this->work, self::ID));
+
+        $held = PushRescue::lock($this->work, self::ID);
+        $this->assertSame(200, PushRescue::rollback($this->content, $this->work, self::OTHER)[0]);
+        $this->assertSame($before, file_get_contents(PushRescue::file($this->work, self::ID)), 'gesperrt: nichts geschrieben');
+        PushRescue::unlock($held);
+    }
+
+    /**
+     * M1: der Datensatz des anderen Pushs wird unter der Sperre neu gelesen. Ist sein Ordner
+     * inzwischen weg (zurückgerollt und aufgeräumt), entsteht er durch supersede() nicht neu.
+     */
+    public function testSupersedeNeverRecreatesARecordThatIsGone(): void
+    {
+        PushRescue::setStatus($this->work, self::ID, PushRescue::CONFIRMED);
+        PushRescue::write($this->work, self::OTHER, 'unused', [$this->pair(self::OTHER, 'plugins/x', true)], PushRescue::COMMITTED);
+        // Zwischen dem Auflisten und der Sperre verschwindet der ältere Push: hier, sobald seine Sperrdatei entsteht.
+        $dir = $this->work . '/' . self::ID;
+        PushRescue::$onLock = static function (string $pushId) use ($dir): void {
+            if ($pushId === self::ID) {
+                exec('rm -rf ' . escapeshellarg($dir));
+            }
+        };
+        PushRescue::supersede($this->work, self::OTHER, ['plugins/x']);
+        $this->assertDirectoryDoesNotExist($dir);
     }
 
     public function testSetStatus(): void

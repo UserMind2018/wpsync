@@ -1202,9 +1202,13 @@ abbilden lässt, sofern das Profil sie kopiert.
   im Klartext zeigt. Der Umschlag eines Pushs nach Staging gilt nur im Ordner seiner Kopie und
   nur für Tabellen mit ihrem Präfix. Antworten und Fehlerprotokoll nennen nie Host, Benutzer,
   Passwort, Datenbankname, einen Wert oder Text des Datenbankservers – nur Codes, Tabellen und
-  Schlüssel. `rescue.php`, die Rücknahme über den Agent und der laufende Commit schliessen sich
-  über eine Sperrdatei je Push aus: ein Commit, den eine Rücknahme überholt hat, schreibt nichts
-  mehr fest. Der Cache-Schritt lädt WordPress erst, wenn der Push ganz zurück ist (der Code ist
+  Schlüssel. `rescue.php`, die Rücknahme über den Agent, der laufende Commit und die Bestätigung
+  (`confirm`) schliessen sich über eine Sperrdatei je Push aus: ein Commit, den eine Rücknahme
+  überholt hat, schreibt nichts mehr fest, und ein Push wird nie bestätigt, während er
+  zurückgenommen wird – wer zuerst kommt, gilt (HTTP 423 `wpsync_push_busy` bzw. `busy` für den
+  anderen, wenn es länger dauert). Einen bestätigten Push lehnt die Rücknahme von `rescue.php`
+  unter dieser Sperre noch einmal ab; auch der Vermerk, dass ein späterer Push einen älteren
+  überholt hat, wird nur unter der Sperre des älteren geschrieben. Der Cache-Schritt lädt WordPress erst, wenn der Push ganz zurück ist (der Code ist
   dann wieder der alte), ohne Plugins, Themes und mu-plugins – Drop-ins in `wp-content`
   (`object-cache.php`, `db.php`, `advanced-cache.php`) lädt WordPress dabei wie in jedem Request.
   Den Schlüssel finden sie nicht mehr in `$_POST`/`$_REQUEST`, und eine Umleitung, die sie

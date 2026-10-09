@@ -748,6 +748,11 @@ final class Push
     /**
      * Nach bestandenem Health-Check. Braucht kein offenes Fenster.
      *
+     * Unter der Sperre des Pushs (P3 R10): rescue.php und die Rücknahme über den Agent halten
+     * dieselbe. Ohne sie könnte rescue.php den Push zurücknehmen, während er hier bestätigt wird –
+     * „bestätigt“ in der Datenbank, zurückgetauscht auf der Platte. Wer zuerst kommt, gilt; der
+     * andere sieht dessen Stand.
+     *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
      */
@@ -758,6 +763,44 @@ final class Push
         if ($push instanceof \WP_Error) {
             return $push;
         }
+        $lock = false;
+        $dirs = null;
+        if ($push['status'] === PushRescue::COMMITTED && !$push['pruned']) {
+            $dirs = self::dirs($push['target']);
+            if (!($dirs instanceof \WP_Error)) {
+                // Eine Rücknahme, die gerade läuft, ist gleich fertig: darauf warten. Wo sich nicht sperren
+                // lässt (false), bleibt es wie vor P3 – rescue.php fasst die Datenbank dann nicht an.
+                $lock = PushRescue::lock($dirs[1], $push['push_id'], self::$gateWait ?? self::GATE_SECONDS);
+                if ($lock === null) {
+                    return self::error('wpsync_push_busy', 'Für Push ' . $push['push_id'] . ' läuft gerade eine Rücknahme – gleich noch einmal versuchen.', 423);
+                }
+            }
+        }
+        try {
+            if (is_array($dirs)) {
+                // Unter der Sperre noch einmal: zwischen sync() oben und der Sperre kann rescue.php den Push
+                // ganz zurückgenommen haben. Dann gibt es nichts mehr zu bestätigen – übernehmen wie sync().
+                $record = PushRescue::read($dirs[1], $push['push_id']);
+                if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
+                    self::afterRescue($push, $dirs[0], $dirs[1], $record);
+                    self::finishRollback($push['push_id']);
+                    return self::error('wpsync_push_state', 'Push ist im Status ' . PushRescue::ROLLED_BACK . '.', 409);
+                }
+            }
+            return self::confirmLocked($push, $keyId);
+        } finally {
+            PushRescue::unlock($lock);
+        }
+    }
+
+    /**
+     * confirm, unter der Sperre des Pushs.
+     *
+     * @param array<string, mixed> $push
+     * @return \WP_REST_Response|\WP_Error
+     */
+    private static function confirmLocked(array $push, string $keyId)
+    {
         $kept = ['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::CONTENT_KEPT]];
         if (self::contentKept($push)) {
             return new \WP_REST_Response($kept); // schon so abgeschlossen: eine verlorene Antwort lässt sich wiederholen
@@ -886,6 +929,13 @@ final class Push
         // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
         $actions = [];
         $record  = PushRescue::read($dirs[1], $pushId);
+        // Unter der Sperre noch einmal: wurde der Push bestätigt, seit der Aufrufer ihn las, gilt für ihn
+        // das Push-Fenster (U18), das für einen unbestätigten niemand geprüft hat. Vor der Datenbank –
+        // sonst gingen die Inhalte zurück und der Code bliebe.
+        $confirmed = $push['status'] === PushRescue::CONFIRMED;
+        if ($record !== null && $record['status'] === PushRescue::CONFIRMED && !$confirmed) {
+            return self::error('wpsync_push_state', 'Push ' . $pushId . ' wurde inzwischen bestätigt – die Rücknahme noch einmal aufrufen.', 409);
+        }
         if ($record !== null && PushRescue::contentOpen($record)) {
             // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
             // und der Code bliebe stehen.
@@ -902,7 +952,7 @@ final class Push
             PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
             $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
         }
-        list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
+        list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId, null, $confirmed);
         if ($status !== 200) {
             $why = ($body['error'] ?? '') === 'superseded'
                 ? self::superseded((string) ($body['by'] ?? ''))

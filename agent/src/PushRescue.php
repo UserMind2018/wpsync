@@ -77,6 +77,17 @@ final class PushRescue
     /** So lange wartet der Cache-Schritt auf die Sperre des Pushs, bevor er ohne Marke antwortet (flushed()). */
     public const FLUSH_WAIT = 2.0;
 
+    /**
+     * So lange wartet, wer den Datensatz eines anderen Pushs ändert (supersede(), das Lösen in
+     * rollback()), auf dessen Sperre. Ist sie dann noch belegt, bleibt jener Datensatz unberührt.
+     */
+    public const LINK_WAIT = 5.0;
+
+    /** @var float|null für Tests: Wartezeit anstelle von LINK_WAIT */
+    public static $linkWait = null;
+    /** @var (callable(string): void)|null für Tests: läuft mit der Push-ID, unmittelbar bevor lock() eine Sperre nimmt */
+    public static $onLock = null;
+
     /** Antwort von handle() auf action=cache: kein HTTP-Status – rescue.php leert jetzt den Cache und ruft flushed(). */
     public const FLUSH = 0;
 
@@ -191,6 +202,9 @@ final class PushRescue
         if (preg_match(self::ID, $pushId) !== 1) {
             return false;
         }
+        if (self::$onLock !== null) {
+            (self::$onLock)($pushId);
+        }
         $dir  = $workDir . '/' . $pushId;
         $file = $dir . '/' . self::LOCK_FILE;
         if (!is_dir($dir) || is_link($dir) || is_link($file)) {
@@ -260,19 +274,49 @@ final class PushRescue
 
     /**
      * Ältere, noch aktive Pushes derselben Einheiten lassen sich erst wieder zurückrollen, wenn
-     * dieser hier zurückgerollt ist (U6).
+     * dieser hier zurückgerollt ist (U6). Jeder ihrer Datensätze wird nur unter seiner eigenen
+     * Sperre geändert (amend()) – nie neben seiner Rücknahme oder seiner Bestätigung.
      *
      * @param list<string> $units
      */
     public static function supersede(string $workDir, string $pushId, array $units): void
     {
-        foreach (self::others($workDir, $pushId) as $record) {
-            $active = in_array($record['status'], [self::COMMITTED, self::CONFIRMED], true) && $record['superseded_by'] === null;
-            $shared = array_intersect($units, array_column($record['pairs'], 'unit')) !== [];
-            if ($active && $shared) {
+        foreach (self::others($workDir, $pushId) as $seen) {
+            self::amend($workDir, (string) $seen['push_id'], static function (array $record) use ($pushId, $units): ?array {
+                $active = in_array($record['status'], [self::COMMITTED, self::CONFIRMED], true) && $record['superseded_by'] === null;
+                $shared = array_intersect($units, array_column($record['pairs'], 'unit')) !== [];
+                if (!$active || !$shared) {
+                    return null;
+                }
                 $record['superseded_by'] = $pushId;
-                self::save($workDir, $record);
+                return $record;
+            });
+        }
+    }
+
+    /**
+     * Ändert den Datensatz eines anderen Pushs: unter dessen Sperre, an dem Stand, der dort dann
+     * steht – nicht an einer Kopie von vorher. Sonst überschriebe der eine Lauf, was ein anderer
+     * (Rücknahme, confirm) eben geschrieben hat, oder legte den Datensatz eines schon aufgeräumten
+     * Pushs neu an. Bleibt die Sperre belegt, geschieht nichts: der Lauf, der sie hält, schreibt
+     * seinen Stand selbst. Wo sich nicht sperren lässt (false), wie vor P3.
+     *
+     * @param callable(array<string, mixed>): (array<string, mixed>|null) $change der geänderte Datensatz; null: nichts zu tun
+     */
+    private static function amend(string $workDir, string $pushId, callable $change): void
+    {
+        $lock = self::lock($workDir, $pushId, self::$linkWait ?? self::LINK_WAIT);
+        if ($lock === null) {
+            return;
+        }
+        try {
+            $record  = self::read($workDir, $pushId);
+            $changed = $record === null ? null : $change($record);
+            if ($changed !== null) {
+                self::save($workDir, $changed);
             }
+        } finally {
+            self::unlock($lock);
         }
     }
 
@@ -368,12 +412,9 @@ final class PushRescue
                     return [423, ['ok' => false, 'error' => 'busy']];
                 }
                 try {
-                    // Unter der Sperre noch einmal: der Push kann zwischen Lesen und Sperren bestätigt worden sein.
-                    $fresh = self::read($workDir, $pushId);
-                    if ($fresh !== null && $fresh['status'] === self::CONFIRMED) {
-                        return [409, ['ok' => false, 'error' => 'confirmed']];
-                    }
-                    // Ohne Sperre (false) keine Datenbank: dann wie bisher nur Code und Uploads.
+                    // Ohne Sperre (false) keine Datenbank: dann wie bisher nur Code und Uploads. Ob der Push
+                    // inzwischen bestätigt ist, prüft rollback() selbst – an dem Datensatz, den es jetzt,
+                    // unter der Sperre, liest (confirm nimmt dieselbe Sperre).
                     $content = ($post['content'] ?? '') === '1' ? ['key' => $key, 'locked' => $lock !== false] : null;
                     $answer  = self::rollback((string) $contentDir, $workDir, $pushId, $content);
                 } finally {
@@ -418,19 +459,28 @@ final class PushRescue
     }
 
     /**
-     * Tauscht alle Paare eines Pushs zurück. Ohne Schlüsselprüfung und ohne Sperre – beides leistet
-     * handle() bzw. die signierte REST-Route (Push::rollbackPush()).
+     * Tauscht alle Paare eines Pushs zurück. Ohne Schlüsselprüfung und ohne die Sperre selbst zu
+     * nehmen – beides leistet handle() bzw. die signierte REST-Route (Push::rollbackPush()).
+     *
+     * Einen bestätigten Push lehnt es selbst ab (409 confirmed, U18) – geprüft an dem Datensatz, den
+     * es hier, unter der Sperre des Aufrufers, liest: confirm setzt den Status unter derselben Sperre,
+     * ein confirm zwischen einer früheren Prüfung und diesem Aufruf wird also nie überschrieben.
+     * Nur der Agent, der das Push-Fenster geprüft hat (oder die Admin-Seite), sagt $confirmed.
      *
      * @param array{key: string, locked: bool}|null $content nur von handle(): der Aufrufer will auch die
      *        Inhalte zurück (content=1) – mit dem Rescue-Key, der den Umschlag öffnet; locked: die Sperre
      *        des Pushs ist gehalten. null: wie der Agent – die Inhalte nimmt er vorher selbst zurück
+     * @param bool $confirmed der Aufrufer darf auch einen bestätigten Push zurücknehmen
      * @return array{0: int, 1: array<string, mixed>}
      */
-    public static function rollback(string $contentDir, string $workDir, string $pushId, ?array $content = null): array
+    public static function rollback(string $contentDir, string $workDir, string $pushId, ?array $content = null, bool $confirmed = false): array
     {
         $record = self::read($workDir, $pushId);
         if ($record === null) {
             return [404, ['ok' => false, 'error' => 'unknown push']];
+        }
+        if ($record['status'] === self::CONFIRMED && !$confirmed) {
+            return [409, ['ok' => false, 'error' => 'confirmed']];
         }
         $want = $content !== null;
         // Ist alles zurück – oder nur der DB-Anteil offen, den dieser Aufruf nicht verlangt –, bleibt es dabei.
@@ -490,11 +540,17 @@ final class PushRescue
         $kept             = self::removeUploads($contentDir, is_array($record['uploads'] ?? null) ? $record['uploads'] : []);
         $record['status'] = self::ROLLED_BACK;
         self::save($workDir, $record);
-        foreach (self::others($workDir, $pushId) as $other) {
-            if ($other['superseded_by'] === $pushId) {
-                $other['superseded_by'] = null;
-                self::save($workDir, $other);
+        foreach (self::others($workDir, $pushId) as $seen) {
+            if ($seen['superseded_by'] !== $pushId) {
+                continue;
             }
+            self::amend($workDir, (string) $seen['push_id'], static function (array $other) use ($pushId): ?array {
+                if ($other['superseded_by'] !== $pushId) {
+                    return null;
+                }
+                $other['superseded_by'] = null;
+                return $other;
+            });
         }
         return [200, self::answer($record, $want, $result, $kept)];
     }

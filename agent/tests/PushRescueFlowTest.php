@@ -119,6 +119,104 @@ final class PushRescueFlowTest extends PushRescueFlowCase
         $this->assertSame('rolled_back', Store::getPush($id)['status']);
     }
 
+    /**
+     * Security-Review P3, M1: confirm nimmt die Sperre des Pushs. Läuft gerade eine Rücknahme, wird
+     * nichts bestätigt – weder in rescue.json noch in der Datenbank.
+     */
+    public function testConfirmIsBusyWhileARollbackHoldsTheLock(): void
+    {
+        Push::$gateWait = 0.2;
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $before   = file_get_contents($this->work($this->live) . '/' . $id . '/rescue.json');
+        $lock     = PushRescue::lock($this->work($this->live), $id); // rescue.php läuft
+
+        $started = microtime(true);
+        $error   = $this->assertRefused('wpsync_push_busy', 423, Push::confirm(['push_id' => $id], self::KEY));
+        $this->assertGreaterThan(0.2, microtime(true) - $started, 'confirm hat auf die Rücknahme gewartet');
+        $this->assertStringContainsString($id, $error->message);
+        $this->assertSame($before, file_get_contents($this->work($this->live) . '/' . $id . '/rescue.json'));
+        $this->assertSame('committed', Store::getPush($id)['status']);
+        $this->assertFileExists($this->sealed($this->live, $id), 'der Umschlag bleibt für die Rücknahme');
+
+        PushRescue::unlock($lock);
+        $confirm = Push::confirm(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $confirm, $confirm instanceof \WP_Error ? $confirm->code . ' ' . $confirm->message : '');
+        $this->assertSame('confirmed', $this->rescue($this->live, $id)['status']);
+        $this->assertSame('confirmed', Store::getPush($id)['status']);
+        $again = PushRescue::lock($this->work($this->live), $id);
+        $this->assertIsResource($again, 'nach confirm ist die Sperre frei');
+        PushRescue::unlock($again);
+    }
+
+    /**
+     * M1: rescue.php nimmt den Push zurück, während confirm unterwegs ist – nach dessen sync(), vor
+     * dessen Sperre. confirm sieht unter der Sperre den Stand von rescue.php und bestätigt nichts:
+     * nie „bestätigt“ in der Datenbank und zurückgetauscht auf der Platte.
+     */
+    public function testAConfirmThatRescueOvertookConfirmsNothing(): void
+    {
+        $old      = $this->liveDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $GLOBALS['wpsync_post_actions'] = [];
+        $rescue   = null;
+        PushRescue::$onLock = function (string $pushId) use ($id, &$rescue): void {
+            if ($pushId !== $id) {
+                return;
+            }
+            PushRescue::$onLock = null; // genau hier: confirm hat sync() hinter sich und will die Sperre
+            $keys               = ContentImage::$keys;
+            ContentImage::$keys = [];   // rescue.php kennt den Schlüssel der Installation nicht
+            $rescue             = $this->rescueDb($id);
+            ContentImage::$keys = $keys;
+        };
+
+        $error = $this->assertRefused('wpsync_push_state', 409, Push::confirm(['push_id' => $id], self::KEY));
+
+        $this->assertSame(200, $rescue[0] ?? null, (string) json_encode($rescue));
+        $this->assertStringContainsString('rolled_back', $error->message);
+        $push = Store::getPush($id);
+        $this->assertSame(['rolled_back', true], [$push['status'], $push['pruned']], 'nicht bestätigt');
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertContains('clean_post_cache [219]', $GLOBALS['wpsync_post_actions'], 'die Nacharbeiten sind nachgeholt');
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id);
+        $this->assertNull(Push::pending());
+    }
+
+    /**
+     * M1, U18: ein confirm überholt die Rücknahme über den Agent – nach deren Prüfung (unbestätigt:
+     * kein Fenster nötig), vor deren Sperre. Unter der Sperre ist der Push bestätigt: die Rücknahme
+     * lehnt ab, bevor sie die Datenbank berührt; für einen bestätigten Push gilt das Push-Fenster.
+     */
+    public function testAnAgentRollbackThatAConfirmOvertookIsRefusedBeforeTheDatabase(): void
+    {
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $pushed   = $this->liveDb->data;
+        Store::$until      = 0; // das Push-Fenster ist zu
+        $this->liveDb->log = [];
+        $confirm           = null;
+        PushRescue::$onLock = static function (string $pushId) use ($id, &$confirm): void {
+            if ($pushId === $id) {
+                PushRescue::$onLock = null;
+                $confirm            = Push::confirm(['push_id' => $id], self::KEY);
+            }
+        };
+
+        $error = $this->assertRefused('wpsync_push_state', 409, Push::rollback(['push_id' => $id], self::KEY));
+
+        $this->assertInstanceOf(\WP_REST_Response::class, $confirm);
+        $this->assertStringContainsString('bestätigt', $error->message);
+        $this->assertSame($pushed, $this->liveDb->data);
+        $this->assertSame([], $this->liveDb->log, 'die Datenbank wurde nicht berührt');
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame('confirmed', Store::getPush($id)['status']);
+        $this->assertSame('confirmed', $this->rescue($this->live, $id)['status']);
+        // Der zweite Aufruf sieht den bestätigten Push – und das geschlossene Fenster.
+        $this->assertRefused('wpsync_push_window', 403, Push::rollback(['push_id' => $id], self::KEY));
+    }
+
     /** R1, R2, R13: der echte Begin eines Pushs mit Inhalten legt den Umschlag an – nach einer Probe, nur für den Besitzer lesbar. */
     public function testTheBeginSealsAnEnvelopeForAPushWithContent(): void
     {
