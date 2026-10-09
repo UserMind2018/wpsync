@@ -5,6 +5,38 @@ Agent-Version steht pro Release dabei.
 
 ## [Unreleased]
 
+**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` braucht Agent ≥ 0.7.0; ohne
+`--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter „Geändert“. Vorstufe
+des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
+
+### Neu
+- `wpsync pull <site> --content`: Manifest der sieben Inhaltstabellen (Fingerabdruck je Zeile,
+  Meta-Paar und Zuordnung, keine Werte), `map.json`, Baseline, `unfaithful.jsonl`, `env.json` und
+  `summary.json` unter `<site>/.wpsync/content/`; Ergebnis zusätzlich
+  `content: {rows, unfaithful, id_max, canon_version, reloaded}`, Phase `content`. Lädt alle
+  sieben Inhaltstabellen neu, sobald sich eine geändert hat oder der Stand fehlt. Braucht
+  Agent ≥ 0.7.0 (sonst Exit 11) und ein Profil mit allen sieben Tabellen samt Daten (sonst Exit 2)
+- `wpsync content export <site>`: normalisierte Zeilen und Fingerabdrücke der Arbeitskopie als
+  JSON-Lines auf stdout – dieselbe PHP-Implementierung wie auf der Site, per `wp eval-file -`;
+  je Zeile `p` (pushbar laut Listen des Agents, ohne Projekt-Erweiterungen) und sonst `why`
+  (`post_type`, `taxonomy`, `meta_key`, `meta_word`, `option`, `no_object`, `unnormalizable`,
+  `key_encoding`). Läuft ohne Request an die Site, auch im Container-Modus (PHP-Version und
+  Tabellenpräfix aus `env.json`); Meldungen immer auf stderr, mit `--json` das Ergebnisobjekt
+  als letzte Zeile. Braucht einen aktuellen Inhaltsstand (sonst Exit 2)
+- Agent: Endpunkt `/content/manifest` (JSON-Lines, seitenweise mit Zeitbudget, im Umfang des
+  Pull-Profils, ohne Transients und `wpsync_*`-Optionen); im Kopf `id_max`, `engines`, die Listen
+  des Agents und die Pseudonym-Muster, dazu `pushable: false` mit `why` bei Multisite oder
+  abweichender WordPress-/Website-Adresse
+- `error.reason` bei Exit 1: `manifest_incomplete`, `content_export_failed`, `canon_version`
+
+### Geändert
+- Jeder Pull ersetzt auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON); `staging create`
+  und `staging refresh` schreiben sie jetzt ebenfalls um (bisher blieben sie auf Live gerichtet)
+- Ein Pull ohne `--content`, der eine der sieben Inhaltstabellen neu lädt, verwirft einen
+  vorhandenen Inhaltsstand; der nächste `pull --content` baut ihn neu (`reloaded: true`)
+
+## [0.6.0] – 2026-10-09 · Agent 0.6.0
+
 **Agent und CLI ändern sich.** Uploads pushen braucht Agent ≥ 0.6.0; ohne `--uploads` gilt alles
 wie bisher.
 
