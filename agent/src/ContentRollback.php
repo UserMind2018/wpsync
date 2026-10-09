@@ -74,7 +74,12 @@ final class ContentRollback
                         if ($entry['state'] === null && isset(ContentState::PK[$table])) {
                             $store->purge($table, $key); // was am eingefügten Objekt hängt, geht mit
                         }
-                        $store->write($table, $key, $entry['state']);
+                        // Eine Zeile, die es vor dem Push gab, bekommt nur zurück, was der Push geschrieben hat.
+                        $state = $entry['state'];
+                        if ($state !== null && !ContentState::isSet($table) && ($now[$table][$key] ?? null) !== null) {
+                            $state = ContentState::written($table, $state);
+                        }
+                        $store->write($table, $key, $state);
                     } catch (ContentException $e) {
                         if (!$store->alive()) {
                             $lost = [$table, $key, $now[$table][$key] ?? null];

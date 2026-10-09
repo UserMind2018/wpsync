@@ -102,6 +102,10 @@ final class ContentMemory implements ContentStore
             $this->log[] = 'delete ' . $table . ':' . $key;
             return;
         }
+        // Wie UPDATE: eine bestehende Zeile behält die Spalten, die der Zustand nicht nennt.
+        if (!ContentState::isSet($table) && isset($this->data[$table][$key])) {
+            $state = array_merge($this->data[$table][$key], $state);
+        }
         $this->data[$table][$key] = $this->mangle === null ? $state : ($this->mangle)($table, $key, $state);
         $this->log[]              = 'write ' . $table . ':' . $key;
     }

@@ -170,4 +170,33 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
         $this->assertSame(self::sorted($old), self::sorted($this->store->data));
     }
+
+    /**
+     * Die Rücknahme schreibt nur zurück, was der Push geschrieben hat: die Spalten des Abdrucks und
+     * post_modified. Was sich daneben seit dem Push getan hat – ein Kommentar, ein anderer Autor,
+     * autoload einer Option –, bleibt und hindert die Rücknahme nicht.
+     */
+    public function testRollbackLeavesWhatThePushNeverWrote(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $this->store->data['posts']['219']['comment_count'] = '3';
+        $this->store->data['posts']['219']['post_author']   = '9';
+        $this->store->data['posts']['219']['guid']          = 'https://kunde.de/?p=219&neu';
+        $this->store->data['posts']['220']['comment_count'] = '1';
+        $this->store->data['options']['blogname']['autoload'] = 'off';
+        $this->store->data['term_taxonomy']['5']['count']     = '7';
+
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $now = $this->store->data;
+        $this->assertSame(['3', '9', 'https://kunde.de/?p=219&neu'], [$now['posts']['219']['comment_count'], $now['posts']['219']['post_author'], $now['posts']['219']['guid']]);
+        $this->assertSame('1', $now['posts']['220']['comment_count'], 'auch der Beitrag aus dem Papierkorb');
+        $this->assertSame('off', $now['options']['blogname']['autoload']);
+        $this->assertSame($old['posts']['219']['post_title'], $now['posts']['219']['post_title']);
+        $this->assertSame($old['posts']['219']['post_modified'], $now['posts']['219']['post_modified']);
+        $this->assertSame('draft', $now['posts']['220']['post_status']);
+        $this->assertSame('Kunde', $now['options']['blogname']['option_value']);
+        $this->assertArrayNotHasKey('1000001', $now['posts'], 'eingefügte Zeilen gehen weiter ganz');
+        $this->assertArrayNotHasKey('page_on_front', $now['options']);
+    }
 }

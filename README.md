@@ -688,7 +688,9 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
   ab – nicht als bestätigt, sondern als zurückgerollt: Code und Uploads sind zurück, die Inhalte
   bleiben stehen (`status: "rolled_back"`, `warnings: ["content_kept"]`). Das Vorher-Abbild wird
   dabei aufgeräumt; zurücknehmen lassen sich diese Inhalte danach nicht mehr.
-- **`rollback`:** stellt das Vorher-Abbild her, löscht eingefügte Objekte samt Meta und
+- **`rollback`:** stellt das Vorher-Abbild her – an bestehenden Zeilen nur die Spalten, die der
+  Push geschrieben hat (Kommentarzahl, Autor, `guid`, `autoload` bleiben, wie sie inzwischen
+  sind) –, löscht eingefügte Objekte samt Meta und
   Zuordnungen und holt Beiträge aus dem Papierkorb – aber nur, wenn jede betroffene Zeile noch
   den Abdruck trägt, den der Push hinterlassen hat. Sonst `error.reason: "changed_since_push"`
   mit `error.keys`: **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über

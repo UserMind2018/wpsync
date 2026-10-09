@@ -27,6 +27,23 @@ final class ContentState
     /** Reihenfolge beim Schreiben: erst die Objekte, dann was an ihnen hängt, zuletzt Optionen. */
     public const ORDER = ['posts', 'terms', 'term_taxonomy', 'postmeta', 'termmeta', 'term_relationships', 'options'];
 
+    /**
+     * Von einer bestehenden Zeile nur die Spalten, die ein Push schreibt: die des Abdrucks, bei
+     * Beiträgen dazu post_modified(_gmt). Alles andere (post_author, guid, comment_count, autoload,
+     * count …) gehört der Site – die Rücknahme stellt nur das her.
+     *
+     * @param array<string, mixed> $raw die ganze Zeile
+     * @return array<string, mixed>
+     */
+    public static function written(string $table, array $raw): array
+    {
+        $names = self::COLUMNS[$table] ?? [];
+        if ($table === 'posts') {
+            $names = array_merge($names, ['post_modified', 'post_modified_gmt']);
+        }
+        return array_intersect_key($raw, array_flip($names));
+    }
+
     public static function isSet(string $table): bool
     {
         return in_array($table, self::SETS, true);
