@@ -40,6 +40,10 @@ const (
 	busyPause   = 2 * time.Second
 )
 
+// rescueRolledBack is the status in the answer of rescue.php to a rollback that took place – now
+// or in an earlier call.
+const rescueRolledBack = "rolled_back"
+
 // maxRescueAnswer bounds what is read of an answer of rescue.php: with content it may name up to
 // 200 keys (Spec Content-Push P3 §7.6) – more than the 4,000 bytes that were enough before.
 const maxRescueAnswer = 1 << 20
@@ -143,6 +147,12 @@ func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string, content
 	body, err := rescuePost(hc, rescueURL, form)
 	if err != nil {
 		return agentapi.RollbackNotes{}, err
+	}
+	// HTTP 200 and "ok" alone are not a rollback: rescue.php says status "rolled_back" since its
+	// first release (agent 0.4.0). Anything else – the answer to another action, a page of a
+	// firewall that happens to be JSON – must never count as "the push is back".
+	if status, _ := body["status"].(string); status != rescueRolledBack {
+		return agentapi.RollbackNotes{}, fmt.Errorf("rescue.php meldet den Push nicht als zurückgerollt (HTTP 200 ohne status %q)", rescueRolledBack)
 	}
 	raw, _ := json.Marshal(body)
 	var notes agentapi.RollbackNotes

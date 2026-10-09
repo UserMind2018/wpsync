@@ -662,3 +662,49 @@ func TestPushesNamesARollbackThroughRescue(t *testing.T) {
 		t.Errorf("output:\n%s", out)
 	}
 }
+
+// Security-Review P3, N7: antwortet rescue.php mit HTTP 200, aber ohne status "rolled_back", gilt
+// der Push nicht als zurückgerollt – weder nach dem Health-Check noch bei wpsync rollback. Manifest,
+// Baseline und Journal bleiben, wie sie sind, und die CLI ruft weder den Cache-Schritt noch push/list.
+func TestAnAnswerWithoutTheStatusIsNoRollback(t *testing.T) {
+	for _, body := range []string{`{"ok":true}`, `{"ok":true,"status":"committed","content":{"state":"rolled_back","cache":"stale"}}`} {
+		f, o, _, out, report := brokenContentSite(t)
+		f.rescueBody = body
+		err := Run(o)
+		var rolled *RolledBackError
+		if err == nil || errors.As(err, &rolled) || !strings.Contains(err.Error(), "ROLLBACK FEHLGESCHLAGEN") || !strings.Contains(err.Error(), "rolled_back") {
+			t.Fatalf("%s: err = %v\n%s", body, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback rescue") {
+			t.Errorf("%s: routes = %s", body, got)
+		}
+		if report.Status == "rolled_back" {
+			t.Errorf("%s: report = %+v", body, report)
+		}
+
+		f, o, siteDir := contentPushed(t)
+		f.rollback = 500
+		f.rescueBody = body
+		manifest, baseline := contentFile(t, siteDir, "manifest.jsonl"), contentFile(t, siteDir, "baseline.jsonl")
+		var buf bytes.Buffer
+		o.Out = &buf
+		var result Result
+		o.Report = &result
+		err = Rollback(o, testID)
+		if err == nil || !strings.Contains(err.Error(), "Rollback über rescue.php fehlgeschlagen") {
+			t.Fatalf("%s: err = %v\n%s", body, err, &buf)
+		}
+		if got := strings.Join(f.routes, " "); got != "rollback rescue" {
+			t.Errorf("%s: routes = %s", body, got)
+		}
+		if contentFile(t, siteDir, "manifest.jsonl") != manifest || contentFile(t, siteDir, "baseline.jsonl") != baseline {
+			t.Errorf("%s: manifest or baseline were reverted", body)
+		}
+		if j, _ := LoadJournal(siteDir, testID); !j.Applied || !j.Content.Applied {
+			t.Errorf("%s: journal = %+v", body, j)
+		}
+		if strings.Contains(buf.String(), "ist zurückgerollt") || result.Status == "rolled_back" {
+			t.Errorf("%s: output:\n%s\nresult = %+v", body, &buf, result)
+		}
+	}
+}

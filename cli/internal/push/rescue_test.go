@@ -153,6 +153,29 @@ func TestRescueRollback(t *testing.T) {
 		}
 	}
 
+	// Security-Review P3, N7: HTTP 200 mit "ok" allein ist keine Rücknahme – nur status
+	// "rolled_back" ist eine. Sonst gälte jede fremde JSON-Antwort (eine Firewall-Seite, die
+	// Antwort auf ping) als „Push zurückgerollt“, und Manifest und Baseline gingen zurück.
+	for _, body := range []string{
+		`{"ok":true}`,
+		`{"ok":true,"status":"committed"}`,
+		`{"ok":true,"status":"confirmed","content":{"state":"rolled_back"}}`,
+		`{"ok":true,"status":null}`,
+		`{"ok":true,"status":["rolled_back"]}`,
+		`{"ok":true,"status":"rolled_back\n"}`,
+		`{"ok":true,"cache":"flushed"}`,
+	} {
+		srv := rescueServer(t, 200, body, nil)
+		notes, err := RescueRollbackNotes(srv.Client(), srv.URL+"/rescue.php", "p_20261005_0123456789ab", "k3y", true)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "rolled_back") {
+			t.Errorf("%s: err = %v, want an error that names the missing status", body, err)
+		}
+		if notes.Content != nil || len(notes.Warnings) != 0 {
+			t.Errorf("%s: notes = %+v, want none", body, notes)
+		}
+	}
+
 	// U6: wer abgelöst wurde, erfährt, welcher Push zuerst zurückgerollt werden muss.
 	superseded := rescueServer(t, 409, `{"ok":false,"error":"superseded","by":"p_20261006_0123456789ab"}`, nil)
 	defer superseded.Close()
