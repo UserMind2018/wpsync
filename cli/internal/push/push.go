@@ -55,6 +55,10 @@ type Options struct {
 	Yes                bool     // do not ask before pushing
 	AllowVersionChange bool     // with Yes: accept a changed plugin or theme version
 	DryRun             bool     // only show the plan
+	// RequireRescueDB (--require-rescue-db): a push with content goes out only if rescue.php can take
+	// the content back without WordPress (Spec Content-Push P3 R12); without it such a push goes out
+	// with the warning rescue_db_unavailable.
+	RequireRescueDB bool
 
 	// Target: live or staging. Empty means live for a push; for a rollback it means "not named":
 	// without a push ID the newest live push, with one the target of that push (V10).
@@ -106,6 +110,32 @@ type Result struct {
 	// Content: what the agent applied of the package – while it stands on the site. Omitted
 	// without content, in a dry run and once the push is rolled back.
 	Content *ContentReport `json:"content,omitempty"`
+	// Via: how a rollback happened – "agent" (through WordPress) or "rescue" (rescue.php, without
+	// it). Omitted when nothing was rolled back (Spec Content-Push P3 §9).
+	Via string `json:"via,omitempty"`
+	// ContentError: why rescue.php left the content of the push on the site; with the warning
+	// content_not_rolled_back, and only when rescue.php named a reason (agent 0.8.0).
+	ContentError *ContentErrorReport `json:"content_error,omitempty"`
+	// ContentLeft: what hung on objects the push had inserted without being of the push – rescue.php
+	// took the push back and left it, orphaned (warning content_left_extra, R15). At most 200 keys.
+	ContentLeft      []agentapi.ContentKey `json:"content_left,omitempty"`
+	ContentLeftTotal int                   `json:"content_left_total,omitempty"`
+}
+
+// ContentErrorReport is the reason rescue.php kept the content: changed_since_push (with Keys),
+// before_image_invalid, engine_unsupported, content_failed, rescue_db_unavailable, db_unreachable.
+type ContentErrorReport struct {
+	Code  string                `json:"code"`
+	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
+	Total int                   `json:"total,omitempty"`
+}
+
+// contentErrorReport is the reason of a "kept" answer; nil when rescue.php named none.
+func contentErrorReport(c *agentapi.RescueContent) *ContentErrorReport {
+	if c == nil || c.State != "kept" || c.Error == nil {
+		return nil
+	}
+	return &ContentErrorReport{Code: c.Error.Code, Keys: c.Error.Keys, Total: c.Error.Total}
 }
 
 // ContentReport is the content part of a push that stands: the rows of the package and the
@@ -120,6 +150,21 @@ type ContentReport struct {
 // rescue.php knows no database. wpsync rollback <id> takes it back once the agent answers again
 // (Spec Content-Push §7.6).
 const WarningContentNotRolledBack = "content_not_rolled_back"
+
+// WarningRescueDBUnavailable: the push carries content, and rescue.php cannot take it back without
+// WordPress on this site (no envelope: no sodium/openssl, another database driver, an installation
+// without key, a failed probe). If the site fails, only code and uploads go back (Spec Content-Push
+// P3 R12). --require-rescue-db turns it into a refusal.
+const WarningRescueDBUnavailable = "rescue_db_unavailable"
+
+// WarningObjectCacheStale: rescue.php took the content back, but a persistent object cache still
+// holds the pushed state and could not be flushed (Spec Content-Push P3 R8). The agent flushes it
+// once WordPress loads again; until then the hoster's panel does.
+const WarningObjectCacheStale = "object_cache_stale"
+
+// WarningContentLeftExtra: rescue.php took the content back and left what hung on inserted objects
+// without being of the push (Spec Content-Push P3 R15); Result.ContentLeft names it.
+const WarningContentLeftExtra = "content_left_extra"
 
 // WarningContentKept: pushes --confirm closed a push whose code and uploads rescue.php had taken
 // back; its content stays on the site and cannot be taken back any more (Spec Content-Push §7.6).
@@ -210,6 +255,24 @@ type RolledBackError struct {
 	Warnings   []string // what the rollback reports beyond its status, e.g. upload_changed_since_push
 	// PostActions: the agent's steps after taking the content back; nil through rescue.php.
 	PostActions []agentapi.PostAction
+	// Via: "agent" or "rescue". Content: what became of the content of the push – "" without
+	// content, "rolled_back" or "nothing" when it is back, "kept" when it still stands; then
+	// ContentError is the reason rescue.php named, if any (Spec Content-Push P3 §9).
+	Via          string
+	Content      string
+	ContentError *ContentErrorReport
+	// ContentLeft: what rescue.php left on inserted objects (R15).
+	ContentLeft      []agentapi.ContentKey
+	ContentLeftTotal int
+}
+
+// RescueDBError: --require-rescue-db, and rescue.php cannot take the content of this push back
+// without WordPress. Reason is the agent's (no_crypto, driver, no_image_key, probe_failed,
+// write_failed) or agent_outdated for an agent before 0.8.0.
+type RescueDBError struct{ Reason string }
+
+func (e *RescueDBError) Error() string {
+	return fmt.Sprintf("die Notfall-Rücknahme der Inhalte ohne WordPress ist auf dieser Site nicht möglich (%s) – mit --require-rescue-db wird dann nicht gepusht", e.Reason)
 }
 
 func (e *RolledBackError) Error() string {
@@ -679,9 +742,21 @@ func Run(o Options) error {
 	if pkg != nil {
 		printContent(o.Out, pkg, plan.Content)
 	}
-	o.event("plan", planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content))
+	ev := planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content)
+	if pkg != nil && plan.Rescue.DB != nil {
+		ev["rescue_db"] = plan.Rescue.DB // only from agent 0.8.0 (Spec Content-Push P3 §5.3)
+	}
+	o.event("plan", ev)
 	if readonly {
 		return ErrNotWritable
+	}
+	// Can rescue.php take the content back if WordPress fails? The dry run says what a real begin
+	// would yield; the real begin says it again after its probe.
+	rescueWarned := false
+	if pkg != nil {
+		if err := o.rescueDB(plan.Rescue.DB, report, &rescueWarned); err != nil {
+			return err
+		}
 	}
 	// A file below uploads is never replaced, --force or not (Spec Content-Push §8.2, W3).
 	if upPlan != nil && len(upPlan.Conflicts) > 0 {
@@ -763,6 +838,12 @@ func Run(o Options) error {
 	}
 	expires := func(err error) error {
 		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
+	}
+	if pkg != nil {
+		// After the probe of the real begin: with --require-rescue-db nothing is uploaded or swapped.
+		if err := o.rescueDB(begin.Rescue.DB, report, &rescueWarned); err != nil {
+			return expires(err)
+		}
 	}
 	// The real begin names the stub of the dry run again – unless it was tidied away meanwhile (a
 	// long confirmation prompt). Then the new way back is checked before the first byte (Spec 12, R4).
@@ -1118,11 +1199,37 @@ func readExactly(root *os.Root, unit, rel string, want LocalFile) ([]byte, error
 	return data, nil
 }
 
+// rescueDB reads rescue.db of a begin for a push with content (Spec Content-Push P3 R12, §9): a
+// hint and the warning rescue_db_unavailable when rescue.php cannot take the content back – once –,
+// or with RequireRescueDB the refusal. An agent before 0.8.0 names no rescue.db: then nothing is
+// said (the push behaves as before), and RequireRescueDB refuses it.
+func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bool) error {
+	if db != nil && db.OK {
+		return nil
+	}
+	reason := "agent_outdated"
+	if db != nil {
+		reason = db.Reason
+	}
+	if o.RequireRescueDB {
+		return &RescueDBError{Reason: reason}
+	}
+	if db == nil || *warned {
+		return nil
+	}
+	*warned = true
+	fmt.Fprintf(o.Out, "  ! Notfall-Rücknahme der Inhalte nicht möglich (%s) – bei einem Ausfall gehen nur Code und Uploads zurück\n", reason)
+	report.Warnings = append(report.Warnings, WarningRescueDBUnavailable)
+	return nil
+}
+
 // rolledBack notes in the result whether the way back worked.
 func rolledBack(report *Result, err error) error {
 	var rolled *RolledBackError
 	if errors.As(err, &rolled) {
 		report.Status = "rolled_back"
+		report.Via, report.ContentError = rolled.Via, rolled.ContentError
+		report.ContentLeft, report.ContentLeftTotal = rolled.ContentLeft, rolled.ContentLeftTotal
 		report.Warnings = append(report.Warnings, rolled.Warnings...)
 		// Through rescue.php the content stays on the site – then it is still what was applied.
 		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
@@ -1149,11 +1256,13 @@ func stagingPages(siteURL, base string, pages []string) []string {
 }
 
 // rollbackNow takes a swapped push back and checks the site again: through rescue.php – or, for a
-// push with content, through the agent first, because only it takes content back (DB → code →
-// uploads, Spec Content-Push §7.6). If the agent does not answer, rescue.php takes code and
-// uploads back and the result says content_not_rolled_back. If the agent answers and refuses (a
-// wpsync code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php
-// is not called: the set stays whole. A push without content goes through rescue.php, always.
+// push with content, through the agent first, because it also runs the post actions (DB → code →
+// uploads, Spec Content-Push §7.6). If the agent does not answer, rescue.php takes the whole set
+// back without WordPress (agent 0.8.0, Spec Content-Push P3); where it cannot take the content
+// back – an older agent, no envelope, rows changed since the push – code and uploads go back
+// anyway and the result says content_not_rolled_back. If the agent answers and refuses (a wpsync
+// code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php is not
+// called: the set stays whole. A push without content goes through rescue.php, always.
 // ctx bounds the check after the rollback; a check cut short by it is left out of the error.
 func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
@@ -1165,7 +1274,7 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	viaAgent := false
 	if j.Content != nil {
 		var apiErr *agentapi.APIError
-		notes, err = o.Client.PushRollbackNotes(j.PushID)
+		notes, err = agentRollback(o, j.PushID)
 		switch {
 		case err == nil:
 			viaAgent = true
@@ -1175,14 +1284,11 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 			return fmt.Errorf("ROLLBACK NICHT MÖGLICH – Push %s bleibt ganz bestehen (%s): %w", j.PushID, strings.Join(reasons, "; "), contentError(agentError(j.target(), err)))
 		default:
 			// No answer, a 5xx, or a page that is not the agent's (a firewall, a fatal error).
-			fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php (nur Code und Uploads)")
+			fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php")
 		}
 	}
 	if !viaAgent {
-		notes, err = RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt))
-		if err == nil && j.Content != nil && !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
-			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack) // whatever rescue.php says: it knows no database
-		}
+		notes, err = rescueBack(o, j)
 	}
 	if err != nil {
 		where := "live und die Site"
@@ -1200,7 +1306,59 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	}
 	printKept(o.Out, notes.Kept)
 	printActions(o.Out, notes.PostActions)
-	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions}
+	rolled := &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions, Via: "rescue"}
+	if viaAgent {
+		rolled.Via = "agent"
+	}
+	if j.Content != nil {
+		rolled.Content = "rolled_back"
+		if slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
+			rolled.Content = "kept"
+		}
+		rolled.ContentError = contentErrorReport(notes.Content)
+		if notes.Content != nil && rolled.Content != "kept" {
+			rolled.Content = notes.Content.State
+			rolled.ContentLeft, rolled.ContentLeftTotal = notes.Content.Left, notes.Content.LeftTotal
+			printLeft(o.Out, notes.Content)
+		}
+		if !viaAgent && rolled.Content != "kept" {
+			fmt.Fprintln(o.Out, "  über rescue.php zurückgenommen, Inhalte eingeschlossen – die Nacharbeiten holt der Agent nach, sobald WordPress wieder lädt")
+		}
+	}
+	return rolled
+}
+
+// agentRollback asks the agent to take a push back and repeats the request while it answers that
+// another rollback of the push or its commit is running (HTTP 423 wpsync_push_busy, Spec
+// Content-Push P3 R10).
+func agentRollback(o Options, pushID string) (agentapi.RollbackNotes, error) {
+	for attempt := 0; ; attempt++ {
+		notes, err := o.Client.PushRollbackNotes(pushID)
+		var apiErr *agentapi.APIError
+		if err == nil || attempt == busyRetries || !errors.As(err, &apiErr) || apiErr.Code != "wpsync_push_busy" {
+			return notes, err
+		}
+		o.Sleep(busyPause)
+	}
+}
+
+// printLeft names what rescue.php left on objects the push had inserted (R15).
+func printLeft(out io.Writer, c *agentapi.RescueContent) {
+	if c == nil || len(c.Left) == 0 {
+		return
+	}
+	names := make([]string, 0, 5)
+	for i, k := range c.Left {
+		if i == 5 {
+			break
+		}
+		names = append(names, k.Table+" "+agentapi.Printable(strings.ReplaceAll(k.Key, "\x00", " ")))
+	}
+	more := ""
+	if c.LeftTotal > len(names) {
+		more = fmt.Sprintf(" und %d weitere", c.LeftTotal-len(names))
+	}
+	fmt.Fprintf(out, "  ! An eingefügten Objekten hing etwas, das nicht vom Push stammt – es blieb stehen (verwaist): %s%s\n", strings.Join(names, ", "), more)
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay

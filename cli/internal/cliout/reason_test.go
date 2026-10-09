@@ -151,3 +151,17 @@ func TestContentRefusalsHaveReasonKeysAndPaths(t *testing.T) {
 		t.Errorf("other failures carry no keys: %s", out)
 	}
 }
+
+// Spec Content-Push P3 §9: --require-rescue-db – Exit 1, reason rescue_db_unavailable, detail der Grund des Agents.
+func TestRequireRescueDBNamesReasonAndDetail(t *testing.T) {
+	for _, reason := range []string{"no_crypto", "driver", "no_image_key", "probe_failed", "write_failed", "agent_outdated"} {
+		f := Classify(fmt.Errorf("Push p_x nicht getauscht: %w", &push.RescueDBError{Reason: reason}))
+		if f.Exit != ExitUnknown || f.Reason != "rescue_db_unavailable" || f.Detail != reason {
+			t.Errorf("%s: failure = %+v", reason, f)
+		}
+	}
+	// No other failure carries a detail.
+	if f := Classify(push.ErrNothing); f.Detail != "" {
+		t.Errorf("detail = %q", f.Detail)
+	}
+}

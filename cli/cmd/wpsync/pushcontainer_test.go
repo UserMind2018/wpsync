@@ -329,3 +329,21 @@ func TestPushContainerContentIsCheckedBeforeAnyRequest(t *testing.T) {
 		t.Errorf("routes = %v", f.routes)
 	}
 }
+
+// Spec Content-Push P3 §9: --require-rescue-db ist ein Flag von push – angenommen wie die anderen
+// (kein Aufruffehler), auch im Container-Modus; ohne es bleibt der Aufruf, wie er war.
+func TestPushTakesTheFlagRequireRescueDB(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	bad := filepath.Join(t.TempDir(), "package.jsonl")
+	os.WriteFile(bad, []byte("kein paket\n"), 0o644)
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "--no-code", "--content", bad, "--require-rescue-db", "--dry-run", "--json")...)
+	m := lastResult(t, res, "push", cliout.ExitUnknown) // the package is refused, not the flag (that would be exit 2)
+	if e := m["error"].(map[string]any); e["reason"] != "package_invalid" {
+		t.Errorf("error = %v", e)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("routes = %v", f.routes)
+	}
+	res = runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "--require-rescue-dbx", "--dry-run", "--json")...)
+	lastResult(t, res, "push", cliout.ExitUsage)
+}

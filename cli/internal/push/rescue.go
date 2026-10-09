@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,7 +13,9 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 )
@@ -25,7 +28,21 @@ var (
 	ErrRescueConfirmed = errors.New("rescue.php rollt nur unbestätigte Pushes zurück – dieser ist bestätigt; im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
 	// ErrRescueGone: the stub in the webroot lives only while a push is open (Spec Stufe 2, 12, R8).
 	ErrRescueGone = errors.New("der Notfallweg über rescue.php besteht nur bis kurz nach der Bestätigung eines Pushs und ist nicht mehr da – im WP-Admin unter Werkzeuge → wpsync zurückrollen, ohne WordPress per FTP")
+	// ErrRescueBusy: another rollback of this push, or its commit, holds the lock on the site
+	// (HTTP 423, Spec Content-Push P3 R10). The caller repeats the request.
+	ErrRescueBusy = errors.New("auf der Site läuft für diesen Push gerade eine andere Rücknahme oder sein Commit")
 )
+
+// busyRetries: so often a rollback is repeated while the site answers 423, busyPause apart (Spec
+// Content-Push P3 §7.1).
+const (
+	busyRetries = 3
+	busyPause   = 2 * time.Second
+)
+
+// maxRescueAnswer bounds what is read of an answer of rescue.php: with content it may name up to
+// 200 keys (Spec Content-Push P3 §7.6) – more than the 4,000 bytes that were enough before.
+const maxRescueAnswer = 1 << 20
 
 // stubName matches the rescue stub the agent puts into the webroot.
 var stubName = regexp.MustCompile(`^wpsync-rescue-[a-f0-9]{32}\.php$`)
@@ -106,16 +123,24 @@ func rescueReady(o Options, r agentapi.PushRescue) error {
 	return nil
 }
 
-// RescueRollback restores the snapshot of a push, bypassing WordPress.
+// RescueRollback restores the snapshot of a push, bypassing WordPress – code and uploads, never
+// content.
 func RescueRollback(hc *http.Client, rescueURL, pushID, key string) error {
-	_, err := RescueRollbackNotes(hc, rescueURL, pushID, key)
+	_, err := RescueRollbackNotes(hc, rescueURL, pushID, key, false)
 	return err
 }
 
 // RescueRollbackNotes is RescueRollback and returns what rescue.php reports beyond the status
-// (agent 0.6.0: uploads left in place because they changed since the push).
-func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string) (agentapi.RollbackNotes, error) {
-	body, err := rescuePost(hc, rescueURL, url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}})
+// (agent 0.6.0: uploads left in place because they changed since the push). With content it asks
+// rescue.php to take the content of the push back first (content=1, agent 0.8.0, Spec Content-Push
+// P3 R11): the notes then carry Content. An older rescue.php ignores the wish and says nothing
+// about the content.
+func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string, content bool) (agentapi.RollbackNotes, error) {
+	form := url.Values{"action": {"rollback"}, "push_id": {pushID}, "key": {key}}
+	if content {
+		form.Set("content", "1")
+	}
+	body, err := rescuePost(hc, rescueURL, form)
 	if err != nil {
 		return agentapi.RollbackNotes{}, err
 	}
@@ -123,6 +148,21 @@ func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string) (agenta
 	var notes agentapi.RollbackNotes
 	_ = json.Unmarshal(raw, &notes) // a field of another type stays empty
 	return notes.Clean(), nil
+}
+
+// RescueCache asks rescue.php to flush a persistent object cache that still holds the pushed
+// state (action=cache, Spec Content-Push P3 R8) – a step of its own after a rollback whose answer
+// said cache: "stale". It loads WordPress without plugins and themes; a failure never touches the
+// rollback, which is done by then.
+func RescueCache(hc *http.Client, rescueURL, pushID, key string) error {
+	body, err := rescuePost(hc, rescueURL, url.Values{"action": {"cache"}, "push_id": {pushID}, "key": {key}})
+	if err != nil {
+		return err
+	}
+	if body["cache"] != "flushed" {
+		return errors.New("rescue.php hat den Object-Cache nicht geleert")
+	}
+	return nil
 }
 
 func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]any, error) {
@@ -140,10 +180,13 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4000))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRescueAnswer))
 	var body map[string]any
 	if json.Unmarshal(raw, &body) != nil {
-		if resp.StatusCode == http.StatusNotFound && stubName.MatchString(path.Base(req.URL.Path)) {
+		// A stub that was tidied away: the server answers 404 – or redirects, as WordPress does for
+		// an address it does not know (Spec Content-Push P3 §9).
+		gone := resp.StatusCode == http.StatusNotFound || (resp.StatusCode >= 300 && resp.StatusCode < 400)
+		if gone && stubName.MatchString(path.Base(req.URL.Path)) {
 			return nil, ErrRescueGone
 		}
 		return nil, fmt.Errorf("HTTP %d, keine Antwort von rescue.php", resp.StatusCode)
@@ -152,10 +195,74 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 		if body["error"] == "confirmed" {
 			return nil, ErrRescueConfirmed
 		}
+		if resp.StatusCode == http.StatusLocked && body["error"] == "busy" {
+			return nil, ErrRescueBusy
+		}
+		// The code could not be swapped back after the content was: say so, the next call skips the database.
+		if content, _ := body["content"].(map[string]any); body["error"] == "restore failed" && content["state"] == "rolled_back" {
+			return nil, fmt.Errorf("HTTP %d: restore failed – die Inhalte sind schon zurückgenommen, Code und Uploads noch nicht", resp.StatusCode)
+		}
 		if by, _ := body["by"].(string); body["error"] == "superseded" && pushIDRe.MatchString(by) {
 			return nil, fmt.Errorf("HTTP %d: superseded – zuerst den späteren Push %s zurückrollen", resp.StatusCode, by)
 		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, agentapi.Printable(fmt.Sprint(body["error"])))
 	}
 	return body, nil
+}
+
+// rescueBack takes a push back through rescue.php, the way that needs no WordPress (Spec
+// Content-Push P3 §9): with content=1 when the push carried content, repeated while another run
+// holds the lock of the push; then – if rows were written back while a persistent object cache
+// holds the pushed state – the cache step; and one push/list, best effort, so that the agent
+// catches up on the post actions as soon as WordPress answers again.
+//
+// The warning content_not_rolled_back is the CLI's word whenever the content still stands: when
+// rescue.php says "kept", and when it says nothing about the content at all (an agent before
+// 0.8.0, which ignores content=1).
+func rescueBack(o Options, j *Journal) (agentapi.RollbackNotes, error) {
+	key := RescueKey(o.Secret, j.PushID, j.Salt)
+	var notes agentapi.RollbackNotes
+	var err error
+	for attempt := 0; ; attempt++ {
+		notes, err = RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, key, j.Content != nil)
+		if !errors.Is(err, ErrRescueBusy) || attempt == busyRetries {
+			break
+		}
+		o.Sleep(busyPause)
+	}
+	if err != nil || j.Content == nil {
+		return notes, err
+	}
+	if notes.Content == nil || notes.Content.State == "kept" {
+		if !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
+			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack)
+		}
+		return notes, nil
+	}
+	if notes.Content.Cache == "stale" {
+		if cerr := RescueCache(o.HTTP, j.RescueURL, j.PushID, key); cerr != nil {
+			fmt.Fprintln(o.Out, "  ! Der Object-Cache der Site trägt noch den gepushten Stand – beim Hoster leeren, falls die Site nicht antwortet.")
+			notes.Warnings = append(notes.Warnings, WarningObjectCacheStale)
+		}
+	}
+	o.nudge()
+	return notes, nil
+}
+
+// nudge asks the agent for its push log once, ignoring the answer: any signed request lets it
+// take over what rescue.php did and catch up on the post actions (Push::sync()). WordPress may
+// still be down – then the marker rescue.php left does the same on the next page view.
+func (o Options) nudge() {
+	prev := o.Client.Ctx
+	parent := prev
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	defer func() {
+		cancel()
+		o.Client.Ctx = prev
+	}()
+	o.Client.Ctx = ctx
+	_, _ = o.Client.PushList()
 }

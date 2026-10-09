@@ -60,12 +60,26 @@ type PushPending struct {
 	Created int64  `json:"created"`
 }
 
+// MinAgentRescueDB is the first agent whose rescue.php takes the content of a push back without
+// WordPress (Spec Content-Push P3). No hard minimum: the CLI tells it by the field rescue.db.
+const MinAgentRescueDB = "0.8.0"
+
+// RescueDBState says whether rescue.php can take the content of this push back without WordPress
+// (agent 0.8.0, Spec Content-Push P3 §5.3). Reason, when it cannot: no_crypto, driver,
+// no_image_key, probe_failed, write_failed – or "unknown" for anything that is no such code.
+type RescueDBState struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // PushRescue locates the rollback script that works without WordPress.
 type PushRescue struct {
 	URL  string `json:"url"`
 	Salt string `json:"salt"`
 	// Hardening names active plugins that may block PHP below wp-content (agent 0.5.1).
 	Hardening []string `json:"hardening"`
+	// DB: only for a push with content, and only from agent 0.8.0; nil otherwise.
+	DB *RescueDBState `json:"db,omitempty"`
 }
 
 // PushBegin is the answer to /push/begin. PushID and Rescue.Salt are empty for a dry run.
@@ -106,6 +120,13 @@ type PushRecordUnit struct {
 	Uploaded   int    `json:"uploaded"`
 	// Extensions: on the unit "content", the project extensions of the package – only if it had any.
 	Extensions *ContentExtensions `json:"extensions,omitempty"`
+	// Via "rescue": rescue.php took the content of the push back without WordPress; PostActions are
+	// the steps the agent caught up on once WordPress loaded again, Left what hung on inserted
+	// objects without being of the push and stayed (agent 0.8.0, Spec Content-Push P3 §8.2, R15).
+	Via         string       `json:"via,omitempty"`
+	PostActions []PostAction `json:"post_actions,omitempty"`
+	Left        []ContentKey `json:"left,omitempty"`
+	LeftTotal   int          `json:"left_total,omitempty"`
 }
 
 // PushRecord is one line of the push log. Status: uploading, committed, confirmed, rolled_back,
@@ -133,6 +154,14 @@ func (c *Client) PushBegin(req PushBeginRequest) (*PushBegin, error) {
 	}
 	if res.Content != nil {
 		res.Content.Clean()
+	}
+	if db := res.Rescue.DB; db != nil {
+		switch {
+		case db.OK:
+			db.Reason = ""
+		case !stepRe.MatchString(db.Reason):
+			db.Reason = "unknown"
+		}
 	}
 	return &res, nil
 }
@@ -188,6 +217,68 @@ type RollbackNotes struct {
 	Kept     []string `json:"kept"`
 	// PostActions: the steps after taking content back (agent 0.7.0, Spec Content-Push §7.7).
 	PostActions []PostAction `json:"post_actions"`
+	// Content: what rescue.php says about the content of the push when asked with content=1
+	// (agent 0.8.0, Spec Content-Push P3 §7.6); nil from the agent's own rollback, from an older
+	// rescue.php and for a push without content.
+	Content *RescueContent `json:"content,omitempty"`
+}
+
+// RescueContent is the part "content" of an answer of rescue.php. State: rolled_back (rows were
+// written back), nothing (every row stood in its state before the push already) or kept (the
+// content still stands; Error says why). Cache: none, stale (a persistent object cache still
+// holds the pushed state – action=cache flushes it) or flushed.
+type RescueContent struct {
+	State string              `json:"state"`
+	Cache string              `json:"cache,omitempty"`
+	Error *RescueContentError `json:"error,omitempty"`
+	// Left: what hung on objects the push had inserted without being of the push; it stayed on
+	// the site, orphaned (R15). At most 200 keys, LeftTotal counts all.
+	Left      []ContentKey `json:"left,omitempty"`
+	LeftTotal int          `json:"left_total,omitempty"`
+}
+
+// RescueContentError: why rescue.php left the content – changed_since_push (with Keys),
+// before_image_invalid, engine_unsupported, content_failed (Unrestored: one row has to be checked
+// by hand), rescue_db_unavailable or db_unreachable. Never a value, never a word of the database.
+type RescueContentError struct {
+	Code       string       `json:"code"`
+	Keys       []ContentKey `json:"keys,omitempty"`
+	Total      int          `json:"total,omitempty"`
+	Unrestored bool         `json:"unrestored,omitempty"`
+}
+
+// clean keeps what looks like the agent's words; nil for a state this CLI does not know – the
+// caller then assumes the content still stands.
+func (c *RescueContent) clean() *RescueContent {
+	if c == nil {
+		return nil
+	}
+	out := &RescueContent{State: c.State}
+	switch c.State {
+	case "rolled_back", "nothing":
+		if c.Cache == "none" || c.Cache == "stale" || c.Cache == "flushed" {
+			out.Cache = c.Cache
+		}
+		out.Left = CleanKeys(c.Left)
+		if out.LeftTotal = c.LeftTotal; out.LeftTotal < len(out.Left) || out.LeftTotal > 1<<20 {
+			out.LeftTotal = len(out.Left)
+		}
+	case "kept":
+		e := RescueContentError{Code: "content_failed"}
+		if c.Error != nil {
+			if stepRe.MatchString(c.Error.Code) {
+				e.Code = c.Error.Code
+			}
+			e.Keys, e.Unrestored = CleanKeys(c.Error.Keys), c.Error.Unrestored
+			if e.Total = c.Error.Total; e.Total < len(e.Keys) || e.Total > 1<<20 {
+				e.Total = len(e.Keys)
+			}
+		}
+		out.Error = &e
+	default:
+		return nil
+	}
+	return out
 }
 
 var warningRe = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
@@ -208,6 +299,7 @@ func (n RollbackNotes) Clean() RollbackNotes {
 		out.Kept = append(out.Kept, k)
 	}
 	out.PostActions = CleanActions(n.PostActions)
+	out.Content = n.Content.clean()
 	return out
 }
 
@@ -236,8 +328,16 @@ func (c *Client) PushList() ([]PushRecord, error) {
 	}
 	for _, r := range res.Pushes {
 		for i := range r.Units {
-			if r.Units[i].Extensions != nil {
-				r.Units[i].Extensions.Clean()
+			u := &r.Units[i]
+			if u.Extensions != nil {
+				u.Extensions.Clean()
+			}
+			if u.Via != "rescue" {
+				u.Via = ""
+			}
+			u.PostActions, u.Left = CleanActions(u.PostActions), CleanKeys(u.Left)
+			if u.LeftTotal < len(u.Left) || u.LeftTotal > 1<<20 {
+				u.LeftTotal = len(u.Left)
 			}
 		}
 	}
