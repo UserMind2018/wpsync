@@ -173,4 +173,13 @@ final class StagingReplaceTest extends TestCase
         $withTail = str_replace('example.com', 'example.com' . self::TAIL, $value);
         $this->assertNull($r->stripValue($withTail));
     }
+
+    /** Security-Review M3 */
+    public function testDeeplyNestedStringsStayAndAreCounted(): void
+    {
+        $r     = $this->r();
+        $value = SerializedWalkerTest::nested('https://example.com/x', 5000);
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+    }
 }

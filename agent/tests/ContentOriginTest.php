@@ -144,4 +144,18 @@ final class ContentOriginTest extends TestCase
         $this->assertNull($o->normalize(sprintf($template, 'https://kunde.de')));
         $this->assertNull($o->insert(sprintf($template, ContentOrigin::PLAIN)));
     }
+
+    /** Security-Review M3: tausende Ebenen serialisierter Strings sind unlesbar – kein Speicherfehler */
+    public function testDeeplyNestedStringsAreUnnormalizable(): void
+    {
+        $o      = new ContentOrigin('https://kunde.de');
+        $before = memory_get_peak_usage();
+        $this->assertNull($o->normalize(SerializedWalkerTest::nested('https://kunde.de', 5000)));
+        $this->assertNull($o->insert(SerializedWalkerTest::nested(ContentOrigin::PLAIN, 5000)));
+        $this->assertLessThan(32 * 1024 * 1024, memory_get_peak_usage() - $before);
+        $this->assertSame(
+            SerializedWalkerTest::nested(ContentOrigin::PLAIN . '/x', 3),
+            $o->normalize(SerializedWalkerTest::nested('https://kunde.de/x', 3))
+        );
+    }
 }

@@ -84,4 +84,57 @@ final class SerializedWalkerTest extends TestCase
         $this->assertNull(SerializedWalker::rewrite('a:2000000000:{i:0;s:3:"abc";}', [self::class, 'upper']));
         $this->assertNull(SerializedWalker::rewrite('s:2000000000:"abc";', [self::class, 'upper']));
     }
+
+    /** $levels-mal serialisiert: s:N:"s:M:"…";"; */
+    public static function nested(string $leaf, int $levels): string
+    {
+        for ($i = 0; $i < $levels; $i++) {
+            $leaf = serialize($leaf);
+        }
+        return $leaf;
+    }
+
+    /** @param mixed $leaf */
+    private static function arrays($leaf, int $levels): string
+    {
+        for ($i = 0; $i < $levels; $i++) {
+            $leaf = [$leaf];
+        }
+        return serialize($leaf);
+    }
+
+    /** Security-Review M3: die Tiefe zählt über verschachtelte serialisierte Strings hinweg */
+    public function testNestedStringsCountTowardsTheDepth(): void
+    {
+        $value  = self::nested('abc', 5000);
+        $before = memory_get_peak_usage();
+        $start  = microtime(true);
+        $this->assertNull(SerializedWalker::rewrite($value, [self::class, 'upper']));
+        $this->assertLessThan(32 * 1024 * 1024, memory_get_peak_usage() - $before);
+        $this->assertLessThan(2.0, microtime(true) - $start);
+    }
+
+    public function testDepthLimitCountsStructureAndStringsTogether(): void
+    {
+        $this->assertSame(self::nested('ABCDEF', 3), SerializedWalker::rewrite(self::nested('abc', 3), [self::class, 'upper']));
+        $this->assertSame(self::nested('ABCDEF', 64), SerializedWalker::rewrite(self::nested('abc', 64), [self::class, 'upper']));
+        $this->assertNull(SerializedWalker::rewrite(self::nested('abc', 66), [self::class, 'upper']));
+        $this->assertSame(self::arrays('ABCDEF', 64), SerializedWalker::rewrite(self::arrays('abc', 64), [self::class, 'upper']));
+        $this->assertNull(SerializedWalker::rewrite(self::arrays('abc', 65), [self::class, 'upper']));
+        // 40 Ebenen Struktur, darin ein String mit weiteren 40: zusammen zu tief.
+        $mixed = self::arrays(self::arrays('abc', 40), 40);
+        $this->assertNull(SerializedWalker::rewrite($mixed, [self::class, 'upper']));
+        $fits = self::arrays(self::arrays('abc', 30), 30);
+        $this->assertSame(self::arrays(self::arrays('ABCDEF', 30), 30), SerializedWalker::rewrite($fits, [self::class, 'upper']));
+    }
+
+    /** Ein verschachtelter String wird an Ort und Stelle gelesen, nicht je Ebene kopiert. */
+    public function testALargeDoubleSerializedValueIsNotCopiedPerLevel(): void
+    {
+        $value  = self::nested(str_repeat('x', 4 * 1024 * 1024) . 'abc', 40);
+        $before = memory_get_peak_usage();
+        $new    = SerializedWalker::rewrite($value, [self::class, 'upper']);
+        $this->assertLessThan(40 * 1024 * 1024, memory_get_peak_usage() - $before);
+        $this->assertSame(self::nested(str_repeat('x', 4 * 1024 * 1024) . 'ABCDEF', 40), $new);
+    }
 }
