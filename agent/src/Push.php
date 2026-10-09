@@ -533,7 +533,9 @@ final class Push
     }
 
     /**
-     * Baut die neuen Verzeichnisse (in Schritten mit Cursor) und tauscht dann alle Einheiten.
+     * Baut die neuen Verzeichnisse (in Schritten mit Cursor) und tauscht dann alle Einheiten. Trägt
+     * der Plan einen Plugin-Zustand (Spec Content-Push P4 §8.1), wird er vor dem Tausch verbindlich
+     * geprüft und im DB-Schritt geschrieben – auch ohne Paket.
      *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
@@ -618,6 +620,31 @@ final class Push
             return self::error('wpsync_push_build', 'Push abgebrochen, nichts getauscht: ' . $e->getMessage(), 409);
         }
 
+        // Der Plugin-Zustand, verbindlich und vor dem Tausch (Spec Content-Push P4 §8.1 Nr. 2): der Öffner des
+        // Fensters darf Plugins schalten (A12), der Umschlag für rescue.php liegt (A9), jede zu aktivierende
+        // Einheit trägt im gebauten Verzeichnis genau eine Hauptdatei, und ihr Kopf passt zum Ziel (A10) – der
+        // mitgeschickte Kopf des Begin zählt hier nicht mehr. Scheitert etwas, ist nichts getauscht.
+        // Gelesen werden nur die ersten Bytes der Dateien: hier läuft nie Code eines Plugins (A5).
+        $wish     = null;
+        $resolved = null;
+        if (is_array($plan['plugins'] ?? null)) {
+            try {
+                // plan.json liegt im Arbeitsordner: was daraus kommt, gilt nur in der Form, die auch der Begin verlangt.
+                $wish = PushPlugins::request(['activate' => $plan['plugins']['activate'] ?? [], 'deactivate' => $plan['plugins']['deactivate'] ?? []]);
+                if ($wish === null) {
+                    throw PushPlugins::refuse(ContentException::PLUGINS_INVALID, 'Der Plan dieses Pushs nennt keinen gültigen Plugin-Zustand.');
+                }
+                $opened   = Store::getPush($pushId);
+                $resolved = PushPlugins::check($wish, array_column($plan['units'], 'path'), $base . '/new', $target, $content, $opened === null ? null : $opened['opened_by'], RescueSeal::file($work, $pushId));
+            } catch (ContentException $e) {
+                self::discard($pushId, self::FAILED);
+                return $e->toError();
+            } catch (\Throwable $e) {
+                // Kein vorgesehener Grund – dieselbe Folge, ohne zu sagen, was es war.
+                self::discard($pushId, self::FAILED);
+                return (new ContentException(ContentException::FAILED, 'Der Plugin-Zustand liess sich nicht prüfen – nichts getauscht.'))->toError();
+            }
+        }
         $pairs   = [];
         $sources = []; // new/<n> je Paar – die Einheit uploads hat keins, die Indizes laufen auseinander
         $upIndex = null;
@@ -654,8 +681,8 @@ final class Push
         }
         wp_mkdir_p($base . '/old');
         // Vor dem ersten rename: stirbt PHP mitten im Anlegen oder Tausch, kann rescue.php zurücknehmen.
-        // Der DB-Anteil steht hier schon als „pending“ – lange vor START TRANSACTION.
-        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha);
+        // Der DB-Anteil – Paket oder Plugin-Zustand – steht hier schon als „pending“, lange vor START TRANSACTION.
+        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha, $wish !== null);
         if ($upIndex !== null) {
             $placed = [];
             try {
@@ -711,11 +738,17 @@ final class Push
             $summary[] = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows]
                 + ($used === null ? [] : ['extensions' => $used]);
         }
+        if ($wish !== null) {
+            // Die Einheit plugins des Protokolls (V12) – immer die letzte: nach dem DB-Schritt kommt dazu, was er geändert hat.
+            $summary[] = ['path' => PushPlugins::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => 0, 'uploaded' => 0,
+                'activate' => $wish['activate'], 'deactivate' => $wish['deactivate']];
+        }
         // Ab hier gilt der Push als getauscht – auch wenn PHP beim Anwenden der Inhalte stirbt: dann
         // nimmt die Datenbank die Transaktion zurück, und wpsync rollback holt den Code nach.
         Store::updatePush($pushId, ['status' => PushRescue::COMMITTED, 'committed' => time(), 'units' => (string) wp_json_encode($summary)]);
         $answer = ['next' => null, 'stamps' => (object) $stamps];
-        if ($package !== null) {
+        if ($package !== null || $wish !== null) {
+            // Der DB-Schritt: das Paket, der Plugin-Zustand oder beides – eine Transaktion (P4 A7).
             // Die Naht vor COMMIT (P3 R10): die Sperre des Pushs nehmen, rescue.json neu lesen. Hat
             // rescue.php den Push inzwischen zurückgenommen, wird nichts festgeschrieben. Die Sperre
             // hält bis nach „applied“ – rescue.php sieht den DB-Anteil nie halb.
@@ -734,7 +767,15 @@ final class Push
             };
             try {
                 $push    = Store::getPush($pushId);
-                $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by'], $gate);
+                $applied = PushContent::apply(
+                    $package,
+                    $target,
+                    $content,
+                    $base,
+                    $push === null ? null : $push['opened_by'],
+                    $gate,
+                    $resolved === null ? null : ['add' => array_values($resolved['add']), 'drop' => $resolved['drop']]
+                );
             } catch (ContentException $e) {
                 return self::contentFailed($e, $content, $work, $pushId, $lock);
             } catch (\Throwable $e) {
@@ -742,7 +783,12 @@ final class Push
                 // zurückgenommen (ContentStore::transaction). Was der Fehler war, bleibt hier.
                 return self::contentFailed(new ContentException(ContentException::FAILED, 'Die Inhalte liessen sich nicht anwenden – nichts wurde übernommen.'), $content, $work, $pushId, $lock);
             }
-            PushRescue::setContent($work, $pushId, PushRescue::CONTENT_APPLIED);
+            $done = ['state' => PushRescue::CONTENT_APPLIED];
+            if ($resolved !== null) {
+                // Nur zur Auskunft – für plugins_not_restored, falls rescue.php den DB-Anteil stehen lassen muss (A18).
+                $done['plugins'] = $applied['plugins'];
+            }
+            PushRescue::setContentFields($work, $pushId, $done);
             PushRescue::unlock($lock);
             $answer['content'] = [
                 'rows'         => $applied['rows'],
@@ -750,6 +796,11 @@ final class Push
                 'post_actions' => PushContent::postActions($target, $content, $applied['changes']), // §7.7: nie ein Fehler des Pushs
                 'seconds'      => $applied['seconds'],
             ];
+            if ($resolved !== null) {
+                $answer['plugins']            = PushPlugins::result($wish, $resolved, $applied['plugins']);
+                $summary[count($summary) - 1] += ['activated' => $applied['plugins']['added'], 'deactivated' => $applied['plugins']['removed']];
+                Store::updatePush($pushId, ['units' => (string) wp_json_encode($summary)]);
+            }
         }
         if ($target === 'staging') {
             Staging::markUsed(); // ein Push zählt als Nutzung der Kopie (Spec 2b 5.9)
