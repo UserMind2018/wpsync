@@ -12,7 +12,7 @@ defined('ABSPATH') || exit;
  */
 final class ContentLists
 {
-    public const VERSION = 1;
+    public const VERSION = 2;
 
     public const POST_TYPES = [
         'page', 'post', 'attachment', 'nav_menu_item', 'wp_block', 'wp_template', 'wp_template_part',
@@ -41,14 +41,33 @@ final class ContentLists
     ];
     public const BLOCKED_META_PREFIXES = ['_elementor_screenshot', '_wp_trash_meta_', '_yoast_indexnow_'];
     /** Teilstrings, gross/klein egal; nur hiervon kann ein Projekt einzelne Schlüssel ausnehmen (W11). */
-    public const BLOCKED_META_WORDS = ['license', 'api_key', 'token', 'secret', 'password'];
+    public const BLOCKED_META_WORDS = ['license', 'api_key', 'token', 'secret', 'password', 'passwd', 'credential', 'apikey', 'api-key', 'webhook', 'oauth'];
+    /**
+     * Kurze Wörter, die nur als ganzes Namensglied sperren (zwischen _ - . : oder am Rand): „auth“
+     * trifft _auth_code, nicht author; „pass“ trifft smtp_pass, nicht passage. Für Meta und Optionen.
+     */
+    public const BLOCKED_SEGMENTS = ['pass', 'pwd', 'auth', 'salt', 'sk', 'private'];
+    /** Meta-Schlüssel und Optionsnamen, die ein Paket nennen darf (Schutz vor Alias über die Kollation). */
+    public const NAME = '/^[A-Za-z0-9_.:\-]{1,255}\z/';
+
+    /**
+     * Beitragstypen, die keine Projekt-Erweiterung freigeben kann – die Erweiterungen kommen aus
+     * dem Paket selbst: Interna, Code-Träger, Shop, Formulareinträge, geplante Aktionen.
+     */
+    public const NEVER_POST_TYPES = [
+        'revision', 'customize_changeset', 'oembed_cache', 'user_request', 'wp_font_family', 'wp_font_face',
+        'wpcode', 'elementor_snippet', 'code_snippet', 'wp_code_snippet', 'insertheadersandfooters', 'ihaf_snippet',
+        'product', 'product_variation', 'shop_coupon', 'shop_subscription',
+        'wpcf7_contact_form', 'wpforms', 'nf_sub', 'feedback', 'scheduled-action',
+    ];
+    public const NEVER_POST_TYPE_PREFIXES = ['shop_order', 'flamingo_', 'wpforms', 'wpcode'];
 
     public const BLOCKED_OPTIONS = [
         'siteurl', 'home', 'active_plugins', 'cron', 'rewrite_rules', 'elementor_pro_license_key',
         'admin_email', 'new_admin_email',
     ];
     public const BLOCKED_OPTION_PREFIXES = ['_transient_', '_site_transient_', 'mailserver_', 'elementor_css_', 'wpsync_'];
-    public const BLOCKED_OPTION_WORDS = ['license', 'key', 'secret', 'token', 'password'];
+    public const BLOCKED_OPTION_WORDS = ['license', 'key', 'secret', 'token', 'password', 'passwd', 'credential', 'webhook', 'oauth'];
 
     /** Objekt-ID in einem Schlüssel: dezimal, ohne Vorzeichen, führende Null und Zusatz. */
     private const OBJECT_ID = '/^[1-9][0-9]{0,19}\z/';
@@ -81,18 +100,21 @@ final class ContentLists
      */
     public static function metaKey(string $key, array $ext = []): bool
     {
-        if ($key === '' || in_array($key, self::BLOCKED_META, true) || in_array($key, self::anonymizedMeta(), true)) {
+        // Die Datenbank vergleicht Schlüssel ohne Gross/klein: gesperrt ist, was selbst oder kleingeschrieben gesperrt ist.
+        $lower = strtolower($key);
+        $fixed = array_merge(self::BLOCKED_META, self::anonymizedMeta());
+        if ($key === '' || in_array($key, $fixed, true) || in_array($lower, array_map('strtolower', $fixed), true)) {
             return false;
         }
         foreach (self::BLOCKED_META_PREFIXES as $prefix) {
-            if (strpos($key, $prefix) === 0) {
+            if (strpos($lower, $prefix) === 0) {
                 return false;
             }
         }
         if (in_array($key, $ext['meta_exceptions'] ?? [], true)) {
             return true;
         }
-        return !self::hasWord($key, self::BLOCKED_META_WORDS);
+        return !self::hasWord($key, self::BLOCKED_META_WORDS) && !self::hasSegment($key);
     }
 
     /**
@@ -101,15 +123,16 @@ final class ContentLists
      */
     public static function option(string $name, string $prefix, string $stylesheet): bool
     {
-        if (in_array($name, self::BLOCKED_OPTIONS, true) || $name === $prefix . 'user_roles' || self::hasWord($name, self::BLOCKED_OPTION_WORDS)) {
+        $lower = strtolower($name);
+        if (in_array($lower, self::BLOCKED_OPTIONS, true) || $lower === strtolower($prefix) . 'user_roles' || self::hasWord($name, self::BLOCKED_OPTION_WORDS) || self::hasSegment($name)) {
             return false;
         }
         foreach (self::BLOCKED_OPTION_PREFIXES as $blocked) {
-            if (strpos($name, $blocked) === 0) {
+            if (strpos($lower, $blocked) === 0) {
                 return false;
             }
         }
-        if (preg_match('/^elementor_.*_cache/', $name) === 1) {
+        if (preg_match('/^elementor_.*_cache/', $lower) === 1) {
             return false;
         }
         if (in_array($name, self::OPTIONS, true) || ($stylesheet !== '' && $name === 'theme_mods_' . $stylesheet)) {
@@ -233,10 +256,26 @@ final class ContentLists
                 $out[$field][] = $name;
             }
         }
-        if (array_intersect($out['post_types'], Anonymizer::postTypes()) !== []) {
-            return null;
+        foreach ($out['post_types'] as $type) {
+            if (self::neverPostType($type)) {
+                return null;
+            }
         }
         return $out;
+    }
+
+    /** Ein Beitragstyp, den keine Erweiterung freigibt: was der Pull pseudonymisiert und die feste Liste. */
+    public static function neverPostType(string $type): bool
+    {
+        if (in_array($type, Anonymizer::postTypes(), true) || in_array($type, self::NEVER_POST_TYPES, true)) {
+            return true;
+        }
+        foreach (self::NEVER_POST_TYPE_PREFIXES as $prefix) {
+            if (strpos($type, $prefix) === 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @return array<string, mixed> die Listen als Daten – für den Manifest-Kopf */
@@ -251,6 +290,9 @@ final class ContentLists
             'blocked_meta'            => array_values(array_unique(array_merge(self::BLOCKED_META, self::anonymizedMeta()))),
             'blocked_meta_prefixes'   => self::BLOCKED_META_PREFIXES,
             'blocked_meta_words'      => self::BLOCKED_META_WORDS,
+            'blocked_segments'        => self::BLOCKED_SEGMENTS,
+            'never_post_types'        => self::NEVER_POST_TYPES,
+            'never_post_type_prefixes' => self::NEVER_POST_TYPE_PREFIXES,
             'blocked_options'         => array_merge(self::BLOCKED_OPTIONS, ['<prefix>user_roles']),
             'blocked_option_prefixes' => self::BLOCKED_OPTION_PREFIXES,
             'blocked_option_words'    => self::BLOCKED_OPTION_WORDS,
@@ -265,6 +307,12 @@ final class ContentLists
             self::$anonymizedMeta = Anonymizer::metaKeys('postmeta');
         }
         return self::$anonymizedMeta;
+    }
+
+    /** Trägt der Name eines der kurzen Sperrwörter als ganzes Glied? */
+    private static function hasSegment(string $name): bool
+    {
+        return array_intersect(preg_split('/[_\-.:]+/', strtolower($name)) ?: [], self::BLOCKED_SEGMENTS) !== [];
     }
 
     /** @param list<string> $words */

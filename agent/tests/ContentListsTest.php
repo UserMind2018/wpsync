@@ -183,4 +183,57 @@ final class ContentListsTest extends TestCase
         }
         $this->assertSame('option', ContentLists::blocked('options', '219abc', ['prefix' => 'wp_']), 'Optionen haben keinen Zahlenschlüssel');
     }
+
+    /** Härtung S2: die Erweiterungen kommen aus dem Paket – gefährliche Beitragstypen gibt keine frei. */
+    public function testExtensionsNeverFreeDangerousPostTypes(): void
+    {
+        $never = array_merge(ContentLists::NEVER_POST_TYPES, ['shop_order', 'shop_order_refund', 'shop_order_placehold', 'flamingo_inbound', 'flamingo_contact', 'wpforms_log', 'wpcode_snippet']);
+        foreach ($never as $type) {
+            $this->assertNull(ContentLists::extensions(['post_types' => [$type]]), $type);
+            $this->assertTrue(ContentLists::neverPostType($type), $type);
+        }
+        $this->assertNotNull(ContentLists::extensions(['post_types' => ['referenz', 'team-mitglied'], 'taxonomies' => ['branche'], 'meta_exceptions' => ['design_token']]));
+        $this->assertFalse(ContentLists::neverPostType('referenz'));
+    }
+
+    /** Härtung S4: mehr Sperrwörter – kurze nur als ganzes Namensglied, damit übliche Schlüssel pushbar bleiben. */
+    public function testWordListsBlockSecretsButNotUsualKeys(): void
+    {
+        foreach (['smtp_pass', 'ftp-pwd', '_auth_code', 'user.auth', 'stripe_sk', 'pw_salt', 'private_note', 'my_credentials', 'ApiKey', 'api-key-live', 'slack_webhook_url', 'oauth_state', 'db_passwd'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+            $this->assertSame('meta_word', ContentLists::blocked('postmeta', "5\0" . $key, ['post_type' => 'page']), $key);
+            $this->assertTrue(ContentLists::metaKey($key, ['meta_exceptions' => [$key]]), $key . ' lässt sich je Projekt ausnehmen');
+        }
+        $usual = [
+            '_elementor_data', '_elementor_page_settings', '_thumbnail_id', '_wp_page_template', '_wp_attached_file', '_wp_attachment_metadata',
+            '_wp_attachment_image_alt', '_menu_item_type', '_menu_item_object_id', '_menu_item_menu_item_parent', '_menu_item_classes',
+            '_menu_item_url', '_yoast_wpseo_title', '_yoast_wpseo_metadesc', 'rank_math_title', 'author', 'post_author_name', 'passage',
+            'compass', 'asked_by', 'skill', 'basalt', 'privates', '_wp_desired_post_slug', 'footnotes',
+        ];
+        foreach ($usual as $key) {
+            $this->assertTrue(ContentLists::metaKey($key), $key);
+        }
+        foreach (ContentLists::OPTIONS as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['theme_mods_hello-child', 'elementor_experiment-container', 'options_footer_text', '_options_footer_text'] as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['options_smtp_pass', 'options_auth', 'options_webhook', '_options_stripe_sk'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+    }
+
+    /** Härtung S4: die Datenbank unterscheidet Gross/klein nicht – gesperrt ist auch die andere Schreibweise. */
+    public function testListsAlsoApplyToTheLowercaseForm(): void
+    {
+        foreach (['_Edit_Lock', '_ELEMENTOR_CSS', '_WP_Trash_Meta_Status', '_Billing_Email', 'My_Token'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+        }
+        foreach (['SiteUrl', 'HOME', 'Active_Plugins', 'WP_user_roles', '_Transient_x', 'WPSYNC_schema', 'Elementor_x_Cache'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        $this->assertFalse(ContentLists::option('Blogname', 'wp_', 'hello-child'), 'die Whitelist gilt bytegenau');
+        $this->assertSame(2, ContentLists::VERSION);
+    }
 }
