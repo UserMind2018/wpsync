@@ -79,7 +79,8 @@ final class PushContent
         if ($offset === 0) {
             self::trim($dir, self::KEEP - 1); // Platz für dieses: nie mehr als KEEP Dateien je Kopplung
         }
-        if (file_put_contents($part, $data, $offset === 0 ? 0 : FILE_APPEND) !== strlen($data)) {
+        // Mit Sperre: zwei Uploads desselben Pakets schreiben nie ineinander.
+        if (file_put_contents($part, $data, ($offset === 0 ? 0 : FILE_APPEND) | LOCK_EX) !== strlen($data)) {
             return new \WP_Error('wpsync_content_store', 'Das Paket liess sich nicht ablegen.', ['status' => 500]);
         }
         $have = $offset + strlen($data);
