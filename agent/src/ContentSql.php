@@ -15,7 +15,8 @@ defined('ABSPATH') || exit;
  * von selbst neu auf und wiederholt die Abfrage – die Transaktion und ihre Sperren sind dann weg,
  * und was folgt, liefe einzeln im Autocommit. Die neue Verbindung kennt die Marke nicht. alive()
  * fragt sie ab, und jede schreibende Anweisung in einer Transaktion trägt sie als Bedingung: auf
- * einer neuen Verbindung schreibt sie nichts.
+ * einer neuen Verbindung schreibt sie nichts. Die Frage trägt jedes Mal einen anderen Kommentar,
+ * damit kein Abfrage-Cache sie beantwortet.
  *
  * Kein Fehler der Datenbank geht in die Antwort oder ins Fehlerprotokoll: mit WP_DEBUG und
  * WP_DEBUG_DISPLAY gäbe $wpdb ihn samt der Abfrage – und damit samt der Werte des Pakets – als
@@ -396,6 +397,7 @@ final class ContentSql implements ContentStore
 
     public function transaction(callable $do)
     {
+        self::uncached();
         // Erst die Marke, dann die Transaktion: baut $wpdb die Verbindung dazwischen oder danach neu
         // auf, hat die neue entweder beides oder keine Marke – nie eine Marke ohne Transaktion.
         $this->mark = bin2hex(random_bytes(8));
@@ -438,9 +440,26 @@ final class ContentSql implements ContentStore
 
     public function alive(): bool
     {
-        return $this->mark !== null && (string) $this->quiet(function () {
-            return $this->db->get_var('SELECT @wpsync_tx');
+        if ($this->mark === null) {
+            return false;
+        }
+        // Jede Frage ein anderer Text: ein Abfrage-Cache (Drop-in, DB-Cache eines Plugins) kann sie nie
+        // aus dem Speicher beantworten. Der Kommentar ist ein hier erzeugter Hex-Wert, keine Eingabe.
+        $sql = 'SELECT @wpsync_tx /* ' . bin2hex(random_bytes(8)) . ' */';
+        return (string) $this->quiet(function () use ($sql) {
+            return $this->db->get_var($sql);
         }) === $this->mark;
+    }
+
+    /**
+     * Bittet Cache-Plugins, für diesen Request keine Datenbankabfragen zwischenzuspeichern
+     * (DONOTCACHEDB, die Konvention von W3 Total Cache und anderen): Lesen unter Sperre und die
+     * Frage nach der Sitzungsmarke müssen die Datenbank erreichen. Eine fremde wpdb-Klasse lehnt
+     * der Kanal deshalb nicht ab – Query Monitor und andere erweitern wpdb zu Recht.
+     */
+    public static function uncached(): void
+    {
+        defined('DONOTCACHEDB') || define('DONOTCACHEDB', true);
     }
 
     /** Bedingung jeder schreibenden Anweisung in einer Transaktion: nur auf der Verbindung, die sie begann. */

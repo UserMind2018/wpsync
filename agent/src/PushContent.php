@@ -187,6 +187,7 @@ final class PushContent
     public static function target(string $name, string $content): ContentTarget
     {
         global $wpdb;
+        ContentSql::uncached(); // ab hier fragt der Kanal die Datenbank selbst – nie einen Cache
         if (self::$resolve !== null) {
             return (self::$resolve)($name, $content);
         }

@@ -800,7 +800,10 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
 - **Grenzen:** Kein Multisite, nur InnoDB, eine Datenbankverbindung: Lesen unter Sperre und
   Schreiben müssen auf demselben Server landen. Mit Drop-ins, die Abfragen auf mehrere Server
   verteilen, ist das nicht garantiert – HyperDB und LudicrousDB lehnt der Agent ab
-  (`engine_unsupported`), andere Datenbank-Proxys erkennt er nicht und unterstützt er nicht. Benutzer, Kommentare und Plugin-Tabellen pusht der
+  (`engine_unsupported`), andere Datenbank-Proxys erkennt er nicht und unterstützt er nicht.
+  Abfrage-Caches bittet er für den Request um Zurückhaltung (`DONOTCACHEDB`), und die Frage nach
+  der Sitzungsmarke ist jedes Mal ein anderer Text – ein Cache kann sie nicht beantworten. Eine
+  erweiterte `wpdb`-Klasse (Query Monitor u. a.) ist kein Hindernis. Benutzer, Kommentare und Plugin-Tabellen pusht der
   Kanal nie. Eine Rücknahme der Inhalte ohne WordPress gibt es noch nicht (kommt mit 0.8.0).
   Steht die Adresse der Live-Site wörtlich in einem lokalen Wert, lehnt der Agent ihn ab
   (`write_mismatch`).

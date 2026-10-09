@@ -223,15 +223,20 @@ final class ContentSqlTest extends TestCase
 
     /**
      * Die Abfragen einer Verbindung ohne das Setzen und Zurückstellen der Wartezeit auf Sperren
-     * (testATransactionBoundsItsLockWait) – was übrig bleibt, ist der Ablauf der Transaktion.
+     * (testATransactionBoundsItsLockWait) und ohne den Kommentar an der Frage nach der Marke – was
+     * übrig bleibt, ist der Ablauf der Transaktion.
      *
      * @return list<string>
      */
     private function flow(FakeWpdb $db): array
     {
-        return array_values(array_filter($db->queries, static function (string $sql): bool {
+        $queries = array_filter($db->queries, static function (string $sql): bool {
             return strpos($sql, 'SET SESSION innodb_lock_wait_timeout') !== 0;
-        }));
+        });
+        // Jede Frage nach der Marke trägt einen eigenen Kommentar (testAliveIsNeverAnswerableFromACache).
+        return array_values(array_map(static function (string $sql): string {
+            return (string) preg_replace('~^(SELECT @wpsync_tx) /\* [a-f0-9]{16} \*/\z~', '$1', $sql);
+        }, $queries));
     }
 
     private function mark(FakeWpdb $db): string
@@ -299,7 +304,7 @@ final class ContentSqlTest extends TestCase
             'SELECT @wpsync_tx',
             'SET @wpsync_tx = NULL',
             'SET SESSION innodb_lock_wait_timeout = DEFAULT',
-        ], $this->db->queries);
+        ], preg_replace('~^(SELECT @wpsync_tx) /\* [a-f0-9]{16} \*/\z~', '$1', $this->db->queries));
 
         // Der Server kennt die Variable nicht oder gibt sie nicht her: kein Abbruch.
         $this->db = $this->connection();
@@ -328,6 +333,31 @@ final class ContentSqlTest extends TestCase
         $this->assertNotContains('COMMIT', $this->db->queries);
         $this->assertSame([], preg_grep('/^(INSERT|UPDATE|DELETE)/', $this->db->queries), 'nichts geschrieben');
         $this->assertSame(['ROLLBACK', 'SET @wpsync_tx = NULL', 'SET SESSION innodb_lock_wait_timeout = DEFAULT'], array_slice($this->db->queries, -3));
+    }
+
+    /**
+     * N6: ein Abfrage-Cache (Drop-in db.php, DB-Cache eines Plugins) dürfte die Frage nach der
+     * Sitzungsmarke nie aus dem Speicher beantworten – sonst lebte eine Transaktion, die längst
+     * verloren ist. Jede Frage ist deshalb ein anderer Text, und der Kanal bittet darum, nichts
+     * zwischenzuspeichern.
+     */
+    public function testAliveIsNeverAnswerableFromACache(): void
+    {
+        $this->db = $this->connection();
+        $sql      = $this->sql();
+        $asked    = [];
+        $sql->transaction(function () use ($sql, &$asked): void {
+            $this->assertTrue($sql->alive());
+            $this->assertTrue($sql->alive());
+            $asked = array_values(preg_grep('/^SELECT @wpsync_tx/', $this->db->queries));
+        });
+        $this->assertCount(2, $asked);
+        $this->assertNotSame($asked[0], $asked[1]);
+        foreach (array_values(preg_grep('/^SELECT @wpsync_tx/', $this->db->queries)) as $query) {
+            $this->assertMatchesRegularExpression('~^SELECT @wpsync_tx /\* [a-f0-9]{16} \*/\z~', $query);
+        }
+        $this->assertCount(4, array_unique(preg_grep('/^SELECT @wpsync_tx/', $this->db->queries)), 'auch vor und nach dem COMMIT');
+        $this->assertTrue(defined('DONOTCACHEDB') && DONOTCACHEDB, 'die Bitte an Cache-Plugins');
     }
 
     /** Jede schreibende Anweisung einer Transaktion trägt die Marke als Bedingung: auf einer neuen Verbindung schreibt sie nichts. */

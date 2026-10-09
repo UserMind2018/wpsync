@@ -175,6 +175,10 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 - Agent: Die Engine-Prüfung gilt immer allen sieben Inhaltstabellen des Ziels, nicht nur denen,
   die das Paket nennt, und läuft auch vor einer Rücknahme: ist eine nicht InnoDB,
   `engine_unsupported` – nichts wird geschrieben bzw. zurückgenommen
+- Agent: Die Frage, ob eine Transaktion noch auf ihrer Verbindung lebt, lässt sich nicht mehr
+  aus einem Abfrage-Cache beantworten: sie trägt jedes Mal einen anderen Kommentar
+  (`SELECT @wpsync_tx /* … */`), und der Inhaltskanal setzt `DONOTCACHEDB` für den Request.
+  Erweiterte `wpdb`-Klassen (Query Monitor u. a.) bleiben erlaubt
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 
