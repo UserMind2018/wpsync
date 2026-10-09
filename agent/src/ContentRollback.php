@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Nimmt den DB-Anteil eines Pushs zurück (Spec Content-Push §7.6): in einer Transaktion, nur wenn
@@ -25,12 +25,12 @@ final class ContentRollback
     {
         // Beide Abbilder müssen unverändert die sein, die der Push abgelegt hat (ContentImage) – und
         // zueinander passen: zurückgeschrieben wird nur ein Schlüssel, den der Push geschrieben hat.
-        $image = ContentImage::get($dir, ContentApply::BEFORE);
+        $image = ContentImage::get($dir, ContentImage::BEFORE);
         if ($image === null) {
             return ['state' => self::NOTHING, 'changes' => null]; // ohne Vorher-Abbild wurde nie geschrieben
         }
         $before = self::keys($image, true);
-        $pushed = ContentImage::get($dir, ContentApply::AFTER);
+        $pushed = ContentImage::get($dir, ContentImage::AFTER);
         $after  = $pushed === null ? null : self::keys($pushed, false);
         if ($before === null || ($pushed !== null && $after === null)) {
             throw ContentImage::invalid();
@@ -48,7 +48,7 @@ final class ContentRollback
         $changes = $pushed['changes'] ?? null;
         unset($image, $pushed);
         // Ohne InnoDB gäbe es keine Transaktion – auch nicht, wenn die Tabelle erst seit dem Push eine andere Engine hat.
-        ContentCheck::innodb($target->store);
+        ContentState::innodb($target->store);
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         try {
@@ -239,7 +239,7 @@ final class ContentRollback
      */
     private static function keys(array $data, bool $states): ?array
     {
-        if (!is_array($data['keys'] ?? null) || count($data['keys']) > 4 * ContentPackage::MAX_ROWS) {
+        if (!is_array($data['keys'] ?? null) || count($data['keys']) > ContentState::MAX_KEYS) {
             return null;
         }
         $out  = [];

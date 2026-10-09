@@ -12,8 +12,9 @@ defined('ABSPATH') || exit;
  */
 final class ContentApply
 {
-    public const BEFORE = 'before.json';
-    public const AFTER  = 'after.json';
+    /** Verweise: die Namen der beiden Abbilder gehören ContentImage (auch ohne WordPress geladen). */
+    public const BEFORE = ContentImage::BEFORE;
+    public const AFTER  = ContentImage::AFTER;
 
     /** Optionen, deren Änderung die Rewrite-Regeln betrifft (Studio §7.4 Nr. 5). */
     private const REWRITE_OPTIONS = ['page_on_front', 'page_for_posts', 'show_on_front'];

@@ -179,23 +179,14 @@ final class ContentCheck
     }
 
     /**
-     * Alle sieben Inhaltstabellen des Ziels müssen InnoDB sein – nicht nur die, die ein Paket nennt:
-     * Papierkorb-Meta, Zuordnungen und die Rücknahme (purge) schreiben auch in andere. Auch die
-     * Rücknahme prüft das, bevor sie schreibt.
+     * Verweis auf ContentState::innodb() – dort liegt die Prüfung, weil auch die Rücknahme ohne
+     * WordPress sie braucht (Spec Content-Push P3 §4.2).
      *
      * @throws ContentException engine_unsupported
      */
     public static function innodb(ContentStore $store): void
     {
-        $bad = [];
-        foreach ($store->engines(Canon::TABLES) as $table => $engine) {
-            if (strtolower($engine) !== 'innodb') {
-                $bad[] = (string) $table;
-            }
-        }
-        if ($bad !== []) {
-            throw new ContentException(ContentException::ENGINE, 'Nicht InnoDB: ' . implode(', ', $bad) . ' – Inhalte lassen sich nicht sicher übertragen.', [], ['tables' => $bad]);
-        }
+        ContentState::innodb($store);
     }
 
     /** Liest den Zustand jedes Schlüssels und der Objekte, auf die das Paket verweist – in der Summe begrenzt (N1). */

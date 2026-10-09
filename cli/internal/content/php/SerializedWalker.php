@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Läuft strukturerhaltend durch einen serialisierten PHP-Wert und gibt jeden String an eine

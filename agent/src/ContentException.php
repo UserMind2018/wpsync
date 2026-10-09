@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Ablehnung eines Inhalts-Pakets oder einer Rücknahme (Spec Content-Push §7.2, §7.6). reason()

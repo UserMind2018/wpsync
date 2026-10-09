@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Schreibt die Live-URL auf die Staging-URL um (Spec Stufe 2b 5.6, V4): hinter

@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * ContentStore auf $wpdb (Spec Content-Push §7.3, §11): schreibt nur in die sieben

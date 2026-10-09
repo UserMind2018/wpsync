@@ -143,4 +143,23 @@ final class ContentStateTest extends TestCase
         $this->assertSame(['begin', 'write options:blogname', 'delete options:weg', 'rollback'], $store->log);
         $this->assertSame(['blogname' => ['option_value' => 'alt'], 'fehlt' => null], $store->read('options', ['blogname', 'fehlt'], false));
     }
+
+    /** P3 §4.2: die Engine-Prüfung und die Grenze der Abbilder liegen hier – die Rücknahme ohne WordPress lädt weder ContentCheck noch ContentPackage. */
+    public function testInnodbAndTheLimitOfAnImageLiveHere(): void
+    {
+        $store = new ContentMemory();
+        ContentState::innodb($store);
+        \WpSync\ContentCheck::innodb($store); // der alte Name bleibt als Verweis
+        $store->engines = ['postmeta' => 'MyISAM', 'options' => 'Aria'];
+        foreach ([[ContentState::class, 'innodb'], [\WpSync\ContentCheck::class, 'innodb']] as $check) {
+            try {
+                $check($store);
+                $this->fail('no exception');
+            } catch (ContentException $e) {
+                $this->assertSame(ContentException::ENGINE, $e->reason());
+                $this->assertSame(['postmeta', 'options'], $e->toArray()['tables']);
+            }
+        }
+        $this->assertSame(4 * \WpSync\ContentPackage::MAX_ROWS, ContentState::MAX_KEYS);
+    }
 }

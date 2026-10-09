@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Das Ziel eines Inhalts-Pushs (Spec Content-Push §7.8): Live oder die Staging-Kopie – mit dem

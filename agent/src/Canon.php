@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Kanonische Form einer Inhaltszeile und ihr Fingerabdruck (Spec Content-Push §6.1,

@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Lesen und Schreiben der sieben Inhaltstabellen eines Ziels (Spec Content-Push §7.3) mit einem
