@@ -6,7 +6,7 @@ defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 /**
  * Der versiegelte Umschlag eines Pushs mit Inhalten (Spec Content-Push P3 §5.1): was rescue.php
  * für die Rücknahme der Datenbank braucht, verschlüsselt und authentisiert mit einem Schlüssel,
- * der aus dem Rescue-Key des Pushs abgeleitet ist. Auf dem Server liegt nur sha256() dieses
+ * der aus den 32 Byte des Rescue-Keys des Pushs abgeleitet ist (secret()). Auf dem Server liegt nur sha256() dieses
  * Schlüssels – daraus lässt sich der Umschlag nicht öffnen. Zwei Verfahren, die beide ohne
  * WordPress (und damit ohne sodium_compat) auskommen:
  *   wpsync-rescue:v1:sodium   XSalsa20-Poly1305 mit der Erweiterung sodium
@@ -20,6 +20,8 @@ final class RescueSeal
     public const SODIUM = "wpsync-rescue:v1:sodium\n";
     public const GCM    = "wpsync-rescue:v1:gcm\n";
 
+    /** Der Rescue-Key, wie die CLI ihn schickt: HMAC-SHA256 als 64 kleine Hex-Zeichen. */
+    private const KEY          = '/^[a-f0-9]{64}\z/';
     private const LABEL        = "wpsync-rescue-envelope-v1\0";
     private const CIPHER       = 'aes-256-gcm';
     private const SODIUM_NONCE = 24;
@@ -48,7 +50,7 @@ final class RescueSeal
 
     /**
      * @param array<string, mixed> $data
-     * @param string               $key    der Rescue-Key als Hex-Zeichenkette, wie die CLI ihn schickt
+     * @param string               $key    der Rescue-Key, wie die CLI ihn schickt: 64 kleine Hex-Zeichen
      * @param string|null          $method für Tests: das Verfahren anstelle von method()
      * @return string|null der Inhalt der Datei; null, wenn sich nicht versiegeln lässt
      */
@@ -160,12 +162,17 @@ final class RescueSeal
         }
     }
 
-    /** E = HMAC-SHA256(K, Label ‖ Push-ID), roh 32 Byte; null ohne Schlüssel oder ohne gültige Push-ID. */
+    /**
+     * E = HMAC-SHA256(Schlüssel = die 32 Byte von K, Nachricht = Label ‖ Push-ID), roh 32 Byte. K ist
+     * der Rescue-Key in genau der Form, in der PushRescue::key() und die CLI ihn bilden: 64 kleine
+     * Hex-Zeichen. Alles andere ist kein Schlüssel – null, wie ohne gültige Push-ID.
+     */
     private static function secret(string $key, string $pushId): ?string
     {
-        if ($key === '' || preg_match(PushRescue::ID, $pushId) !== 1) {
+        if (preg_match(self::KEY, $key) !== 1 || preg_match(PushRescue::ID, $pushId) !== 1) {
             return null;
         }
-        return hash_hmac('sha256', self::LABEL . $pushId, $key, true);
+        $bytes = hex2bin($key);
+        return is_string($bytes) && strlen($bytes) === 32 ? hash_hmac('sha256', self::LABEL . $pushId, $bytes, true) : null;
     }
 }

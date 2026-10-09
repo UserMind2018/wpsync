@@ -279,14 +279,15 @@ final class PushRescueFlowTest extends PushRescueFlowCase
     /** R10, R13: lässt sich der Push nicht sperren, nähme rescue.php die Inhalte nicht zurück – der Begin legt dann keinen Umschlag an. */
     public function testWithoutAWorkingLockTheBeginSealsNothing(): void
     {
-        $id = 'p_20261009_0123456789ab';
-        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->root . '/gibt-es-nicht', $id, 'schlüssel'));
+        $id  = 'p_20261009_0123456789ab';
+        $key = PushRescue::key('secret', $id, 'salt');
+        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->root . '/gibt-es-nicht', $id, $key));
         $this->assertSame(0, $this->connected, 'ohne Sperre keine Probe');
         mkdir($this->work($this->live) . '/' . $id, 0777, true);
         $held = PushRescue::lock($this->work($this->live), $id);
-        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, 'schlüssel'));
+        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, $key));
         PushRescue::unlock($held);
-        $this->assertSame(['ok' => true], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, 'schlüssel'));
+        $this->assertSame(['ok' => true], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, $key));
         $this->assertFileExists($this->sealed($this->live, $id));
     }
 }

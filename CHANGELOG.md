@@ -72,6 +72,10 @@ sich wie bisher (`content_not_rolled_back`).
 - Keine Antwort und keine Zeile im Fehlerprotokoll nennt Host, Benutzer, Passwort,
   Datenbankname, einen Wert oder Text des Datenbankservers
 - Falsche Schlüssel schreiben nicht mehr in `rescue.json`
+- Der Schlüssel des Umschlags entsteht aus den 32 Byte des Rollback-Schlüssels
+  (`HMAC-SHA256(hex2bin(K), "wpsync-rescue-envelope-v1\0" + push_id)`), nicht aus seiner
+  Hex-Schreibweise; als Rollback-Schlüssel gilt dem Umschlag nur, was genau 64 kleine Hex-Zeichen
+  hat
 
 ### Agent 0.7.0 – Inhalte pushen
 

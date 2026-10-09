@@ -53,6 +53,37 @@ final class RescueSealTest extends TestCase
         $this->assertNull(RescueSeal::open($sealed, hash('sha256', $this->key), self::ID));
     }
 
+    /**
+     * Security-Review P3, N1: der Rescue-Key ist genau 64 kleine Hex-Zeichen (HMAC-SHA256, wie
+     * PushRescue::key() und die CLI ihn bilden) – alles andere versiegelt und öffnet nichts.
+     */
+    #[DataProvider('methods')]
+    public function testOnlyAKeyOfSixtyFourLowerHexDigitsSealsOrOpens(string $method): void
+    {
+        $sealed = (string) RescueSeal::seal(self::DATA, $this->key, self::ID, $method);
+        $this->assertSame(1, preg_match('/^[a-f0-9]{64}\z/', $this->key));
+        foreach (['k', 'geheim', substr($this->key, 0, 63), $this->key . 'a', strtoupper($this->key), $this->key . "\n", ' ' . $this->key, substr($this->key, 0, 63) . 'g', str_repeat("\0", 64)] as $bad) {
+            $this->assertNull(RescueSeal::seal(self::DATA, $bad, self::ID, $method), 'seal: ' . bin2hex($bad));
+            $this->assertNull(RescueSeal::open($sealed, $bad, self::ID), 'open: ' . bin2hex($bad));
+        }
+    }
+
+    /**
+     * N1: der Schlüssel des Umschlags entsteht aus den 32 Byte des Rescue-Keys, nicht aus seiner
+     * Hex-Schreibweise: E = HMAC-SHA256(hex2bin(K), "wpsync-rescue-envelope-v1\0" + push_id).
+     */
+    public function testTheEnvelopeKeyIsDerivedFromTheBytesOfTheRescueKey(): void
+    {
+        $sealed = (string) RescueSeal::seal(self::DATA, $this->key, self::ID, 'gcm');
+        $body   = substr($sealed, strlen(RescueSeal::GCM));
+        $open   = static function (string $secret) use ($body) {
+            return openssl_decrypt(substr($body, 28), 'aes-256-gcm', $secret, OPENSSL_RAW_DATA, substr($body, 0, 12), substr($body, 12, 16), self::ID);
+        };
+        $label = "wpsync-rescue-envelope-v1\0" . self::ID;
+        $this->assertSame(json_encode(['push_id' => self::ID] + self::DATA, JSON_UNESCAPED_SLASHES), $open(hash_hmac('sha256', $label, (string) hex2bin($this->key), true)));
+        $this->assertFalse($open(hash_hmac('sha256', $label, $this->key, true)), 'nicht aus der Hex-Zeichenkette');
+    }
+
     /** Jedes einzelne Byte zählt: Kopfzeile, Nonce, Chiffrat, Prüfsumme. */
     #[DataProvider('methods')]
     public function testAChangedFileOpensNothing(string $method, string $head): void
