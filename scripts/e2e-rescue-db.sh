@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # E2E DB-Rücknahme ohne WordPress (Spec Content-Push P3; AC-158, AC-160, AC-161–AC-166, AC-168,
-# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15): rescue.php nimmt nach einem Push mit Inhalten
+# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15; Security-Review P3: M1, M2, N3, N7): rescue.php
+# nimmt nach einem Push mit Inhalten
 # auch die Datenbank-Zeilen zurück – über eine eigene mysqli-Verbindung aus dem versiegelten
 # Umschlag des Pushs. Es ist der einzige Test, in dem MysqliLink und RescueDb eine echte
 # Datenbank sehen.
@@ -20,7 +21,7 @@
 # WP-CLI ist von allen dreien ausgenommen.
 #
 # Voraussetzung: Docker, DDEV, jq (≥ 1.6), openssl, Go; Mac-Modus (das Pairing-Secret der eigenen
-# Test-Site liegt in der Login-Keychain). Dauer rund 12 Minuten.
+# Test-Site liegt in der Login-Keychain). Dauer rund 15 Minuten.
 # Eine fehlgeschlagene Prüfung zählt und der Lauf geht weiter; nur was den Rest sinnlos macht,
 # bricht ab. Die JSON-Zeilen der Befehle und die Antworten von rescue.php liegen danach unter
 # ~/wpsync-e2e/rdb/json. Am Ende werden beide Projekte gestoppt (nicht gelöscht);
@@ -371,6 +372,31 @@ add_filter('rest_pre_dispatch', static function ($result, $server, $request) use
     }
     return $result;
 }, 10, 3);
+PHP
+# N3: versiegelt den Umschlag eines Pushs neu, <tage> Tage alt – wie es nur kann, wer den Rescue-Key hat.
+# Aufruf im Container: php reseal.php <arbeitsordner> <push-id> <key> <tage>
+cat >"$CTL/reseal.php" <<'PHP'
+<?php
+define('WPSYNC_RESCUE', true);
+$src = '/var/www/html/public/wp-content/plugins/wpsync-agent/src/';
+require $src . 'PushSwap.php';
+require $src . 'PushRescue.php';
+require $src . 'RescueSeal.php';
+list(, $work, $id, $key, $days) = $argv;
+$data = WpSync\RescueSeal::open((string) WpSync\RescueSeal::read($work, $id), $key, $id);
+if (!is_array($data)) {
+    echo 'unreadable';
+    exit(1);
+}
+unset($data['push_id']);
+$data['created'] = time() - (int) $days * 86400;
+echo WpSync\RescueSeal::put($work, $id, (string) WpSync\RescueSeal::seal($data, $key, $id)) ? 'resealed' : 'failed';
+PHP
+# N7: was an der Stelle des Rescue-Stubs mit HTTP 200 und "ok" antwortet, ohne rescue.php zu sein.
+cat >"$CTL/fake-rescue.php" <<'PHP'
+<?php
+header('Content-Type: application/json');
+echo '{"ok":true}';
 PHP
 printf '<?php\nerror_log("e2e-rdb log probe");\n' >"$PUB/e2e-log-probe.php"
 printf '/*\nTheme Name: E2E Theme\nVersion: 1.0\n*/\n' >"$WPC/themes/e2e-theme/style.css"
@@ -766,6 +792,7 @@ eq "R15 über den Agent: changed_since_push (Exit 1)" "$RC $(last gewachsen-agen
 eq "R15 über den Agent: genannt werden das fremde Meta und der Kommentar" "$(last gewachsen-agent '.error.keys | map(.table + ":" + (.key | gsub("\u0000"; "/"))) | sort | join(",")')" "comments:$NEW_ID,postmeta:$NEW_ID/_e2e_fremd"
 eq "R15 über den Agent: nichts wurde zurückgenommen" "$(lpost "$NEW_ID" post_name) $(lopt options_e2e_fuse)" "e2e-neu an"
 arm
+mute # WordPress bleibt auch nach der Rücknahme stumm: der Agent holt noch nichts nach (kein push/list, kein init)
 jrun gewachsen-rescue "$WPSYNC" rollback "$TARGET" "$HELD" --json
 cat "$JSON/gewachsen-rescue.err"
 eq "R15 über rescue.php: Exit 0, Warnung content_left_extra" "$RC $(last gewachsen-rescue '.data.via + " " + (.data.warnings | join(","))')" "0 rescue content_left_extra"
@@ -773,10 +800,22 @@ eq "R15: content_left nennt das Fremde" "$(last gewachsen-rescue '.data.content_
 eq "R15: content_left_total" "$(last gewachsen-rescue '.data.content_left_total')" 2
 eq "R15: die Zeilen des Pushs sind weg – die Seite und ihre zwei Meta" "$(q "SELECT (SELECT COUNT(*) FROM ${PREFIX}posts WHERE ID = $NEW_ID) + (SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE post_id = $NEW_ID AND meta_key IN ('_wp_page_template', '_e2e_emoji'))")" 0
 eq "R15: das Fremde steht noch, verwaist – auch das Meta der Sperrliste (P8)" "$(q "SELECT GROUP_CONCAT(meta_key ORDER BY meta_key) FROM ${PREFIX}postmeta WHERE post_id = $NEW_ID") $(q "SELECT COUNT(*) FROM ${PREFIX}comments WHERE comment_post_ID = $NEW_ID")" "_e2e_fremd,_edit_lock 1"
+unmute
 eq "R15: die Sicherung steht wieder auf aus, die Site antwortet" "$(lopt options_e2e_fuse) $(code "$SOURCE_URL/")" "aus 200"
 finished "R15" "$HELD"
 eq "R15: das Protokoll nennt, was stehen blieb" "$(record "$HELD" '.units[] | select(.path == "content") | .left_total')" 2
-sql -e "DELETE FROM ${PREFIX}postmeta WHERE post_id = $NEW_ID; DELETE FROM ${PREFIX}comments WHERE comment_post_ID = $NEW_ID"
+# M2: stehen gelassen ist nicht folgenlos – es hinge sich an das nächste Objekt mit dieser ID. Beim
+# Wiederanlauf räumt der Agent Meta und Zuordnungen weg (auch die der Sperrliste); der Kommentar bleibt.
+eq "M2: nach dem Wiederanlauf hängt an der ID kein Meta mehr, der Kommentar bleibt" "$(q "SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE post_id = $NEW_ID") $(q "SELECT COUNT(*) FROM ${PREFIX}comments WHERE comment_post_ID = $NEW_ID")" "0 1"
+eq "M2: das Protokoll nennt das Aufräumen als Nacharbeit left_cleanup" "$(record "$HELD" '.units[] | select(.path == "content") | .post_actions | map(select(.step == "left_cleanup") | .ok) | @csv')" "true"
+# Solange der Kommentar an der ID hängt, lehnt der Agent ein neues Objekt mit dieser ID ab.
+jrun belegte-id "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/neu.jsonl" --yes --json
+eq "M2: insert an einer ID mit Resten: Exit 1, id_has_leftovers" "$RC $(last belegte-id '.error.reason')" "1 id_has_leftovers"
+eq "M2: genannt wird der Rest" "$(last belegte-id '.error.keys | map(.table + ":" + .key) | join(",")')" "comments:$NEW_ID"
+eq "M2: nichts wurde übertragen, kein offener Push" "$(q "SELECT COUNT(*) FROM ${PREFIX}posts WHERE ID = $NEW_ID") $(lopt options_e2e_fuse) $(pending)" "0 aus null"
+sql -e "DELETE FROM ${PREFIX}comments WHERE comment_post_ID = $NEW_ID"
+jrun freie-id "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/neu.jsonl" --dry-run --json
+eq "M2: ohne den Rest ginge derselbe Satz (Probelauf, Exit 0)" "$RC" 0
 state_clean "R15"
 
 echo "== AC-173/AC-160: die Datenbank ist nicht erreichbar, dann eine fremde Sperre – keine Antwort, kein Protokoll nennt Zugangsdaten, SQL oder Werte"
@@ -833,6 +872,35 @@ eq "R14: der Agent nimmt die Inhalte zurück, sobald WordPress wieder lädt" "$R
 state_clean "R14"
 arm
 
+echo "== N3: harte Altersgrenze – ein Umschlag, der älter ist als 7 Tage, wird nie angewandt, auch wenn seine Datei frisch ist"
+WORK_IN="/var/www/html/public/wp-content/$(basename "$(work)")"
+# Gegenprobe zuerst: sechs Tage alt (und älter als die 24 Stunden, nach denen ihn nur der Cron löscht) gilt er noch.
+hold alt6 --no-code --content "$PKG/klein.jsonl"
+KEY="$(rkey "$HELD")"
+eq "N3: der Umschlag ist neu versiegelt, sechs Tage alt" "$(src exec php "$CTL_IN/reseal.php" "$WORK_IN" "$HELD" "$KEY" 6)" resealed
+rpost alt6 "$HELD" "$KEY" action=rollback content=1
+eq "N3: sechs Tage alt: die Inhalte gehen zurück" "$RCODE $(ans alt6 '.content.state')" "200 rolled_back"
+eq "N3: die Site antwortet wieder" "$(code "$SOURCE_URL/")" 200
+finished "N3 sechs Tage" "$HELD"
+state_clean "N3 sechs Tage"
+hold alt8 --no-code --content "$PKG/klein.jsonl"
+KEY="$(rkey "$HELD")"
+D="$(work)/$HELD"
+eq "N3: der Umschlag ist neu versiegelt, acht Tage alt" "$(src exec php "$CTL_IN/reseal.php" "$WORK_IN" "$HELD" "$KEY" 8)" resealed
+src wp eval 'WpSync\Push::maintain();'
+ok "N3: seine Datei ist frisch – der tägliche Lauf (24 h nach mtime) lässt ihn liegen" test -s "$D/rescue.sealed"
+glog_on
+rpost alt8 "$HELD" "$KEY" action=rollback content=1
+eq "N3: acht Tage alt: 200, content kept mit rescue_db_unavailable" "$RCODE $(ans alt8 '[.status, .content.state, .content.error.code, (.warnings | join(","))] | @csv')" '200 "rolled_back","kept","rescue_db_unavailable","content_not_rolled_back"'
+eq "N3: keine Verbindung zur Datenbank" "$(conns)" 0
+glog_off
+eq "N3: die Inhalte stehen noch" "$(lopt options_e2e_fuse) $(lpost "$PAGE_B" post_title)" "an E2E B geändert"
+disarm
+jrun alt8-rollback "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "N3: der Agent nimmt die Inhalte zurück, sobald WordPress wieder lädt" "$RC $(last alt8-rollback '.data.via')" "0 agent"
+state_clean "N3 acht Tage"
+arm
+
 echo "== AC-165: ein bestätigter Push – rescue.php lehnt ab, ohne Umschlag und ohne Datenbank"
 disarm
 pkg bestaetigt ".t == \"posts\" and .k == \"$PAGE_B\""
@@ -853,6 +921,56 @@ jrun bestaetigt-rollback "$WPSYNC" rollback "$TARGET" "$PUSH_CONF" --json
 eq "AC-165: zurück geht ein bestätigter Push nur über den Agent (Exit 0)" "$RC $(last bestaetigt-rollback '.data.via')" "0 agent"
 state_clean "AC-165"
 arm
+
+echo "== M1: confirm nimmt die Sperre des Pushs – während einer Rücknahme wird nichts bestätigt; den bestätigten Push lehnt rescue.php ab"
+disarm
+hold m1 --no-code --content "$PKG/bestaetigt.jsonl"
+KEY="$(rkey "$HELD")"
+D="$(work)/$HELD"
+# Eine fremde Hand hält rescue.lock länger, als confirm wartet (15 s) – wie eine Rücknahme, die gerade läuft.
+(src exec flock -x "/var/www/html/public/wp-content/${D#"$WPC"/}/rescue.lock" sleep 24 >/dev/null 2>&1) &
+LOCKER=$!
+sleep 1.5
+T0="$(date +%s)"
+jrun m1-confirm-belegt "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+WAITED=$(($(date +%s) - T0))
+eq "M1: confirm bei belegter Sperre: Exit 44 (busy)" "$RC $(last m1-confirm-belegt '.error.code')" "44 busy"
+ok "M1: der Agent nennt wpsync_push_busy" contains "$(last m1-confirm-belegt '.error.message')" "wpsync_push_busy"
+ok "M1: confirm hat auf die Sperre gewartet (${WAITED} s)" test "$WAITED" -ge 10
+eq "M1: nichts ist bestätigt – weder rescue.json noch das Protokoll" "$(jq -r .status "$D/rescue.json") $(record "$HELD" .status)" "committed committed"
+ok "M1: der Umschlag bleibt für die Rücknahme liegen" test -s "$D/rescue.sealed"
+wait "$LOCKER" || true
+jrun m1-confirm "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+eq "M1: ist die Sperre frei, bestätigt confirm" "$RC $(last m1-confirm '.data.status') $(jq -r .status "$D/rescue.json")" "0 confirmed confirmed"
+DB_M1="$(dbsum)"
+rpost m1-rescue "$HELD" "$KEY" action=rollback content=1
+eq "M1: den bestätigten Push lehnt rescue.php ab (409 confirmed)" "$RCODE $(ans m1-rescue '.error')" "409 confirmed"
+eq "M1: die Datenbank ist unberührt, der Status bleibt" "$(dbsum) $(jq -r .status "$D/rescue.json")" "$DB_M1 confirmed"
+jrun m1-rollback "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "M1: zurück geht er über den Agent (Exit 0)" "$RC $(last m1-rollback '.data.via')" "0 agent"
+state_clean "M1"
+arm
+
+echo "== N7: HTTP 200 ohne status rolled_back ist für die CLI keine Rücknahme"
+hold n7 themes/e2e-theme --content "$PKG/klein.jsonl"
+STUB_NAME="$(basename "$(jq -r .rescue_url "$SITE/.wpsync/pushes/$HELD.json")")"
+ok "N7: der Notfallweg dieses Pushs ist der Stub im Webroot" sh -c "printf %s '$STUB_NAME' | grep -Eq '^wpsync-rescue-[a-f0-9]{32}\.php\$' && test -f '$PUB/$STUB_NAME'"
+# An der Stelle des Stubs antwortet etwas anderes mit 200 und "ok" – im Container getauscht (siehe arm/disarm).
+src exec cp -p "/var/www/html/public/$STUB_NAME" "$CTL_IN/stub.keep"
+src exec cp "$CTL_IN/fake-rescue.php" "/var/www/html/public/$STUB_NAME"
+jrun n7-rollback "$WPSYNC" rollback "$TARGET" "$HELD" --json
+src exec cp -p "$CTL_IN/stub.keep" "/var/www/html/public/$STUB_NAME"
+src exec rm -f "$CTL_IN/stub.keep"
+eq "N7: Exit 1" "$RC" 1
+ok "N7: die CLI nennt den Weg und den fehlenden Status" sh -c "printf %s \"\$1\" | grep -F 'Rollback über rescue.php fehlgeschlagen' | grep -qF 'rolled_back'" _ "$(last n7-rollback '.error.message')"
+no "N7: die CLI meldet den Push nicht als zurückgerollt" hasF "$JSON/n7-rollback.err" "ist zurückgerollt"
+eq "N7: der Satz steht noch – Inhalte und Code" "$(lopt options_e2e_fuse) $(grep -c 'e2e-marker v2' "$WPC/themes/e2e-theme/index.php")" "an 1"
+ok "N7: das Journal des Pushs bleibt für den nächsten Versuch" test -f "$SITE/.wpsync/pushes/$HELD.json"
+jrun n7-rollback-echt "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "N7: mit dem echten rescue.php geht der Push zurück (Exit 0, über rescue.php, ohne Warnung)" "$RC $(last n7-rollback-echt '.data.via + " " + (.data | has("warnings") | tostring)')" "0 rescue false"
+eq "N7: die Site antwortet wieder" "$(code "$SOURCE_URL/")" 200
+finished "N7" "$HELD"
+state_clean "N7"
 
 echo "== R10: die Sperre des Pushs ist belegt – 423 busy, die CLI wiederholt; über den Agent wpsync_push_busy"
 # Eine fremde Hand hält rescue.lock (flock im Container, dieselbe Sperre wie PHP): so sieht rescue.php
@@ -875,6 +993,15 @@ state_clean "R10"
 hold belegt-agent --no-code --content "$PKG/klein.jsonl"
 D="$(work)/$HELD"
 disarm
+# Erst länger belegt, als die CLI wiederholt (dreimal im Abstand von 2 s): dann zeigt sie den Fehler des Agents.
+(src exec flock -x "/var/www/html/public/wp-content/${D#"$WPC"/}/rescue.lock" sleep 16 >/dev/null 2>&1) &
+LOCKER=$!
+sleep 1.5
+jrun belegt-agent-busy "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "R10: über den Agent, Sperre bleibt belegt: Exit 44 (busy)" "$RC $(last belegt-agent-busy '.error.code')" "44 busy"
+ok "R10: der Agent antwortet mit wpsync_push_busy (HTTP 423)" contains "$(last belegt-agent-busy '.error.message')" "HTTP 423 wpsync_push_busy"
+eq "R10: nichts ist zurückgenommen, der Push bleibt offen" "$(lopt options_e2e_fuse) $(pending | jq -r .push_id)" "an $HELD"
+wait "$LOCKER" || true
 (src exec flock -x "/var/www/html/public/wp-content/${D#"$WPC"/}/rescue.lock" sleep 5 >/dev/null 2>&1) &
 LOCKER=$!
 sleep 1.5
