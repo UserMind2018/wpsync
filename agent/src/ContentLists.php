@@ -69,8 +69,11 @@ final class ContentLists
     public const BLOCKED_OPTION_PREFIXES = ['_transient_', '_site_transient_', 'mailserver_', 'elementor_css_', 'wpsync_'];
     public const BLOCKED_OPTION_WORDS = ['license', 'key', 'secret', 'token', 'password', 'passwd', 'credential', 'webhook', 'oauth'];
 
-    /** Objekt-ID in einem Schlüssel: dezimal, ohne Vorzeichen, führende Null und Zusatz. */
-    private const OBJECT_ID = '/^[1-9][0-9]{0,19}\z/';
+    /**
+     * Objekt-ID in einem Schlüssel: dezimal, ohne Vorzeichen, führende Null und Zusatz, höchstens
+     * 18 Stellen – so viel passt in jedem PHP in eine Zahl (%d). Dieselbe Regel gilt im Paket.
+     */
+    public const OBJECT_ID = '/^[1-9][0-9]{0,17}\z/';
     /** Tabellen, deren Schlüssel die ID ist – und die, deren Schlüssel <ID>\0<Name> ist. */
     private const ID_KEYS   = ['posts', 'terms', 'term_taxonomy'];
     private const PAIR_KEYS = ['postmeta', 'termmeta', 'term_relationships'];

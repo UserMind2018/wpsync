@@ -22,7 +22,7 @@ final class ContentPackage
     /** Länge der Kopfzeile. */
     private const HEAD_BYTES = 65536;
 
-    private const ID   = '/^[1-9][0-9]{0,17}\z/';
+    private const ID   = ContentLists::OBJECT_ID;
     private const DATE = '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\z/';
     private const HEX  = '/^[a-f0-9]{64}\z/';
 

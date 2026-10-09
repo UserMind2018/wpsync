@@ -149,12 +149,12 @@ final class ContentListsTest extends TestCase
     {
         $out = [];
         foreach (['posts', 'terms', 'term_taxonomy'] as $table) {
-            foreach (['219abc', 'abc', '', '0', '0219', '-1', '+219', ' 219', "219\n", '2.19', '1e3', "219\0", "219\0_x", str_repeat('9', 21)] as $key) {
+            foreach (['219abc', 'abc', '', '0', '0219', '-1', '+219', ' 219', "219\n", '2.19', '1e3', "219\0", "219\0_x", str_repeat('9', 21), str_repeat('9', 19), '18446744073709551615'] as $key) {
                 $out[$table . ' ' . json_encode($key)] = [$table, $key];
             }
         }
         foreach (['postmeta', 'termmeta', 'term_relationships'] as $table) {
-            foreach (["219abc\0_x", "abc\0_x", "\0_x", "0\0_x", "0219\0_x", "-1\0_x", " 219\0_x", "219\n\0_x", "2.19\0_x", '219', '219abc', '', '_x', str_repeat('9', 21) . "\0_x"] as $key) {
+            foreach (["219abc\0_x", "abc\0_x", "\0_x", "0\0_x", "0219\0_x", "-1\0_x", " 219\0_x", "219\n\0_x", "2.19\0_x", '219', '219abc', '', '_x', str_repeat('9', 21) . "\0_x", str_repeat('9', 19) . "\0_x", "18446744073709551615\0_x"] as $key) {
                 $out[$table . ' ' . json_encode($key)] = [$table, $key];
             }
         }
@@ -173,7 +173,9 @@ final class ContentListsTest extends TestCase
     public function testCleanObjectIdsPass(): void
     {
         $ctx = ['post_type' => 'page', 'taxonomies' => ['nav_menu']];
-        foreach (['1', '219', '18446744073709551615', str_repeat('9', 20)] as $id) {
+        // Höchstens 18 Stellen: dieselbe Grenze wie im Paket (ContentPackage) – so viel passt in jedem PHP in eine Zahl.
+        $this->assertSame(1, preg_match(ContentLists::OBJECT_ID, str_repeat('9', 18)));
+        foreach (['1', '219', '999999999999999999', str_repeat('9', 18)] as $id) {
             $this->assertNull(ContentLists::blocked('posts', $id, $ctx), $id);
             $this->assertNull(ContentLists::blocked('terms', $id, $ctx), $id);
             $this->assertNull(ContentLists::blocked('term_taxonomy', $id, $ctx), $id);

@@ -536,7 +536,7 @@ Zeilen.
 
 | `why` | Bedeutung |
 |---|---|
-| `key` | die Objekt-ID im Schlüssel ist keine reine Zahl (`219abc`, `0219`, `0`) oder einem Paar fehlt der Trenner `\0` |
+| `key` | die Objekt-ID im Schlüssel ist keine reine Zahl (`219abc`, `0219`, `0`), hat mehr als 18 Stellen oder einem Paar fehlt der Trenner `\0` |
 | `post_type` | der Beitragstyp steht nicht auf der Liste (auch für Meta und Zuordnungen des Beitrags) |
 | `taxonomy` | die Taxonomie steht nicht auf der Liste |
 | `meta_key` | Meta-Schlüssel fest gesperrt |
