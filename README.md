@@ -210,8 +210,10 @@ Alle bis auf `--uploads-since` sind mehrfach möglich; ohne `--preset` sind sie 
   weg und deaktiviert es lokal, das andere stuft eine Tabelle herab. Ein ausgeschlossenes Plugin
   nimmt seine Tabellen nicht mit heraus – wer sie nicht will, nennt sie mit `--table`.
 
-Ein Override stuft eine Kern-Tabelle nie herab, auch nicht aus einer von Hand bearbeiteten
-Profil-Datei: `tables.overrides` wird für sie ignoriert.
+Die Ablehnung gilt für den Schalter. Ein Override, der von Hand in der Profil-Datei steht
+(`tables.overrides`, siehe [Format](#format)), gilt weiter – auch für eine Kern-Tabelle; `pull
+--content` lehnt ein Profil, dem eine der sieben Inhaltstabellen mit Daten fehlt, dann mit
+Exit 2 ab.
 
 ### Format
 
@@ -226,7 +228,7 @@ rps: 1                           # Requests pro Sekunde gegen diese Site
 profile:
   preset: ohne-transaktionen     # vollstaendig | ohne-transaktionen | nur-content
   tables:
-    overrides:                   # Abweichung vom Preset: full | structure | skip (nie für Kern-Tabellen)
+    overrides:                   # Abweichung vom Preset: full | structure | skip
       wp_comments: full
   post_types:
     exclude: [jobpost]           # zusätzlich nicht ziehen

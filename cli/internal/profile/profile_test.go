@@ -238,22 +238,21 @@ func TestProfileJSONUsesSnakeCase(t *testing.T) {
 	}
 }
 
-// W1: ein Override stuft eine Kern-Tabelle nie herab – egal ob er aus einem alten Profil, einer
-// von Hand bearbeiteten Datei oder der Auswahl stammt.
-func TestOverrideNeverDowngradesEssential(t *testing.T) {
+// Ein Override aus der Profil-Datei gilt auch für eine Kern-Tabelle – scan bietet das nicht an
+// (weder die Auswahl noch --table), aber wer die Datei von Hand bearbeitet, bekommt es. Die
+// Tabelle steht dann im Scope an die Site, kommt ohne Daten, und pull --content lehnt das Profil
+// ab (contentTables: jede der sieben Inhaltstabellen braucht Daten).
+func TestOverrideFromTheProfileFileAppliesToEssentialTables(t *testing.T) {
 	s := testSheet()
 	for _, preset := range []string{PresetNoTransactions, PresetContent, PresetFull} {
 		p := mustNew(t, preset)
-		p.Tables.Overrides = map[string]string{"wp_posts": ModeSkip, "wp_users": ModeStructure, "wp_custom_thing": ModeSkip}
+		p.Tables.Overrides = map[string]string{"wp_posts": ModeSkip, "wp_postmeta": ModeStructure}
 		modes := p.TableModes(s.Tables)
-		if modes["wp_posts"] != ModeFull || modes["wp_users"] != ModeFull {
-			t.Errorf("%s: essential tables = %s/%s, want full", preset, modes["wp_posts"], modes["wp_users"])
+		if modes["wp_posts"] != ModeSkip || modes["wp_postmeta"] != ModeStructure || modes["wp_users"] != ModeFull {
+			t.Errorf("%s: modes = %s/%s/%s", preset, modes["wp_posts"], modes["wp_postmeta"], modes["wp_users"])
 		}
-		if modes["wp_custom_thing"] != ModeSkip {
-			t.Errorf("%s: wp_custom_thing = %s, want skip", preset, modes["wp_custom_thing"])
-		}
-		if tables := p.Scope(s).Tables; tables["wp_posts"] != "" || tables["wp_users"] != "" {
-			t.Errorf("%s: scope carries an essential table: %v", preset, tables)
+		if tables := p.Scope(s).Tables; tables["wp_posts"] != ModeSkip || tables["wp_postmeta"] != ModeStructure {
+			t.Errorf("%s: scope = %v", preset, tables)
 		}
 	}
 }

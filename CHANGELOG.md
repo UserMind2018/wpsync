@@ -101,10 +101,9 @@ Agent ≥ 0.9.0 wie bisher.
 - Eine Tabelle, die das Infosheet nicht nennt, wird gespeichert und gemeldet: Zeile auf stderr, mit
   `--json` `data.warnings: ["table_unknown"]` und `data.unknown_tables`
 
-**Behoben**
-- Ein Eintrag unter `tables.overrides` konnte eine Kern-Tabelle (`posts`, `options`, `users` …)
-  herabstufen – etwa aus einer von Hand bearbeiteten Profil-Datei. Für Kern-Tabellen wird ein
-  Override jetzt ignoriert, sie kommen immer mit Daten
+**Unverändert**
+- Ein Override, der von Hand in der Profil-Datei steht, gilt wie bisher auch für eine Kern-Tabelle;
+  nur der Schalter lehnt sie ab
 
 ### Byte-Fortschritt im `phase`-Ereignis
 
