@@ -926,10 +926,16 @@ func (a *app) cmdPushes(args []string) error {
 		return err
 	}
 	if *confirmID != "" {
+		var report push.Result
+		opts.Report = &report
 		if err := push.ConfirmPending(opts, *confirmID); err != nil {
 			return pushError(err, site)
 		}
-		a.data = map[string]string{"push_id": *confirmID, "status": "confirmed"}
+		data := map[string]any{"push_id": *confirmID, "status": report.Status}
+		if len(report.Warnings) > 0 {
+			data["warnings"] = report.Warnings // content_kept: closed as rolled back, the content stays
+		}
+		a.data = data
 		return nil
 	}
 	if a.json {

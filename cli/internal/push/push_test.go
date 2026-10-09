@@ -100,6 +100,7 @@ type fakeSite struct {
 	upUnit      map[string]int                           // rel → unit index of the upload request that carried it
 	rescueBody  string                                   // answer of rescue.php to a rollback; empty: {"ok":true,"status":"rolled_back"}
 	rbPlain     bool                                     // /push/rollback answers with a page that is not the agent's
+	confirmBody string                                   // answer of /push/confirm on 200; empty: {"ok":true}
 	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
 
 	// The content channel (agent 0.7.0, content_run_test.go).
@@ -358,6 +359,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(answer)
 	case "/wpsync/v1/push/confirm":
+		if f.confirm == 200 && f.confirmBody != "" {
+			w.Write([]byte(f.confirmBody))
+			return
+		}
 		f.status(w, f.confirm)
 	case "/wpsync/v1/push/rollback":
 		var rb struct {

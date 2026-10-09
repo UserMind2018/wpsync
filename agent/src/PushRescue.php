@@ -28,6 +28,12 @@ final class PushRescue
      */
     public const CONTENT_NOT_ROLLED_BACK = 'content_not_rolled_back';
 
+    /**
+     * Warnung von confirm: rescue.php hatte Code und Uploads zurückgenommen, die Inhalte des Pushs
+     * bleiben bewusst stehen – der Push ist als zurückgerollt abgeschlossen.
+     */
+    public const CONTENT_KEPT = 'content_kept';
+
     /** Stand des DB-Anteils in rescue.json: steht vor START TRANSACTION, angewandt, zurückgenommen. */
     public const CONTENT_PENDING = 'pending';
     public const CONTENT_APPLIED = 'applied';

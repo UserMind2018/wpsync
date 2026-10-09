@@ -640,6 +640,29 @@ final class Push
         if ($push instanceof \WP_Error) {
             return $push;
         }
+        $kept = ['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::CONTENT_KEPT]];
+        if (self::contentKept($push)) {
+            return new \WP_REST_Response($kept); // schon so abgeschlossen: eine verlorene Antwort lässt sich wiederholen
+        }
+        // Hat rescue.php Code und Uploads schon zurückgenommen, wird der Push nie „bestätigt“. Offen ist
+        // dann nur noch sein DB-Anteil (sync() schliesst alle anderen ab): confirm nimmt die Inhalte an,
+        // wie sie stehen, und schliesst den Push als zurückgerollt ab – der Ausweg, wenn sie sich nicht
+        // zurücknehmen lassen (changed_since_push). Das Vorher-Abbild geht mit dem Arbeitsordner.
+        if ($push['status'] === PushRescue::COMMITTED && !$push['pruned']) { // einen bestätigten Push nimmt rescue.php nie zurück
+            $dirs   = self::dirs($push['target']);
+            $record = $dirs instanceof \WP_Error ? null : PushRescue::read($dirs[1], $push['push_id']);
+            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
+                $units = [];
+                foreach ((array) $push['units'] as $unit) {
+                    $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? $unit + ['kept' => true] : $unit;
+                }
+                Store::updatePush($push['push_id'], ['units' => (string) wp_json_encode($units)]);
+                self::finishRollback($push['push_id']);
+                self::touchStub(time());
+                self::scheduleTidy();
+                return new \WP_REST_Response($kept);
+            }
+        }
         if ($push['status'] !== PushRescue::CONFIRMED) {
             if ($push['status'] !== PushRescue::COMMITTED) {
                 return self::error('wpsync_push_state', 'Push ist im Status ' . $push['status'] . '.', 409);
@@ -701,6 +724,9 @@ final class Push
         if ($push === null) {
             return self::error('wpsync_push_unknown', 'Unbekannter Push.', 404);
         }
+        if (self::contentKept($push)) {
+            return self::error('wpsync_push_state', 'Code und Uploads dieses Pushs sind zurück, seine Inhalte wurden mit confirm angenommen – ein Vorher-Abbild gibt es nicht mehr.', 409);
+        }
         if ($push['status'] !== PushRescue::ROLLED_BACK) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 return self::error('wpsync_push_state', 'Für diesen Push gibt es keinen Snapshot (Status ' . $push['status'] . ').', 409);
@@ -748,6 +774,25 @@ final class Push
             return new \WP_REST_Response($answer);
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
+    }
+
+    /**
+     * Wurde der Push mit confirm abgeschlossen, nachdem rescue.php Code und Uploads zurückgenommen
+     * hatte – die Inhalte stehen also bewusst noch?
+     *
+     * @param array<string, mixed> $push
+     */
+    private static function contentKept(array $push): bool
+    {
+        if ($push['status'] !== PushRescue::ROLLED_BACK) {
+            return false;
+        }
+        foreach ((array) $push['units'] as $unit) {
+            if (is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT && !empty($unit['kept'])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static function superseded(string $by): string

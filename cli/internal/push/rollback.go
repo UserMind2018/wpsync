@@ -78,10 +78,32 @@ func ConfirmPending(o Options, pushID string) error {
 	if !pushIDRe.MatchString(pushID) {
 		return fmt.Errorf("ungültige Push-ID %q", pushID)
 	}
-	if err := o.Client.PushConfirm(pushID); err != nil {
+	status, warnings, err := o.Client.PushConfirmState(pushID)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(o.Out, "✓ Push %s bestätigt.\n  Baseline auffrischen: wpsync pull %s\n", pushID, o.Site.Name)
+	if status != "rolled_back" {
+		fmt.Fprintf(o.Out, "✓ Push %s bestätigt.\n  Baseline auffrischen: wpsync pull %s\n", pushID, o.Site.Name)
+		if o.Report != nil {
+			*o.Report = Result{PushID: pushID, Status: "confirmed", Units: []string{}, Warnings: warnings}
+		}
+		return nil
+	}
+	// rescue.php had taken code and uploads back; only the content of the push stood open. The agent
+	// closed the push as rolled back and keeps the content as it is (Spec Content-Push §7.6).
+	fmt.Fprintf(o.Out, "✓ Push %s ist abgeschlossen: Code und Uploads sind zurück, die Inhalte bleiben auf der Site, wie sie sind.\n"+
+		"  Zurücknehmen lassen sie sich nicht mehr – das Vorher-Abbild ist aufgeräumt.\n", pushID)
+	// Manifest and baseline of this site folder stay as they are: with the pushed state if this
+	// machine brought them there. If it never did, only a pull knows what stands on the site.
+	if siteDir, _, derr := o.dirs(); derr == nil {
+		if j, jerr := LoadJournal(siteDir, pushID); jerr != nil || j.Content == nil || !j.Content.Applied {
+			fmt.Fprintf(o.Out, "  ! Der Inhaltsstand dieses Rechners kennt die Inhalte nicht – vor dem nächsten Inhalts-Push: wpsync pull %s --content\n", o.Site.Name)
+			warnings = append(warnings, WarningContentState)
+		}
+	}
+	if o.Report != nil {
+		*o.Report = Result{PushID: pushID, Status: "rolled_back", Units: []string{}, Warnings: warnings}
+	}
 	return nil
 }
 

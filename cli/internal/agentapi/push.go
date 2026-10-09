@@ -153,8 +153,30 @@ func (c *Client) PushCommit(pushID string) (map[string]map[string]PushStamp, err
 
 // PushConfirm marks a swapped push as healthy.
 func (c *Client) PushConfirm(pushID string) error {
-	var res struct{}
-	return c.PostJSON("/wpsync/v1/push/confirm", map[string]any{"push_id": pushID}, &res)
+	_, _, err := c.PushConfirmState(pushID)
+	return err
+}
+
+// PushConfirmState is PushConfirm and returns how the agent closed the push: "confirmed" – or
+// "rolled_back" with the warning content_kept, when rescue.php had taken code and uploads back
+// and only the content of the push still stands (agent 0.7.0, Spec Content-Push §7.6).
+func (c *Client) PushConfirmState(pushID string) (status string, warnings []string, err error) {
+	var res struct {
+		Status   string   `json:"status"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := c.PostJSON("/wpsync/v1/push/confirm", map[string]any{"push_id": pushID}, &res); err != nil {
+		return "", nil, err
+	}
+	for _, w := range res.Warnings {
+		if warningRe.MatchString(w) && len(warnings) < 10 {
+			warnings = append(warnings, w)
+		}
+	}
+	if res.Status != "rolled_back" {
+		res.Status = "confirmed"
+	}
+	return res.Status, warnings, nil
 }
 
 // RollbackNotes is what a rollback reports beyond its status (agent 0.6.0): warnings such as

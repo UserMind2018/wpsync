@@ -683,7 +683,11 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
   ganz. Antwortet er nicht, mit einem Serverfehler oder mit einer fremden Seite, nimmt `rescue.php` Code und Uploads
   zurück, und das Ergebnis sagt es: Exit 43 mit `warnings: ["content_not_rolled_back"]`. Der Push
   bleibt dann offen (weitere Pushes: Exit 42); `wpsync rollback <site> <push-id>` holt die
-  Inhalte nach, sobald WordPress wieder antwortet.
+  Inhalte nach, sobald WordPress wieder antwortet. Geht das nicht mehr (`changed_since_push`)
+  oder sollen die Inhalte bleiben, schliesst `wpsync pushes <site> --confirm <push-id>` den Push
+  ab – nicht als bestätigt, sondern als zurückgerollt: Code und Uploads sind zurück, die Inhalte
+  bleiben stehen (`status: "rolled_back"`, `warnings: ["content_kept"]`). Das Vorher-Abbild wird
+  dabei aufgeräumt; zurücknehmen lassen sich diese Inhalte danach nicht mehr.
 - **`rollback`:** stellt das Vorher-Abbild her, löscht eingefügte Objekte samt Meta und
   Zuordnungen und holt Beiträge aus dem Papierkorb – aber nur, wenn jede betroffene Zeile noch
   den Abdruck trägt, den der Push hinterlassen hat. Sonst `error.reason: "changed_since_push"`
@@ -1178,7 +1182,8 @@ Einheit), `commit` und `health` als `{"event":…,"data":{…}}` und endet mit `
 `target` (`live`, `staging`), `status`, `units`. `status` ist `dry_run`, `confirmed`,
 `rolled_back`, `committed` (getauscht, aber weder bestätigt noch zurückgerollt – die Site braucht
 Aufmerksamkeit) oder leer (auf der Site wurde nichts geändert). `pushes` liefert `data.pushes`,
-neueste zuerst, `pushes --confirm` `push_id` und `status`; `rollback` dieselben Felder wie `push`.
+neueste zuerst, `pushes --confirm` `push_id` und `status` (`confirmed` – oder `rolled_back` mit
+`warnings: ["content_kept"]`, siehe [Inhalte pushen](#anwenden-health-check-rücknahme)); `rollback` dieselben Felder wie `push`.
 Ab CLI 0.5.0 zusätzlich: im `plan` `skipped_new` (lokal neue, nicht genannte Einheiten) und
 `missing_locally` (lokal fehlende Einheiten, die auf der Site bleiben), beide `[]` wenn leer; im
 Ergebnis von `push` `rescue_url`, sobald es eine `push_id` gibt; bei `push` und `rollback`

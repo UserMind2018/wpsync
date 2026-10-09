@@ -668,3 +668,58 @@ func TestRunWithoutContentAlwaysRollsBackThroughRescue(t *testing.T) {
 		t.Errorf("routes = %s", got)
 	}
 }
+
+// D6: hat rescue.php Code und Uploads zurückgenommen, schliesst --confirm den Push als zurückgerollt
+// ab – die Inhalte bleiben auf der Site, und Manifest und Baseline behalten den gepushten Stand.
+func TestConfirmPendingAfterRescueKeepsTheContent(t *testing.T) {
+	f, o, siteDir := contentPushed(t)
+	f.confirmBody = `{"ok":true,"status":"rolled_back","warnings":["content_kept","\u001b[31m"]}`
+	patched := contentFile(t, siteDir, "manifest.jsonl")
+	var out bytes.Buffer
+	o.Out = &out
+	var report Result
+	o.Report = &report
+
+	if err := ConfirmPending(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "rolled_back" || report.PushID != testID || !reflect.DeepEqual(report.Warnings, []string{WarningContentKept}) {
+		t.Errorf("report = %+v", report)
+	}
+	if !strings.Contains(out.String(), "die Inhalte bleiben") || strings.Contains(out.String(), "bestätigt") {
+		t.Errorf("output:\n%s", &out)
+	}
+	if contentFile(t, siteDir, "manifest.jsonl") != patched {
+		t.Error("the manifest keeps the pushed state: the content stands")
+	}
+
+	// Kennt der Inhaltsstand dieses Rechners die Inhalte nicht (der Push war nie bestätigt), sagt es das Ergebnis.
+	j, err := LoadJournal(siteDir, testID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Content.Applied = false
+	if err := SaveJournal(siteDir, j); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := ConfirmPending(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(report.Warnings, []string{WarningContentKept, WarningContentState}) || !strings.Contains(out.String(), "--content") {
+		t.Errorf("report = %+v\n%s", report, &out)
+	}
+}
+
+func TestConfirmPendingReportsAConfirmedPush(t *testing.T) {
+	f := newFakeSite(t)
+	o, _, out := localSite(t, f)
+	var report Result
+	o.Report = &report
+	if err := ConfirmPending(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "confirmed" || len(report.Warnings) != 0 || !strings.Contains(out.String(), "bestätigt") {
+		t.Errorf("report = %+v\n%s", report, out)
+	}
+}

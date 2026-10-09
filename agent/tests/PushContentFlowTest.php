@@ -713,4 +713,47 @@ final class PushContentFlowTest extends TestCase
         $this->assertSame('content_failed', $begin->data['content']['error']['code']);
         $this->assertStringNotContainsString('boom', $begin->data['content']['error']['message']);
     }
+
+    /**
+     * D6: hat rescue.php Code und Uploads zurückgenommen und lassen sich die Inhalte nicht (oder
+     * sollen sie nicht) zurücknehmen, schliesst confirm den Push ab – als zurückgerollt, nie als
+     * bestätigt: die Inhalte bleiben, und die Antwort sagt es.
+     */
+    public function testConfirmAfterRescueClosesThePushAsRolledBackAndKeepsTheContent(): void
+    {
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $pushed   = $this->liveDb->data;
+        $this->rescuePhp($id);
+        $this->liveDb->log = [];
+
+        $done = Push::confirm(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $done, $done instanceof \WP_Error ? $done->code . ' ' . $done->message : '');
+        $this->assertSame(['ok' => true, 'status' => 'rolled_back', 'warnings' => ['content_kept']], $done->data);
+        $this->assertSame($pushed, $this->liveDb->data, 'die Inhalte bleiben bewusst stehen');
+        $this->assertSame([], $this->liveDb->log);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $push = Store::getPush($id);
+        $this->assertSame(['rolled_back', true], [$push['status'], $push['pruned']]);
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id, 'das Vorher-Abbild ist aufgeräumt');
+        $this->assertNull(Push::pending());
+        $this->assertNull(Store::getState('push_lock'));
+
+        // Ein zweites confirm sagt dasselbe; zurücknehmen lässt sich der Push nicht mehr.
+        $again = Push::confirm(['push_id' => $id], self::KEY);
+        $this->assertSame(['ok' => true, 'status' => 'rolled_back', 'warnings' => ['content_kept']], $again->data);
+        $this->assertRefused('wpsync_push_state', 409, Push::rollback(['push_id' => $id], self::KEY));
+        $this->assertRefused('wpsync_push_state', 409, Push::rollbackPush($id));
+        $this->assertSame($pushed, $this->liveDb->data);
+    }
+
+    /** Ein Push ohne Inhalte, den rescue.php zurückgenommen hat, wird durch confirm nie wieder „bestätigt“. */
+    public function testConfirmNeverOverwritesARollbackOfRescue(): void
+    {
+        list($id, $commit) = $this->push(null, 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit);
+        $this->rescuePhp($id);
+        $this->assertRefused('wpsync_push_state', 409, Push::confirm(['push_id' => $id], self::KEY));
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollback(['push_id' => $id], self::KEY), 'ohne angenommene Inhalte bleibt die Rücknahme wiederholbar');
+    }
 }

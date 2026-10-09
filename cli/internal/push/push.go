@@ -109,6 +109,10 @@ type Result struct {
 // (Spec Content-Push §7.6).
 const WarningContentNotRolledBack = "content_not_rolled_back"
 
+// WarningContentKept: pushes --confirm closed a push whose code and uploads rescue.php had taken
+// back; its content stays on the site and cannot be taken back any more (Spec Content-Push §7.6).
+const WarningContentKept = "content_kept"
+
 // WarningContentState: the push is live and confirmed, only manifest and baseline of this site
 // folder could not be brought to the new state – the next pull with --content rebuilds them.
 const WarningContentState = "content_state_failed"
