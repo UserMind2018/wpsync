@@ -86,4 +86,61 @@ final class ContentListsTest extends TestCase
         $this->assertContains('_customer_ip_address', $lists['blocked_meta']);
         $this->assertContains('page_on_front', $lists['options']);
     }
+
+    public function testBlockedNamesTheReasonPerTable(): void
+    {
+        $page  = ['post_type' => 'page'];
+        $order = ['post_type' => 'shop_order'];
+        $this->assertNull(ContentLists::blocked('posts', '219', $page));
+        $this->assertSame('post_type', ContentLists::blocked('posts', '219', $order));
+        $this->assertSame('no_object', ContentLists::blocked('posts', '219', []));
+        $this->assertSame('post_type', ContentLists::blocked('posts', '219', ['post_type' => '']), 'ein Beitrag ohne Typ ist da, aber nicht erlaubt');
+
+        $this->assertNull(ContentLists::blocked('postmeta', "219\0_elementor_data", $page));
+        $this->assertSame('post_type', ContentLists::blocked('postmeta', "219\0_elementor_data", $order));
+        $this->assertSame('no_object', ContentLists::blocked('postmeta', "219\0_elementor_data", ['post_type' => null]));
+        $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0_edit_lock", $page));
+        $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0_elementor_screenshot_failed", $page));
+        $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0_billing_email", $page), 'pseudonymisiert: fest gesperrt');
+        $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0", $page), 'leerer Meta-Schlüssel');
+        $this->assertSame('meta_key', ContentLists::blocked('postmeta', '219', $page), 'Schlüssel ohne Trenner');
+        $this->assertSame('meta_word', ContentLists::blocked('postmeta', "219\0design_token", $page));
+        $this->assertNull(ContentLists::blocked('postmeta', "219\0design_token", $page, ['meta_exceptions' => ['design_token']]));
+        $this->assertNull(ContentLists::blocked('postmeta', "219\0a\0b", $page), 'nur der erste Trenner teilt');
+
+        $menu = ['taxonomies' => ['nav_menu']];
+        $this->assertNull(ContentLists::blocked('terms', '7', $menu));
+        $this->assertNull(ContentLists::blocked('term_taxonomy', '9', $menu));
+        $this->assertSame('taxonomy', ContentLists::blocked('terms', '7', ['taxonomies' => ['nav_menu', 'language']]));
+        $this->assertSame('no_object', ContentLists::blocked('terms', '7', ['taxonomies' => []]));
+        $this->assertSame('no_object', ContentLists::blocked('terms', '7', []));
+        $this->assertNull(ContentLists::blocked('terms', '7', ['taxonomies' => ['branche']], ['taxonomies' => ['branche']]));
+        $this->assertNull(ContentLists::blocked('termmeta', "7\0farbe", $menu));
+        $this->assertSame('meta_word', ContentLists::blocked('termmeta', "7\0api_key", $menu));
+        $this->assertSame('taxonomy', ContentLists::blocked('termmeta', "7\0farbe", ['taxonomies' => ['language']]));
+        $this->assertSame('taxonomy', ContentLists::blocked('termmeta', "7\0farbe", ['taxonomies' => ['nav_menu', 'language']]));
+
+        $this->assertNull(ContentLists::blocked('term_relationships', "219\0category", ['post_type' => 'post']));
+        $this->assertSame('taxonomy', ContentLists::blocked('term_relationships', "219\0language", ['post_type' => 'post']));
+        $this->assertSame('post_type', ContentLists::blocked('term_relationships', "219\0category", $order));
+        $this->assertSame('no_object', ContentLists::blocked('term_relationships', "3\0category", []), 'Zuordnung eines Links');
+
+        $site = ['prefix' => 'wp_', 'stylesheet' => 'hello-child'];
+        $this->assertNull(ContentLists::blocked('options', 'blogname', $site));
+        $this->assertNull(ContentLists::blocked('options', 'theme_mods_hello-child', $site));
+        $this->assertSame('option', ContentLists::blocked('options', 'siteurl', $site));
+        $this->assertSame('option', ContentLists::blocked('options', 'wp_user_roles', $site));
+        $this->assertSame('option', ContentLists::blocked('options', 'theme_mods_hello-child', []), 'ohne Theme keine theme_mods');
+
+        $this->assertSame('table', ContentLists::blocked('users', '1', []));
+    }
+
+    /** AC-148 / D12: was der Pull pseudonymisiert, ist fest gesperrt – nie nur per Teilstring */
+    public function testAnonymizedMetaIsBlockedForGood(): void
+    {
+        foreach (Anonymizer::metaKeys('postmeta') as $key) {
+            $this->assertSame('meta_key', ContentLists::blocked('postmeta', "1\0" . $key, ['post_type' => 'page']), $key);
+            $this->assertSame('meta_key', ContentLists::blocked('postmeta', "1\0" . $key, ['post_type' => 'page'], ['meta_exceptions' => [$key]]), $key);
+        }
+    }
 }

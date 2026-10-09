@@ -31,13 +31,16 @@ func TestScriptIsOnePHPFile(t *testing.T) {
 	if !bytes.HasPrefix(s, []byte("<?php\n")) || bytes.Count(s, []byte("<?php")) != 1 {
 		t.Fatalf("script must open PHP exactly once, at its start")
 	}
-	for _, want := range []string{"final class SerializedWalker", "final class ContentOrigin", "final class Canon", "final class ContentReader", "wpsync content export"} {
+	for _, want := range []string{"final class SerializedWalker", "final class ContentOrigin", "final class Canon", "final class ContentReader", "final class Anonymizer", "final class ContentLists", "ContentLists::blocked(", "wpsync content export"} {
 		if !bytes.Contains(s, []byte(want)) {
 			t.Errorf("script lacks %q", want)
 		}
 	}
 	if bytes.Index(s, []byte("final class SerializedWalker")) > bytes.Index(s, []byte("final class ContentOrigin")) {
 		t.Error("SerializedWalker must come before ContentOrigin")
+	}
+	if bytes.Index(s, []byte("final class Anonymizer")) > bytes.Index(s, []byte("final class ContentLists")) {
+		t.Error("Anonymizer must come before ContentLists")
 	}
 	// wp eval-file evals the code: a namespace statement has to be the first one.
 	if !bytes.HasPrefix(bytes.TrimSpace(bytes.TrimPrefix(s, []byte("<?php"))), []byte("namespace WpSync;")) {

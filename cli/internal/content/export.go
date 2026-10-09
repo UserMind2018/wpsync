@@ -21,7 +21,7 @@ var (
 )
 
 // Export runs the export script in the local site and writes one line per record to w:
-// {t, k, h[, row]} in normalized form (Spec Content-Push §4.4). tables narrows it to content tables
+// {t, k, h[, row], p[, why]} in normalized form (Spec Content-Push §4.4). tables narrows it to content tables
 // without prefix; nil means all seven. It returns the number of records.
 func Export(r localenv.Runner, localURL string, tables []string, w io.Writer) (int, error) {
 	s, ok := r.(localenv.Streamer)

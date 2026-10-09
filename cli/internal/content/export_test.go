@@ -102,3 +102,12 @@ func TestExportSurvivesVeryLongLines(t *testing.T) {
 		t.Fatalf("rows=%d err=%v len=%d", rows, err, out.Len())
 	}
 }
+
+func TestExportKeepsTheRating(t *testing.T) {
+	line := `{"t":"postmeta","k":"1\u0000_edit_lock","h":"aa","row":{"values":["MQ=="]},"p":false,"why":"meta_key"}`
+	r := &fakeRunner{out: line + "\n" + `{"end":true,"rows":1}` + "\n"}
+	var out strings.Builder
+	if rows, err := Export(r, "http://x.test", nil, &out); err != nil || rows != 1 || out.String() != line+"\n" {
+		t.Fatalf("rows=%d err=%v out=%q", rows, err, out.String())
+	}
+}

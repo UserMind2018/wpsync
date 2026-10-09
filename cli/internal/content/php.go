@@ -16,7 +16,7 @@ const CanonVersion = 1
 var phpFS embed.FS
 
 // agentFiles are copies of agent/src in load order; TestPHPMatchesAgent keeps them equal.
-var agentFiles = []string{"SerializedWalker.php", "ContentOrigin.php", "Canon.php", "ContentReader.php"}
+var agentFiles = []string{"SerializedWalker.php", "ContentOrigin.php", "Canon.php", "Anonymizer.php", "ContentLists.php", "ContentReader.php"}
 
 // Script returns the PHP for `wp eval-file -`: the agent's classes followed by the driver.
 // WP-CLI evals the code, so it opens PHP once and starts with the namespace statement.
