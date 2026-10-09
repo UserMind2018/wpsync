@@ -22,6 +22,16 @@ final class PushRescue
     public const STAGING_DIR  = '/^wpsync-staging-[a-f0-9]{12}\z/';
     /** Warnung der Rücknahme: eine hinzugefügte Datei wurde seit dem Push geändert und bleibt (§8.4). */
     public const UPLOAD_CHANGED = 'upload_changed_since_push';
+    /**
+     * Warnung der Rücknahme ohne WordPress (Spec Content-Push §7.6, C7): Code und Uploads sind
+     * zurück, die Inhalte nicht – sie nimmt nur der Agent zurück (wpsync rollback <id>).
+     */
+    public const CONTENT_NOT_ROLLED_BACK = 'content_not_rolled_back';
+
+    /** Stand des DB-Anteils in rescue.json: steht vor START TRANSACTION, angewandt, zurückgenommen. */
+    public const CONTENT_PENDING = 'pending';
+    public const CONTENT_APPLIED = 'applied';
+    public const CONTENT_DONE    = 'rolled_back';
 
     public static function newId(int $now): string
     {
@@ -43,14 +53,17 @@ final class PushRescue
      * @param list<array{unit: string, target: string, snapshot: string|null, discard: string}> $pairs
      * @param array{added?: list<array{path: string, sha256: string}>, dirs?: list<string>}  $uploads Einheit
      *        uploads (Spec Content-Push §8.4): Dateien relativ zu uploads/, angelegte Ordner relativ zu wp-content
+     * @param string|null $contentSha sha256 des Inhalts-Pakets, wenn der Push einen DB-Anteil hat (§7.3): der
+     *        Datensatz nennt ihn als „pending“, bevor die Transaktion beginnt
      */
-    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = []): void
+    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = [], ?string $contentSha = null): void
     {
         self::save($workDir, [
             'push_id'       => $pushId,
             'key_hash'      => $keyHash,
             'pairs'         => $pairs,
             'uploads'       => $uploads + ['added' => [], 'dirs' => []],
+            'content'       => $contentSha === null ? null : ['state' => self::CONTENT_PENDING, 'sha256' => $contentSha],
             'status'        => $status,
             'superseded_by' => null,
             'attempts'      => 0,
@@ -78,6 +91,30 @@ final class PushRescue
         $record['status'] = $status;
         self::save($workDir, $record);
         return true;
+    }
+
+    /** Stand des DB-Anteils nach COMMIT bzw. nach seiner Rücknahme; false, wenn der Push keinen hat. */
+    public static function setContent(string $workDir, string $pushId, string $state): bool
+    {
+        $record = self::read($workDir, $pushId);
+        if ($record === null || !is_array($record['content'] ?? null)) {
+            return false;
+        }
+        $record['content']['state'] = $state;
+        self::save($workDir, $record);
+        return true;
+    }
+
+    /**
+     * Hat der Push einen DB-Anteil, der noch nicht zurückgenommen ist? Dann braucht ihn der Agent
+     * noch: sein Vorher-Abbild liegt im Arbeitsordner.
+     *
+     * @param array<string, mixed> $record
+     */
+    public static function contentOpen(array $record): bool
+    {
+        $content = $record['content'] ?? null;
+        return is_array($content) && in_array($content['state'] ?? '', [self::CONTENT_PENDING, self::CONTENT_APPLIED], true);
     }
 
     /**
@@ -187,7 +224,7 @@ final class PushRescue
             return [404, ['ok' => false, 'error' => 'unknown push']];
         }
         if ($record['status'] === self::ROLLED_BACK) {
-            return [200, ['ok' => true, 'status' => self::ROLLED_BACK]];
+            return [200, ['ok' => true, 'status' => self::ROLLED_BACK] + (self::contentOpen($record) ? ['warnings' => [self::CONTENT_NOT_ROLLED_BACK]] : [])];
         }
         if ($record['superseded_by'] !== null) {
             return [409, ['ok' => false, 'error' => 'superseded', 'by' => $record['superseded_by']]];
@@ -234,6 +271,10 @@ final class PushRescue
         if ($kept !== []) {
             $body['warnings'] = [self::UPLOAD_CHANGED];
             $body['kept']     = $kept;
+        }
+        // Hier gibt es weder WordPress noch die Datenbank: die Inhalte stehen noch (§7.6, bis P3).
+        if (self::contentOpen($record)) {
+            $body['warnings'][] = self::CONTENT_NOT_ROLLED_BACK;
         }
         return [200, $body];
     }
