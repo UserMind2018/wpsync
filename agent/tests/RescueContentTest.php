@@ -124,7 +124,7 @@ final class RescueContentTest extends ContentApplyCase
     {
         $this->assertSame([
             'Canon', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'ContentException', 'ContentStore', 'ContentState', 'ContentLists',
-            'ContentReader', 'ContentImage', 'ContentTarget', 'ContentSql', 'ContentRepair', 'ContentRollback', 'RescueSeal', 'RescueLink',
+            'ContentReader', 'ContentImage', 'ContentTarget', 'ContentSql', 'ContentRepair', 'ContentPlugins', 'ContentRollback', 'RescueSeal', 'RescueLink',
             'MysqliLink', 'RescueDb',
         ], RescueContent::CLASSES);
         foreach (RescueContent::CLASSES as $name) {

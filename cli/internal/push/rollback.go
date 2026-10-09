@@ -53,7 +53,7 @@ func Pushes(o Options) error {
 		var units []string
 		for _, u := range r.Units {
 			name := agentapi.Printable(u.Path)
-			if ValidUnit(u.Path) || u.Path == UploadsUnit || u.Path == ContentUnit {
+			if ValidUnit(u.Path) || u.Path == UploadsUnit || u.Path == ContentUnit || u.Path == PluginsUnit {
 				name = u.Path
 			}
 			// What a content push carried beyond the agent's whitelist stays visible.
@@ -66,12 +66,37 @@ func Pushes(o Options) error {
 			if u.Via == "rescue" && u.Path == ContentUnit {
 				name += " (über rescue.php zurückgenommen)"
 			}
+			// The plugin state of the push (Spec Content-Push P4 §8.5): what it switched.
+			if u.Path == PluginsUnit {
+				var parts []string
+				if len(u.Activated) > 0 {
+					parts = append(parts, "aktiviert: "+printableList(u.Activated))
+				}
+				if len(u.Deactivated) > 0 {
+					parts = append(parts, "deaktiviert: "+printableList(u.Deactivated))
+				}
+				if u.Via == "rescue" {
+					parts = append(parts, "über rescue.php zurückgenommen")
+				}
+				if len(parts) > 0 {
+					name += " (" + strings.Join(parts, "; ") + ")"
+				}
+			}
 			units = append(units, name)
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
 			targetLabel(r.Target), agentapi.Printable(r.Device), status, strings.Join(units, ", "))
 	}
 	return w.Flush()
+}
+
+// printableList joins plugin entries of the agent for a line of output.
+func printableList(in []string) string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, showEntry(s))
+	}
+	return strings.Join(out, ", ")
 }
 
 // List returns the push log of the site, newest first (pushes --json). Device, status, target
@@ -106,7 +131,13 @@ func ConfirmPending(o Options, pushID string) error {
 	// Manifest and baseline of this site folder stay as they are: with the pushed state if this
 	// machine brought them there. If it never did, only a pull knows what stands on the site.
 	if siteDir, _, derr := o.dirs(); derr == nil {
-		if j, jerr := LoadJournal(siteDir, pushID); jerr != nil || j.Content == nil || !j.Content.Applied {
+		j, jerr := LoadJournal(siteDir, pushID)
+		switched := jerr == nil && j.switched()
+		if switched {
+			fmt.Fprintln(o.Out, "  Auch der Plugin-Zustand des Pushs bleibt: was er aktiviert oder deaktiviert hat, steht so in der Liste – bei Bedarf im WP-Admin unter Plugins zurückstellen.")
+		}
+		// A push that only switched plugins left no content this machine would have to know.
+		if jerr != nil || (j.Content == nil && !switched) || (j.Content != nil && !j.Content.Applied) {
 			fmt.Fprintf(o.Out, "  ! Der Inhaltsstand dieses Rechners kennt die Inhalte nicht – vor dem nächsten Inhalts-Push: wpsync pull %s --content\n", o.Site.Name)
 			warnings = append(warnings, WarningContentState)
 		}
@@ -185,7 +216,7 @@ func Rollback(o Options, pushID string) error {
 		if errors.As(err, &apiErr) && apiErr.Code != "" && apiErr.Status < 500 {
 			// The agent answered and refused: superseded, pruned, not ours – or rows of the push changed
 			// since (changed_since_push): then nothing is taken back, and never through rescue.php.
-			return contentError(agentError(target, err))
+			return pluginsError(contentError(agentError(target, err)))
 		}
 		// WordPress does not answer – the reason this script exists.
 		if jerr != nil {
@@ -200,7 +231,7 @@ func Rollback(o Options, pushID string) error {
 		fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php")
 		via = "rescue"
 		var rerr error
-		// With content=1 when the push carried content: rescue.php of an agent 0.8.0 takes it back
+		// With content=1 when the push has a database part: rescue.php of an agent 0.8.0 takes it back
 		// too, any older one leaves it and the result says so (Spec Content-Push P3 §9).
 		if notes, rerr = rescueBack(o, j); rerr != nil {
 			return fmt.Errorf("Rollback über rescue.php fehlgeschlagen: %w", rerr)
@@ -215,17 +246,25 @@ func Rollback(o Options, pushID string) error {
 		if report := contentErrorReport(notes.Content); report != nil {
 			why = " (" + report.Code + ")"
 		}
-		fmt.Fprintf(o.Out, "  ! Nur Code und Uploads sind zurück – die Inhalte des Pushs stehen noch auf der Site%s.\n"+
-			"    Sobald WordPress wieder antwortet: wpsync rollback %s %s\n", why, o.Site.Name, pushID)
+		what := "die Inhalte des Pushs stehen"
+		switch {
+		case jerr == nil && j.Content == nil && j.switched():
+			what = "der Plugin-Zustand des Pushs steht"
+		case slices.Contains(notes.Warnings, WarningPluginsNotRestored):
+			what = "Inhalte und Plugin-Zustand des Pushs stehen"
+		}
+		fmt.Fprintf(o.Out, "  ! Nur Code und Uploads sind zurück – %s noch auf der Site%s.\n"+
+			"    Sobald WordPress wieder antwortet: wpsync rollback %s %s\n", what, why, o.Site.Name, pushID)
 	} else {
 		printLeft(o.Out, notes.Content)
 	}
+	printPluginsBack(o.Out, notes)
 	if o.Report != nil {
 		if units == nil {
 			units = []string{}
 		}
 		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings, PostActions: notes.PostActions,
-			Via: via, ContentError: contentErrorReport(notes.Content)}
+			Via: via, ContentError: contentErrorReport(notes.Content), PluginsBack: notes.Plugins, PluginsNotRestored: notes.PluginsNotRestored}
 		if notes.Content != nil && !contentLeft {
 			o.Report.ContentLeft, o.Report.ContentLeftTotal = notes.Content.Left, notes.Content.LeftTotal
 		}

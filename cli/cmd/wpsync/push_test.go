@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,6 +56,18 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"content_author", &push.ContentError{Reason: "author_unknown", Message: "Neue Beiträge brauchen einen Autor"}, cliout.ExitUnknown, "wp-admin/tools.php?page=wpsync"},
 		{"content_changed", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "changed_since_push", Message: "Seit dem Push geändert"}), cliout.ExitUnknown, "auch Code und Uploads nicht"},
 		{"content_unrestored", &push.ContentError{Reason: "content_failed", Message: "die Zeile posts 219 liess sich nicht zurücksetzen", Keys: []agentapi.ContentKey{{Table: "posts", Key: "219"}}}, cliout.ExitUnknown, "von Hand prüfen"},
+		{"plugin_switch", fmt.Errorf("%w: --activate %q", push.ErrPluginSwitch, "themes/x"), cliout.ExitUsage, "ungültiger Plugin-Schalter"},
+		{"no_plugins", fmt.Errorf("%w: %w", push.ErrAgentNoPlugins, &agentapi.APIError{Status: 400, Code: "wpsync_push_units"}), cliout.ExitAgentOutdated, "kann mit einem Push noch keine Plugins schalten – Agent 0.9.0 installieren"},
+		{"plugins_invalid", &push.PluginsError{Reason: "plugins_invalid", Message: "Keine Hauptdatei"}, cliout.ExitUnknown, "genau einer Hauptdatei"},
+		{"plugins_requirements", &push.PluginsError{Reason: "plugins_requirements", Message: "Voraussetzungen nicht erfüllt"}, cliout.ExitUnknown, "nichts wurde getauscht"},
+		{"plugins_requirements_units", &push.PluginsError{Reason: "plugins_requirements", Message: "Voraussetzungen nicht erfüllt: …", Plugins: []agentapi.PluginRefusal{{Unit: "plugins/alt", Why: "required_by", Needs: "plugins/addon"}}}, cliout.ExitUnknown,
+			`Plugin-Zustand abgelehnt: plugins/alt wird von "plugins/addon" vorausgesetzt (plugins_requirements); nichts wurde getauscht`},
+		{"plugins_not_allowed", &push.PluginsError{Reason: "plugins_not_allowed", Message: "Plugins schaltet ein Push nur mit Öffner"}, cliout.ExitUnknown, "activate_plugins"},
+		{"plugins_unsupported", &push.PluginsError{Reason: "plugins_unsupported", Message: "Multisite"}, cliout.ExitUnknown, "Multisite"},
+		{"plugins_failed", &push.PluginsError{Reason: "plugins_failed", Message: "active_plugins nicht lesbar"}, cliout.ExitUnknown, "zurückgetauscht"},
+		{"plugins_envelope", &push.RescueDBError{Reason: "no_image_key", Mandatory: true}, cliout.ExitUnknown, "ein Push, der Plugins schaltet"},
+		{"plugins_envelope_agent", &push.PluginsError{Reason: "rescue_db_unavailable", Message: "ohne Umschlag", Detail: "probe_failed"}, cliout.ExitUnknown, "zweite Datenbankverbindung"},
+		{"plugins_kept", &push.RolledBackError{PushID: "p_x", Via: "rescue", Content: "kept", Warnings: []string{push.WarningContentNotRolledBack, push.WarningPluginsNotRestored}}, cliout.ExitPushRolledBack, "Plugin-Zustand"},
 		{"content_failed", &push.ContentError{Reason: "content_failed", Message: "Die Datenbank hat einen Schreibzugriff abgelehnt"}, cliout.ExitUnknown, "nichts wurde übertragen"},
 		{"content_image", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "before_image_invalid", Message: "Das Vorher-Abbild lässt sich nicht öffnen"}), cliout.ExitUnknown, "WPSYNC_KEY oder die Salts"},
 		{"content_stage", &agentapi.APIError{Status: 409, Code: "wpsync_content_offset", Message: "Stück passt nicht an das Paket."}, cliout.ExitUnknown, "Stück passt nicht"},
@@ -96,5 +109,16 @@ func TestRequireRescueDBHasReasonAndDetail(t *testing.T) {
 	f = cliout.Classify(pushError(&push.RolledBackError{PushID: "p_x", Via: "rescue", Content: "kept", Warnings: []string{push.WarningContentNotRolledBack}}, site))
 	if f.Exit != cliout.ExitPushRolledBack || f.Detail != "" {
 		t.Errorf("failure = %+v", f)
+	}
+}
+
+// --activate und --deactivate: mehrfach und mit Komma, leere Teile fallen weg.
+func TestSwitchUnitsSplitsCommas(t *testing.T) {
+	got := switchUnits(listFlag{"plugins/a,plugins/b", " plugins/c ", "", "plugins/d,"})
+	if !reflect.DeepEqual(got, []string{"plugins/a", "plugins/b", "plugins/c", "plugins/d"}) {
+		t.Errorf("units = %v", got)
+	}
+	if got := switchUnits(nil); got != nil {
+		t.Errorf("units = %v", got)
 	}
 }

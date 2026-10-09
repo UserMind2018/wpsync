@@ -58,6 +58,20 @@ final class PushRescue
      */
     public const CONTENT_LEFT = 'content_left_extra';
 
+    /**
+     * Warnung der Rücknahme ohne WordPress (Spec Content-Push P4 A18): der DB-Anteil des Pushs blieb
+     * stehen – und mit ihm sein Plugin-Zustand. Die Liste active_plugins trägt noch den Stand des
+     * Pushs, während Code und Uploads zurück sind. Steht neben content_not_rolled_back.
+     */
+    public const PLUGINS_NOT_RESTORED = 'plugins_not_restored';
+
+    /**
+     * Eintrag von active_plugins: <slug>/<pfad>.php – der Slug wie eine Einheit, der Pfad ohne Steuerzeichen
+     * und Backslash. Die EINE Regel des Agents (pluginEntry()): ContentPlugins::valid() ist dieselbe, damit
+     * alles, was geschaltet wird, auch genannt werden kann (Security-Review P4 S6).
+     */
+    private const PLUGIN_ENTRY = '#^[A-Za-z0-9][A-Za-z0-9._-]*/[^\x00-\x1f\x7f\\\\]{1,200}\.php\z#';
+
     /** content.via in rescue.json: rescue.php hat den DB-Anteil abgeschlossen. */
     public const VIA_RESCUE = 'rescue';
     /** content.post: Nacharbeiten stehen aus bzw. sind nachgeholt (P3 §8). */
@@ -111,19 +125,37 @@ final class PushRescue
      * @param list<array{unit: string, target: string, snapshot: string|null, discard: string}> $pairs
      * @param array{added?: list<array{path: string, sha256: string}>, dirs?: list<string>}  $uploads Einheit
      *        uploads (Spec Content-Push §8.4): Dateien relativ zu uploads/, angelegte Ordner relativ zu wp-content
-     * @param string|null $contentSha sha256 des Inhalts-Pakets, wenn der Push einen DB-Anteil hat (§7.3): der
-     *        Datensatz nennt ihn als „pending“, bevor die Transaktion beginnt
+     * @param string|null $contentSha sha256 des Inhalts-Pakets, wenn der Push eins hat (§7.3)
+     * @param bool        $plugins    der Push hat einen Plugin-Zustand (Spec Content-Push P4 §8.5)
+     *
+     * Hat der Push ein Paket oder einen Plugin-Zustand, hat er einen DB-Anteil: der Datensatz nennt ihn als
+     * „pending“, bevor die Transaktion beginnt. sha256 ist null ohne Paket. content.plugins ({added, removed})
+     * steht nur zur Auskunft da – für plugins_not_restored –; geschrieben wird nie daraus, die Rücknahme
+     * liest allein das authentisierte Vorher-Abbild. Der Commit trägt die Einträge nach dem COMMIT ein.
+     *
+     * @param list<string> $switched Einheiten plugins/<slug>, die der Push schaltet (activate und deactivate): sie
+     *        zählen für „überholt“ wie die getauschten (unitsOf(), Security-Review P4 S2). Das Feld fehlt ohne
+     *        Plugin-Zustand – der Datensatz ist dann Byte für Byte wie vor P4
      */
-    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = [], ?string $contentSha = null): void
+    public static function write(string $workDir, string $pushId, string $keyHash, array $pairs, string $status, array $uploads = [], ?string $contentSha = null, bool $plugins = false, array $switched = []): void
     {
-        self::save($workDir, [
+        $content = null;
+        if ($contentSha !== null || $plugins) {
+            $content = ['state' => self::CONTENT_PENDING, 'sha256' => $contentSha];
+            if ($plugins) {
+                $content['plugins'] = ['added' => [], 'removed' => []];
+            }
+        }
+        self::save($workDir, ($switched === [] ? [] : ['switched' => array_values($switched)]) + [
             'push_id'       => $pushId,
             'key_hash'      => $keyHash,
             'pairs'         => $pairs,
             'uploads'       => $uploads + ['added' => [], 'dirs' => []],
-            'content'       => $contentSha === null ? null : ['state' => self::CONTENT_PENDING, 'sha256' => $contentSha],
+            'content'       => $content,
             'status'        => $status,
             'superseded_by' => null,
+            // Wann dieser Datensatz entstand: daran erkennt supersededBy() den späteren Push (NR-2).
+            'committed_at'  => microtime(true),
             // Seit 0.8.0 ohne Bedeutung (Fehlversuche stehen in rescue.tries); die Felder bleiben für einen Agent 0.7.x.
             'attempts'      => 0,
             'locked_until'  => 0,
@@ -273,6 +305,31 @@ final class PushRescue
     }
 
     /**
+     * Die Einheiten, die ein Push angefasst hat: die getauschten (pairs) und die, deren Plugin er ein- oder
+     * ausgeschaltet hat (switched, P4). Ein Satz nur aus --deactivate hat keine Paare – ohne das zweite
+     * überholte er nie und würde nie überholt, und eine Rücknahme aktivierte Code, den ein späterer Push
+     * gebracht hat (Security-Review P4 S2). rescue.json ist nicht authentisiert: nur Namen in ihrer Form.
+     *
+     * @param array<string, mixed> $record
+     * @return list<string>
+     */
+    public static function unitsOf(array $record): array
+    {
+        $units = [];
+        foreach ((array) ($record['pairs'] ?? []) as $pair) {
+            if (is_array($pair) && is_string($pair['unit'] ?? null)) {
+                $units[$pair['unit']] = true;
+            }
+        }
+        foreach (is_array($record['switched'] ?? null) ? $record['switched'] : [] as $unit) {
+            if (is_string($unit) && preg_match('#^plugins/[A-Za-z0-9][A-Za-z0-9._-]*\z#', $unit) === 1) {
+                $units[$unit] = true;
+            }
+        }
+        return array_map('strval', array_keys($units));
+    }
+
+    /**
      * Ältere, noch aktive Pushes derselben Einheiten lassen sich erst wieder zurückrollen, wenn
      * dieser hier zurückgerollt ist (U6). Jeder ihrer Datensätze wird nur unter seiner eigenen
      * Sperre geändert (amend()) – nie neben seiner Rücknahme oder seiner Bestätigung.
@@ -284,7 +341,7 @@ final class PushRescue
         foreach (self::others($workDir, $pushId) as $seen) {
             self::amend($workDir, (string) $seen['push_id'], static function (array $record) use ($pushId, $units): ?array {
                 $active = in_array($record['status'], [self::COMMITTED, self::CONFIRMED], true) && $record['superseded_by'] === null;
-                $shared = array_intersect($units, array_column($record['pairs'], 'unit')) !== [];
+                $shared = array_intersect($units, self::unitsOf($record)) !== [];
                 if (!$active || !$shared) {
                     return null;
                 }
@@ -295,7 +352,8 @@ final class PushRescue
     }
 
     /**
-     * Der spätere Push, der diesen überholt hat (U6) – solange er noch getauscht ist. Ein Vermerk,
+     * Der spätere Push, der diesen überholt hat (U6) – solange er noch getauscht ist: der späteste unter
+     * allen, die noch stehen und eine Einheit mit diesem teilen (getauscht oder geschaltet). Ein Vermerk,
      * dessen Push inzwischen zurückgerollt ist oder dessen Datensatz fehlt (zurückgerollt und
      * aufgeräumt), gilt nicht mehr: er kann stehen geblieben sein, weil beim Lösen die Sperre dieses
      * Pushs belegt war (amend()), und sperrte ihn sonst auf Dauer.
@@ -304,12 +362,54 @@ final class PushRescue
      */
     public static function supersededBy(string $workDir, array $record): ?string
     {
+        // Gerechnet, nicht nur nachgeschlagen (Nach-Review NR-2): der Vermerk superseded_by hält einen einzigen
+        // Nachfolger. Sperren muss jeder spätere Push, der noch steht und eine Einheit mit diesem teilt – nur
+        // gelesen, ohne Sperre: ein Push, der eben erst entsteht, vermerkt sich über supersede() selbst.
+        $mine  = self::unitsOf($record);
+        $at    = self::committedAt($record);
+        $found = null;
+        $when  = 0.0;
+        foreach (self::others($workDir, (string) ($record['push_id'] ?? '')) as $other) {
+            $later = self::committedAt($other);
+            if ($later === null || ($at !== null && ($later < $at || ($later === $at && strcmp((string) $other['push_id'], (string) $record['push_id']) <= 0)))) {
+                continue; // ohne Zeit (Datensatz von vor 0.9.0) oder früher: dafür gilt nur der Vermerk unten
+            }
+            if (in_array($other['status'], [self::COMMITTED, self::CONFIRMED], true)) {
+                $theirs = self::unitsOf($other);
+            } elseif ($other['status'] === self::ROLLED_BACK && self::contentOpen($other)) {
+                // rescue.php hat Code und Uploads zurückgenommen, der DB-Anteil steht noch: die Liste trägt
+                // weiter den Stand dieses Pushs (NR-4) – er sperrt für die Einheiten, die er geschaltet hat.
+                $theirs = self::unitsOf(['switched' => $other['switched'] ?? []]);
+            } else {
+                continue;
+            }
+            if (array_intersect($mine, $theirs) !== [] && ($found === null || $later > $when)) {
+                $found = (string) $other['push_id'];
+                $when  = $later;
+            }
+        }
+        if ($found !== null) {
+            return $found;
+        }
         $by = $record['superseded_by'] ?? null;
         if (!is_string($by) || preg_match(self::ID, $by) !== 1) {
             return null;
         }
         $later = self::read($workDir, $by);
         return $later !== null && $later['status'] !== self::ROLLED_BACK ? $by : null;
+    }
+
+    /**
+     * Wann der Commit eines Pushs seinen Datensatz angelegt hat (Unix-Zeit mit Bruchteil); null für einen
+     * Datensatz von vor dieser Version. Auf einer Site läuft immer nur ein Push (Sperre push_lock) – die
+     * Zeiten zweier Datensätze eines Arbeitsordners sind deshalb geordnet.
+     *
+     * @param array<string, mixed> $record
+     */
+    private static function committedAt(array $record): ?float
+    {
+        $at = $record['committed_at'] ?? null;
+        return (is_int($at) || is_float($at)) && $at > 0 ? (float) $at : null;
     }
 
     /**
@@ -607,7 +707,8 @@ final class PushRescue
         } else {
             require_once __DIR__ . '/RescueContent.php';
             RescueContent::load();
-            $result = RescueContent::run($contentDir, $workDir, $pushId, (string) $content['key']);
+            // Nur wenn der Agent „applied“ noch vermerkt hat, steht fest, dass der COMMIT des Pushs ankam (P4, V1).
+            $result = RescueContent::run($contentDir, $workDir, $pushId, (string) $content['key'], ($record['content']['state'] ?? '') === self::CONTENT_APPLIED);
         }
         if ($result['state'] === 'kept') {
             self::setContentFields($workDir, $pushId, ['error' => (string) ($result['error']['code'] ?? 'content_failed')]);
@@ -624,6 +725,10 @@ final class PushRescue
             $fields['left']       = $result['left'];
             $fields['left_total'] = (int) ($result['left_total'] ?? count($result['left']));
         }
+        if (is_array($result['plugins'] ?? null)) {
+            // Was an der Liste geändert wurde: daraus antwortet eine Wiederholung gleich (AC-166).
+            $fields['plugins_back'] = $result['plugins'];
+        }
         self::setContentFields($workDir, $pushId, $fields);
         // Der Umschlag hat ausgedient (R14) – erst jetzt: stirbt PHP davor, findet die Wiederholung ihn noch.
         $sealed = $workDir . '/' . $pushId . '/rescue.sealed';
@@ -634,8 +739,10 @@ final class PushRescue
     }
 
     /**
-     * Die Antwort einer gelungenen Rücknahme (P3 §7.6). content nur, wenn der Push einen DB-Anteil
-     * hat und der Aufrufer ihn verlangt hat; sonst wie bisher die Warnung, solange er offen ist.
+     * Die Antwort einer gelungenen Rücknahme (P3 §7.6, P4 §4.4). content nur, wenn der Push einen
+     * DB-Anteil hat und der Aufrufer ihn verlangt hat; sonst wie bisher die Warnung, solange er offen
+     * ist. Hatte der Push einen Plugin-Zustand: plugins – was an der Liste geändert wurde –, oder,
+     * solange der DB-Anteil steht, plugins_not_restored mit den Einträgen des Pushs (A18).
      *
      * @param array<string, mixed>      $record
      * @param array<string, mixed>|null $result Ausgang von Schritt 6 in diesem Aufruf; null: lief nicht
@@ -653,6 +760,15 @@ final class PushRescue
                 $error           = is_array($result['error'] ?? null) ? $result['error'] : ['code' => is_string($stored['error'] ?? null) ? $stored['error'] : 'content_failed'];
                 $body['content'] = ['state' => 'kept', 'error' => $error];
             }
+            if (is_array($stored['plugins'] ?? null)) {
+                $warnings[]                   = self::PLUGINS_NOT_RESTORED;
+                $body['plugins_not_restored'] = self::pluginLists($stored['plugins'], ['added', 'removed']);
+                if (($stored['state'] ?? '') === self::CONTENT_PENDING) {
+                    // Der Commit hat „applied“ nie vermerkt: was er an der Liste geändert hat, steht hier nicht.
+                    // Leere Listen heissen dann „unbekannt“, nicht „nichts“ (Security-Review P4 S6).
+                    $body['plugins_not_restored']['unknown'] = true;
+                }
+            }
         } elseif (is_array($stored) && $want) {
             $content = ['state' => ($result['state'] ?? '') === 'nothing' ? 'nothing' : self::CONTENT_DONE];
             if (is_string($stored['cache'] ?? null)) {
@@ -664,6 +780,9 @@ final class PushRescue
                 $warnings[]            = self::CONTENT_LEFT;
             }
             $body['content'] = $content;
+            if (is_array($stored['plugins_back'] ?? null)) {
+                $body['plugins'] = self::pluginLists($stored['plugins_back'], ['deactivated', 'reactivated']);
+            }
         }
         if ($warnings !== []) {
             $body['warnings'] = $warnings;
@@ -672,6 +791,58 @@ final class PushRescue
             $body['kept'] = $kept;
         }
         return $body;
+    }
+
+    /**
+     * Listen von Plugin-Einträgen aus rescue.json für eine Antwort oder das Protokoll. Der Datensatz
+     * ist nicht authentisiert (wer im Arbeitsordner schreiben kann, kann ihn ändern): hinaus geht nur,
+     * was die Form eines Eintrags hat, je höchstens 100 – und geschrieben wird nie daraus. Weicht die Zahl
+     * der Einträge einer Liste von dem ab, was hinausgeht, steht sie als <liste>_total daneben.
+     *
+     * @param array<string, mixed> $raw
+     * @param list<string>         $sides Namen der Listen
+     * @return array<string, list<string>|int>
+     */
+    public static function pluginLists(array $raw, array $sides): array
+    {
+        $out = [];
+        foreach ($sides as $side) {
+            $list       = is_array($raw[$side] ?? null) ? $raw[$side] : [];
+            $out[$side] = [];
+            foreach ($list as $entry) {
+                if (count($out[$side]) < 100 && self::pluginEntry($entry)) {
+                    $out[$side][] = $entry;
+                }
+            }
+        }
+        // Was nicht hinausging (keine Form, über 100), zählt: eine Liste ist nie still unvollständig.
+        foreach ($sides as $side) {
+            $total = count(is_array($raw[$side] ?? null) ? $raw[$side] : []);
+            if ($total !== count($out[$side])) {
+                $out[$side . '_total'] = min($total, 1 << 20);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Hat ein Eintrag die Form, die der Agent schaltet und nennt? <slug>/<pfad>.php, höchstens 255 Bytes,
+     * gültiges UTF-8, kein leeres Segment, kein „.“ und kein „..“. Ohne eine weitere Klasse – diese hier
+     * ist geladen, bevor rescue.php einen Schlüssel geprüft hat.
+     *
+     * @param mixed $entry
+     */
+    public static function pluginEntry($entry): bool
+    {
+        if (!is_string($entry) || strlen($entry) > 255 || preg_match('//u', $entry) !== 1 || preg_match(self::PLUGIN_ENTRY, $entry) !== 1) {
+            return false;
+        }
+        foreach (explode('/', $entry) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

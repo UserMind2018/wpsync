@@ -37,7 +37,12 @@ type ContentError struct {
 	Message string
 	Keys    []agentapi.ContentKey
 	Paths   []string
-	Err     error // the agent's answer, if it was one
+	// Total: how many keys the refusal is about (Keys holds at most 200). StateBytes: the size of the
+	// rows the package meets (package_too_large). Tables: the tables that are not InnoDB (engine_unsupported).
+	Total      int
+	StateBytes int64
+	Tables     []string
+	Err        error // the agent's answer, if it was one
 }
 
 func (e *ContentError) Error() string {
@@ -75,7 +80,7 @@ func invalidPackage(format string, args ...any) *ContentError {
 
 // contentFailure turns the refusal inside a dry run's answer into the error.
 func contentFailure(f *agentapi.ContentFailure) *ContentError {
-	return &ContentError{Reason: f.Code, Message: f.Message, Keys: f.Keys, Paths: f.Paths}
+	return &ContentError{Reason: f.Code, Message: f.Message, Keys: f.Keys, Paths: f.Paths, Total: f.Total, StateBytes: f.StateBytes, Tables: f.Tables}
 }
 
 // contentError ties a refusal of the agent's content channel (code wpsync_content_<reason>) to a
@@ -89,7 +94,8 @@ func contentError(err error) error {
 	if !ok || reason == "stage" || reason == "offset" || reason == "size" || reason == "hash" || reason == "store" {
 		return err // the transport of the package, not a verdict on it
 	}
-	return &ContentError{Reason: reason, Message: apiErr.Message, Keys: apiErr.Keys, Paths: apiErr.Paths, Err: err}
+	return &ContentError{Reason: reason, Message: apiErr.Message, Keys: apiErr.Keys, Paths: apiErr.Paths,
+		Total: apiErr.Total, StateBytes: apiErr.StateBytes, Tables: apiErr.Tables, Err: err}
 }
 
 // PackageHead is what the CLI reads of the head line; the agent checks all of it.

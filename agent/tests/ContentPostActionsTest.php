@@ -171,6 +171,103 @@ final class ContentPostActionsTest extends TestCase
         $this->assertSame([], $none);
         exec('rm -rf ' . escapeshellarg($dir));
     }
+
+    /** P4 A15, AC-193: hat ein Push active_plugins geändert, gehen die Option aus dem Object-Cache, der Plugin-Cache und die Rewrite-Regeln. */
+    public function testAChangedPluginListClearsItsCaches(): void
+    {
+        $changes = [
+            'posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => true,
+            'plugins' => ['added' => ['kunde/kunde.php'], 'removed' => [], 'h' => str_repeat('a', 64)],
+        ];
+        $this->assertSame([
+            ['step' => 'object_cache', 'ok' => true],
+            ['step' => 'plugins_cache', 'ok' => true],
+            ['step' => 'rewrite_rules', 'ok' => true],
+        ], ContentPostActions::live($changes, $this->db, 'wp_yoast_indexable'));
+        $this->assertSame([
+            'wp_cache_delete ["active_plugins","options"]',
+            'wp_cache_delete ["alloptions","options"]',
+            'wp_cache_delete ["notoptions","options"]',
+            'wp_cache_delete ["plugins","plugins"]',
+            'delete_option ["rewrite_rules"]',
+        ], $this->calls());
+        $this->assertSame([], $this->db->queries);
+
+        // Ein Fehlschlag steht in post_actions und hält nichts auf.
+        $GLOBALS['wpsync_post_actions']      = [];
+        $GLOBALS['wpsync_post_actions_fail'] = ['wp_cache_delete'];
+        $this->assertSame([
+            ['step' => 'object_cache', 'ok' => false],
+            ['step' => 'plugins_cache', 'ok' => false],
+            ['step' => 'rewrite_rules', 'ok' => true],
+        ], ContentPostActions::live($changes, $this->db, ''));
+        $GLOBALS['wpsync_post_actions_fail'] = [];
+
+        // In der Kopie gibt es weder Object-Cache noch Plugin-Cache: dort nur die Rewrite-Regeln, per SQL.
+        $store = new ContentMemory(['options' => ['rewrite_rules' => ['option_id' => '9', 'option_name' => 'rewrite_rules', 'option_value' => 'a:0:{}', 'autoload' => 'yes']]]);
+        $this->assertSame([['step' => 'rewrite_rules', 'ok' => true]], ContentPostActions::staging($changes, $store, $this->db, '', '', false));
+        $this->assertArrayNotHasKey('rewrite_rules', $store->data['options']);
+    }
+
+    /**
+     * Security-Review P4 S4: die Liste geht per SQL am Object-Cache vorbei. Hält ein persistenter Cache
+     * nach den Nacharbeiten noch den alten Stand (alloptions), lädt WordPress die neue Liste erst später –
+     * am Health-Check vorbei. Der Agent liest deshalb zurück, was WordPress als Nächstes lädt, und meldet
+     * eine Abweichung als gescheiterten Schritt plugins_effective.
+     */
+    public function testTheStepPluginsEffectiveReadsBackWhatWordPressWillLoad(): void
+    {
+        $changes = [
+            'posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => false,
+            'plugins' => ['added' => ['kunde/kunde.php'], 'removed' => ['old/old.php'], 'h' => str_repeat('a', 64)],
+            'plugins_expect' => ['present' => ['kunde/kunde.php'], 'absent' => ['old/old.php']],
+        ];
+        $steps = static function () use ($changes): array {
+            return array_column(ContentPostActions::live($changes, $GLOBALS['wpdb'], ''), 'ok', 'step');
+        };
+        $GLOBALS['wpdb'] = $this->db;
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['akismet/akismet.php', 'kunde/kunde.php'])];
+        $this->assertSame(['object_cache' => true, 'plugins_cache' => true, 'plugins_effective' => true], $steps());
+        // Der Cache hält noch den Stand vor dem Push: das neue Plugin fehlt, das abgeschaltete steht noch da.
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['akismet/akismet.php', 'old/old.php'])];
+        $this->assertSame(['object_cache' => true, 'plugins_cache' => true, 'plugins_effective' => false], $steps());
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => 'kaputt'];
+        $this->assertFalse($steps()['plugins_effective']);
+        // Nach-Review NR-3: mit einer Erwartung fehlt der Schritt nie. Steht die Option nicht in alloptions
+        // (autoload aus), zählt, was WordPress dann liest: der Cache der einzelnen Option, sonst die Zeile der Datenbank.
+        $GLOBALS['wpsync_alloptions'] = [];
+        $GLOBALS['wpsync_cache']      = ['options' => ['active_plugins' => serialize(['kunde/kunde.php'])]];
+        $this->assertTrue($steps()['plugins_effective'], 'aus dem Cache der Option');
+        $GLOBALS['wpsync_cache'] = ['options' => ['active_plugins' => ['old/old.php']]];
+        $this->assertFalse($steps()['plugins_effective'], 'der Cache hält den alten Stand');
+        $GLOBALS['wpsync_cache'] = [];
+        $good = serialize(['kunde/kunde.php']);
+        $this->db->answer('/^SELECT option_value FROM wp_options WHERE option_name = \'active_plugins\'/', $good, serialize(['old/old.php']), '');
+        $this->assertTrue($steps()['plugins_effective'], 'aus der Zeile der Datenbank');
+        $this->assertFalse($steps()['plugins_effective'], 'die Zeile trägt den alten Stand');
+        // Die Option steht als „gibt es nicht“ im Cache: WordPress lüde gar kein Plugin – die Zeile wird dann nicht einmal gefragt.
+        $GLOBALS['wpsync_cache'] = ['options' => ['notoptions' => ['active_plugins' => true]]];
+        $this->assertFalse($steps()['plugins_effective']);
+        $GLOBALS['wpsync_cache'] = [];
+        $this->assertFalse($steps()['plugins_effective'], 'nichts lesbar: nicht geprüft ist nicht bestanden');
+        // Ohne Erwartung (der Push hat nichts geschaltet, oder kein Plugin-Zustand): kein Schritt.
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['kunde/kunde.php'])];
+        unset($changes['plugins_expect']);
+        $this->assertArrayNotHasKey('plugins_effective', array_column(ContentPostActions::live($changes, $this->db, ''), 'ok', 'step'));
+        // In der Kopie gibt es keinen Object-Cache: kein Schritt.
+        $changes['plugins_expect'] = ['present' => ['kunde/kunde.php'], 'absent' => []];
+        $store = new ContentMemory();
+        $this->assertNotContains('plugins_effective', array_column(ContentPostActions::staging($changes, $store, $this->db, '', '', false), 'step'));
+        unset($GLOBALS['wpsync_alloptions']);
+    }
+
+    /** Ein Satz, der an der Liste nichts geändert hat (A11), löst keinen der Schritte aus. */
+    public function testAnUnchangedPluginListNeedsNoPluginSteps(): void
+    {
+        $changes = ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => [], 'rewrite' => false, 'plugins' => ['added' => [], 'removed' => [], 'h' => null]];
+        $this->assertSame([['step' => 'object_cache', 'ok' => true]], ContentPostActions::live($changes, $this->db, ''));
+        $this->assertNotContains('wp_cache_delete ["plugins","plugins"]', $this->calls());
+    }
 }
 
 /** Nur was dieser Test braucht – ContentFixtures.php zieht Klassen nach, die hier nicht geladen sind. */

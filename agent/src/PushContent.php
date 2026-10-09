@@ -453,32 +453,38 @@ final class PushContent
     }
 
     /**
-     * Wendet das Paket eines Pushs an – der letzte Schritt des Commits (§7.3).
+     * Der DB-Schritt eines Pushs – der letzte Schritt des Commits (§7.3): das Paket anwenden, den
+     * Plugin-Zustand schreiben, oder beides in einer Transaktion (Spec Content-Push P4 A7).
      *
+     * @param string|null             $file    das Paket des Pushs; null: der Satz hat keins
      * @param string                  $pushDir Arbeitsordner des Pushs
      * @param (callable(): bool)|null $gate    Naht vor COMMIT (ContentApply::run())
-     * @return array{rows: int, after: list<array<string, mixed>>, changes: array<string, mixed>, seconds: float}
+     * @param array{add: list<string>, drop: list<string>}|null $plugins der Plugin-Zustand (PushPlugins::check()); null: keiner
+     * @return array{rows: int, after: list<array<string, mixed>>, changes: array<string, mixed>, seconds: float, plugins?: array{added: list<string>, removed: list<string>}}
      * @throws ContentException
      */
-    public static function apply(string $file, string $name, string $content, string $pushDir, ?int $author, ?callable $gate = null): array
+    public static function apply(?string $file, string $name, string $content, string $pushDir, ?int $author, ?callable $gate = null, ?array $plugins = null): array
     {
         $started           = microtime(true);
         $now               = time();
         $local             = function_exists('wp_date') ? (string) wp_date('Y-m-d H:i:s', $now) : gmdate('Y-m-d H:i:s', $now);
-        $result            = ContentApply::run(ContentPackage::read($file), self::target($name, $content), $pushDir . '/' . self::UNIT, $author, $now, $local, $gate);
+        $package           = $file === null ? null : ContentPackage::read($file);
+        $result            = ContentApply::run($package, self::target($name, $content), $pushDir . '/' . self::UNIT, $author, $now, $local, $gate, $plugins);
         $result['seconds'] = round(microtime(true) - $started, 3);
         return $result;
     }
 
     /**
-     * Nimmt den DB-Anteil eines Pushs zurück (§7.6).
+     * Nimmt den DB-Anteil eines Pushs zurück (§7.6) – Zeilen des Pakets und Plugin-Zustand.
      *
-     * @return array{state: string, changes: array<string, mixed>|null}
+     * @param bool $landed rescue.json sagt content.state = applied: der COMMIT des Pushs kam an. Sonst zählt
+     *                     für active_plugins der Abdruck statt des Deltas (ContentRollback::run())
+     * @return array{state: string, changes: array<string, mixed>|null, plugins?: array{deactivated: list<string>, reactivated: list<string>}}
      * @throws ContentException changed_since_push: nichts wurde zurückgenommen
      */
-    public static function rollback(string $name, string $content, string $pushDir): array
+    public static function rollback(string $name, string $content, string $pushDir, bool $landed = true): array
     {
-        return ContentRollback::run(self::target($name, $content), $pushDir . '/' . self::UNIT);
+        return ContentRollback::run(self::target($name, $content), $pushDir . '/' . self::UNIT, false, $landed);
     }
 
     /**

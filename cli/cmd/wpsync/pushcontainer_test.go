@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -346,4 +347,139 @@ func TestPushTakesTheFlagRequireRescueDB(t *testing.T) {
 	}
 	res = runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "--require-rescue-dbx", "--dry-run", "--json")...)
 	lastResult(t, res, "push", cliout.ExitUsage)
+}
+
+// AC-206: --activate und --deactivate sind Flags von push, auch im Container-Modus. Ein
+// falscher Schalter ist Exit 2, bevor die Site gefragt wird; ein richtiger ist kein Aufruffehler.
+func TestPushTakesThePluginSwitches(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	bad := filepath.Join(t.TempDir(), "package.jsonl")
+	os.WriteFile(bad, []byte("kein paket\n"), 0o644)
+	run := func(args ...string) result {
+		return runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, append([]string{"push", "kunde", "code"}, args...)...)...)
+	}
+	for _, wrong := range [][]string{
+		{"--activate", "themes/x", "--dry-run", "--json"},
+		{"--deactivate", "plugins/wpsync-agent", "--dry-run", "--json"},
+		{"--deactivate", "mu-plugins", "--dry-run", "--json"},
+		{"--activate", "plugins/a", "--deactivate", "plugins/a", "--dry-run", "--json"},
+		{"--no-code", "--content", bad, "--activate", "plugins/a", "--dry-run", "--json"},
+		{"--no-code", "--dry-run", "--json"},
+	} {
+		lastResult(t, run(wrong...), "push", cliout.ExitUsage)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("routes = %v", f.routes)
+	}
+	// Richtige Schalter werden angenommen: abgelehnt wird das Paket (Exit 1), nicht der Aufruf.
+	m := lastResult(t, run("--no-code", "--content", bad, "--deactivate", "plugins/alt,plugins/b", "--dry-run", "--json"), "push", cliout.ExitUnknown)
+	if e := m["error"].(map[string]any); e["reason"] != "package_invalid" {
+		t.Errorf("error = %v", e)
+	}
+}
+
+// pluginsBegin is the answer of an agent 0.9.0 to a begin that only deactivates plugins/alt.
+func pluginsBegin(plugins, rescueDB string) string {
+	return `{"push_id":"","target":"live","agent_version":"0.9.0","health_urls":[],"window_open":true,"pending":null,"units":[],
+"rescue":{"url":"","salt":"","db":` + rescueDB + `},"plugins":` + plugins + `}`
+}
+
+const planDeactivate = `{"ok":true,"error":null,"activate":[],
+"deactivate":[{"unit":"plugins/alt","state":"active","files":["alt/alt.php"],"name":"Altes Plugin","version":"3.2.1","required_by":[],"hooks":true}],
+"warnings":["deactivation_review"],"health_urls":[]}`
+
+// Ergänzt beim Umsetzen (nicht im Plan), AC-196, V10: gegen einen Agent unter 0.9.0 ist ein Push mit
+// Plugin-Schaltern Exit 11 mit required 0.9.0 – auch im Container-Modus, und mit --content ohne dass
+// das Paket abgelegt wurde.
+func TestPushContainerRefusesAnOldAgentForPluginSwitches(t *testing.T) {
+	f, docroot := containerPushSite(t) // der Fake ist ein Agent 0.5.0 und nennt kein plugins
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "plugins/x", "--deactivate", "plugins/alt", "--dry-run", "--json")...)
+	m := lastResult(t, res, "push", cliout.ExitAgentOutdated)
+	if e := m["error"].(map[string]any); e["required"] != "0.9.0" || !strings.Contains(fmt.Sprint(e["message"]), "Agent 0.9.0 installieren") {
+		t.Errorf("error = %v", e)
+	}
+	if f.called("push/begin") != 1 || f.called("push/upload") != 0 || f.called("content/stage") != 0 {
+		t.Errorf("routes = %v", f.routes)
+	}
+}
+
+// Ergänzt, A22: im Container-Modus fragt niemand – ein Push, der ein Plugin abschaltet, braucht
+// --yes; ohne ist es Exit 2 nach dem Probelauf, und nichts wurde angelegt. Der Plan des Probelaufs
+// steht trotzdem als Ereignis da, samt Warnung und den Routinen, die nicht laufen.
+func TestPushContainerDeactivationNeedsYes(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	f.begin = pluginsBegin(planDeactivate, `{"ok":true}`)
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\nj\n", cargs(docroot, "push", "kunde", "code", "--no-code", "--deactivate", "plugins/alt", "--json")...)
+	m := lastResult(t, res, "push", cliout.ExitUsage)
+	if !strings.Contains(fmt.Sprint(m["error"].(map[string]any)["message"]), "--yes") {
+		t.Errorf("error = %v", m["error"])
+	}
+	if f.called("push/begin") != 1 {
+		t.Errorf("only the dry run reached the site: %v", f.routes)
+	}
+	plan := jsonLines(t, res.stdout)[0]["data"].(map[string]any)
+	plugins := plan["plugins"].(map[string]any)
+	off := plugins["deactivate"].([]any)[0].(map[string]any)
+	if off["unit"] != "plugins/alt" || off["name"] != "Altes Plugin" || off["state"] != "active" || fmt.Sprint(plugins["warnings"]) != "[deactivation_review]" {
+		t.Errorf("plan.plugins = %v", plugins)
+	}
+	if hooks := plan["hooks_skipped"].(map[string]any); fmt.Sprint(hooks["deactivate"]) != "[plugins/alt]" || fmt.Sprint(hooks["activate"]) != "[]" {
+		t.Errorf("plan.hooks_skipped = %v", plan["hooks_skipped"])
+	}
+	if d := m["data"].(map[string]any); fmt.Sprint(d["warnings"]) != "[deactivation_review]" || fmt.Sprint(d["units"]) != "[]" {
+		t.Errorf("data = %v", d)
+	}
+	// Ohne --json dasselbe: Exit 2, die Frage wird nie gestellt.
+	res = runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\nj\n", cargs(docroot, "push", "kunde", "code", "--no-code", "--deactivate", "plugins/alt")...)
+	if res.code != cliout.ExitUsage || !strings.Contains(res.stdout+res.stderr, "--yes") || strings.Contains(res.stdout, "[j/N]") {
+		t.Errorf("exit %d\n%s%s", res.code, res.stdout, res.stderr)
+	}
+}
+
+// Ergänzt, §4.5: die JSON-Form einer Ablehnung – error.reason, error.plugins, error.detail.
+func TestPushContainerPluginRefusalsInJSON(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	run := func() map[string]any {
+		t.Helper()
+		res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "--no-code", "--deactivate", "plugins/alt", "--yes", "--json")...)
+		return lastResult(t, res, "push", cliout.ExitUnknown)["error"].(map[string]any)
+	}
+	f.begin = pluginsBegin(`{"ok":false,"error":{"code":"plugins_requirements","message":"Voraussetzungen nicht erfüllt: plugins/alt",
+"plugins":[{"unit":"plugins/alt","why":"required_by","needs":"plugins/addon","has":""}]},"activate":[],
+"deactivate":[{"unit":"plugins/alt","state":"active","files":["alt/alt.php"],"name":null,"version":null,"required_by":["plugins/addon"],"hooks":false}],
+"warnings":["deactivation_review"],"health_urls":[]}`, `{"ok":true}`)
+	e := run()
+	if e["reason"] != "plugins_requirements" || e["code"] != "unknown" {
+		t.Errorf("error = %v", e)
+	}
+	if got, _ := json.Marshal(e["plugins"]); string(got) != `[{"needs":"plugins/addon","unit":"plugins/alt","why":"required_by"}]` {
+		t.Errorf("error.plugins = %s", got)
+	}
+	if _, has := e["detail"]; has {
+		t.Errorf("error.detail = %v", e["detail"])
+	}
+	// Ohne Umschlag: rescue_db_unavailable mit dem Grund des Agents als detail – nach dem Probelauf, ohne echten Begin.
+	f.begin = pluginsBegin(planDeactivate, `{"ok":false,"reason":"no_image_key"}`)
+	f.routes = nil
+	e = run()
+	if e["reason"] != "rescue_db_unavailable" || e["detail"] != "no_image_key" || !strings.Contains(fmt.Sprint(e["message"]), "ein Push, der Plugins schaltet") {
+		t.Errorf("error = %v", e)
+	}
+	if f.called("push/begin") != 1 {
+		t.Errorf("routes = %v", f.routes)
+	}
+}
+
+// Ergänzt, V18: wpsync rollback nennt in data, was die Rücknahme an der Liste geändert hat.
+func TestRollbackContainerNamesThePluginsBack(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	f.rbBody = `{"ok":true,"status":"rolled_back","plugins":{"deactivated":["kunde/kunde.php","../x.php"],"reactivated":["alt/alt.php"]},"post_actions":[{"step":"plugins_cache","ok":true}]}`
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "rollback", "kunde", testPushID, "--json")...)
+	d := lastResult(t, res, "rollback", 0)["data"].(map[string]any)
+	if got, _ := json.Marshal(d["plugins_back"]); string(got) != `{"deactivated":["kunde/kunde.php"],"deactivated_total":2,"reactivated":["alt/alt.php"]}` {
+		t.Errorf("data.plugins_back = %s", got)
+	}
+	if _, has := d["plugins_not_restored"]; has || d["via"] != "agent" {
+		t.Errorf("data = %v", d)
+	}
 }

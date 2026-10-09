@@ -57,6 +57,30 @@ final class ContentPostActions
             wp_cache_delete('alloptions', 'options');
             wp_cache_delete('notoptions', 'options');
         });
+        if (in_array(ContentPlugins::OPTION, $options, true)) {
+            // Der Push hat die Liste der aktiven Plugins geändert (P4 A15): was get_plugins() sich gemerkt hat,
+            // gilt nicht mehr. Im Core ist die Gruppe nicht persistent – der Schritt ist für Drop-ins, die das
+            // nicht beachten. Die Option selbst samt alloptions hat object_cache eben geleert.
+            self::step($steps, 'plugins_cache', static function (): void {
+                wp_cache_delete('plugins', 'plugins');
+            });
+        }
+        // Die Liste ging per SQL am Object-Cache vorbei; wirksam wird sie erst, wenn WordPress sie neu liest.
+        // Zurücklesen, was der nächste Request laden wird (alloptions – ohne die Filter von get_option()): hält
+        // ein persistenter Cache noch den alten Stand, prüfte der Health-Check die falsche Liste, und die neue
+        // griffe später ohne Notfallweg (Security-Review P4 S4). Der Aufrufer nennt, was jetzt gelten muss.
+        $expect = is_array($changes['plugins_expect'] ?? null) ? $changes['plugins_expect'] : null;
+        if ($expect !== null) {
+            $present = array_values(array_filter((array) ($expect['present'] ?? []), 'is_string'));
+            $absent  = array_values(array_filter((array) ($expect['absent'] ?? []), 'is_string'));
+            if ($present !== [] || $absent !== []) {
+                // Mit einer Erwartung fehlt der Schritt nie (Nach-Review NR-3): „nicht geprüft“ ist nicht „bestanden“.
+                self::step($steps, 'plugins_effective', static function () use ($db, $present, $absent): bool {
+                    $list = self::effectivePlugins($db);
+                    return $list !== null && ContentPlugins::settled($list, $present, $absent);
+                });
+            }
+        }
         if (class_exists('\Elementor\Plugin', false)) {
             self::step($steps, 'elementor_css', static function (): void {
                 \Elementor\Plugin::$instance->files_manager->clear_cache();
@@ -204,6 +228,46 @@ final class ContentPostActions
             }
         }
         return true;
+    }
+
+    /**
+     * Die Liste der aktiven Plugins, wie WordPress sie im nächsten Request liest – am Zustand der Caches
+     * vorbei, die dieser Request eben geleert hat: alloptions (frisch aus dem persistenten Cache, ohne die
+     * Filter von get_option()); steht die Option dort nicht (autoload aus), ihr eigener Cache-Eintrag, sonst
+     * die Zeile der Datenbank – ausser der Cache führt sie als „gibt es nicht“ (notoptions). null: nicht
+     * lesbar, keine Liste.
+     *
+     * @param object $db
+     * @return list<string>|null
+     */
+    private static function effectivePlugins($db): ?array
+    {
+        $name = ContentPlugins::OPTION;
+        $raw  = null;
+        $all  = function_exists('wp_load_alloptions') ? wp_load_alloptions(true) : [];
+        if (is_array($all) && array_key_exists($name, $all)) {
+            $raw = $all[$name];
+        } elseif (function_exists('wp_cache_get')) {
+            $not = wp_cache_get('notoptions', 'options', true);
+            if (is_array($not) && isset($not[$name])) {
+                return null;
+            }
+            $raw = wp_cache_get($name, 'options', true);
+            if ($raw === false) {
+                $raw = $db->get_var($db->prepare('SELECT option_value FROM ' . $db->options . ' WHERE option_name = %s LIMIT 1', $name));
+            }
+        }
+        if (is_array($raw)) {
+            $list = [];
+            foreach ($raw as $entry) {
+                if (!is_string($entry)) {
+                    return null;
+                }
+                $list[] = $entry;
+            }
+            return $list;
+        }
+        return ContentPlugins::parse($raw);
     }
 
     /**

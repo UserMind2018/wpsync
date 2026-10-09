@@ -41,6 +41,16 @@ type APIError struct {
 	// the error data of the agent. Never values of rows.
 	Keys  []ContentKey
 	Paths []string
+	// Total, StateBytes, Tables: what such a refusal names beyond that – how many keys there are (Keys
+	// holds at most 200), the size of the rows a package meets (package_too_large) and the tables
+	// that are not InnoDB (engine_unsupported).
+	Total      int
+	StateBytes int64
+	Tables     []string
+	// Plugins and Detail: details of a refusal of the plugin state (code wpsync_plugins_…): the units
+	// it is about, and – without a rescue envelope – why there is none. Never a value of the option.
+	Plugins []PluginRefusal
+	Detail  string
 }
 
 func (e *APIError) Error() string {
@@ -144,10 +154,76 @@ func (c *Client) PostJSON(route string, body, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	// After decompression: a small gzip answer of a hostile site can unpack to anything.
+	limit := jsonLimit(route)
+	if err := json.NewDecoder(&boundedReader{r: resp.Body, left: limit}).Decode(out); err != nil {
+		if errors.Is(err, ErrAnswerTooLarge) {
+			return fmt.Errorf("%s: %w (mehr als %d MiB)", route, ErrAnswerTooLarge, limit>>20)
+		}
 		return fmt.Errorf("decode %s: %w", route, err)
 	}
 	return nil
+}
+
+// MaxJSONBytes bounds one JSON answer of the agent, counted after decompression (Security-Review P4
+// S5, NR-5): plans of small sets, lists, confirmations, status. json.Decoder keeps the whole value in
+// memory, and the CLI also runs in containers with a few hundred MB – so the bound is small, and only
+// the routes with large legitimate answers get more (jsonLimits). Files, tables and the content
+// manifest are streamed by their own readers and are not bounded here.
+var MaxJSONBytes int64 = 16 << 20
+
+// jsonLimits are the routes whose answer may legitimately be larger than MaxJSONBytes:
+//   - /delta names every file of the profile a page of the walk reaches within the agent's time
+//     budget, roughly 150 bytes each – a fast server lists some hundred thousand in one page;
+//   - /infosheet is the whole inventory (tables, plugins, themes, upload folders, findings);
+//   - /push/begin and /push/commit name every file of the pushed units (need, conflicts, stamps),
+//     about 100 bytes each.
+var jsonLimits = map[string]int64{
+	"/wpsync/v1/delta":       256 << 20,
+	"/wpsync/v1/infosheet":   64 << 20,
+	"/wpsync/v1/push/begin":  64 << 20,
+	"/wpsync/v1/push/commit": 64 << 20,
+}
+
+// jsonLimit is the bound for the JSON answer of one route.
+func jsonLimit(route string) int64 {
+	if limit, ok := jsonLimits[route]; ok {
+		return limit
+	}
+	return MaxJSONBytes
+}
+
+// smallAnswerBytes bounds the answers of the two unsigned requests, discover and pair.
+const smallAnswerBytes = 1 << 20
+
+// ErrAnswerTooLarge: a JSON answer of the site is larger than MaxJSONBytes. Nothing of it was used.
+var ErrAnswerTooLarge = errors.New("die Antwort der Site ist grösser, als wpsync für diese Abfrage annimmt")
+
+// boundedReader reads at most left bytes and fails beyond – it never ends quietly like
+// io.LimitReader, which would let a cut answer pass as a complete one.
+type boundedReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (b *boundedReader) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		// Only a byte beyond the bound is too much: an answer of exactly the bound ends with EOF here.
+		var one [1]byte
+		if n, err := b.r.Read(one[:]); n == 0 {
+			if err == nil {
+				err = io.ErrNoProgress
+			}
+			return 0, err
+		}
+		return 0, ErrAnswerTooLarge
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.r.Read(p)
+	b.left -= int64(n)
+	return n, err
 }
 
 func (c *Client) ctx() context.Context {
@@ -231,8 +307,13 @@ func readAPIError(resp *http.Response) error {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
-			Keys  []ContentKey `json:"keys"`
-			Paths []string     `json:"paths"`
+			Keys       []ContentKey    `json:"keys"`
+			Paths      []string        `json:"paths"`
+			Total      int             `json:"total"`
+			StateBytes int64           `json:"state_bytes"`
+			Tables     []string        `json:"tables"`
+			Plugins    []PluginRefusal `json:"plugins"`
+			Detail     string          `json:"detail"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
@@ -241,6 +322,15 @@ func readAPIError(resp *http.Response) error {
 			e.Keys = CleanKeys(wpErr.Data.Keys)
 			if e.Paths = wpErr.Data.Paths; len(e.Paths) > maxContentKeys {
 				e.Paths = e.Paths[:maxContentKeys]
+			}
+			e.Total, e.StateBytes, e.Tables = cleanRefusalNumbers(wpErr.Data.Total, len(e.Keys), wpErr.Data.StateBytes, wpErr.Data.Tables)
+		}
+		if strings.HasPrefix(e.Code, PluginsCodePrefix) {
+			e.Plugins = cleanRefusals(wpErr.Data.Plugins)
+			if wpErr.Data.Detail != "" {
+				if e.Detail = wpErr.Data.Detail; !stepRe.MatchString(e.Detail) {
+					e.Detail = "unknown"
+				}
 			}
 		}
 		return e

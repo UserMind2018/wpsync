@@ -59,6 +59,12 @@ type Options struct {
 	// the content back without WordPress (Spec Content-Push P3 R12); without it such a push goes out
 	// with the warning rescue_db_unavailable.
 	RequireRescueDB bool
+	// Activate and Deactivate (--activate, --deactivate): plugins to switch in the same set, as units
+	// "plugins/<slug>" (Spec Content-Push P4 §4.1). A unit to activate always becomes part of the set,
+	// changed or not – the agent activates only code the same push checked (A3). One to deactivate
+	// needs neither the set nor a local folder (A20). Such a push needs the rescue envelope (A9):
+	// RequireRescueDB is implied.
+	Activate, Deactivate []string
 
 	// Target: live or staging. Empty means live for a push; for a rollback it means "not named":
 	// without a push ID the newest live push, with one the target of that push (V10).
@@ -110,6 +116,14 @@ type Result struct {
 	// Content: what the agent applied of the package – while it stands on the site. Omitted
 	// without content, in a dry run and once the push is rolled back.
 	Content *ContentReport `json:"content,omitempty"`
+	// Plugins: what the push switched – while it stands on the site. Omitted without a plugin state,
+	// in a dry run and once the push is rolled back (Spec Content-Push P4 §4.5).
+	Plugins *PluginsReport `json:"plugins,omitempty"`
+	// PluginsBack: what a rollback changed in the list of active plugins – entries, as the agent
+	// names them. PluginsNotRestored: the database part of the push stayed on the site (rescue.php,
+	// A18); what of the push still stands in the list.
+	PluginsBack        *agentapi.RollbackPlugins `json:"plugins_back,omitempty"`
+	PluginsNotRestored *agentapi.PluginsKept     `json:"plugins_not_restored,omitempty"`
 	// Via: how a rollback happened – "agent" (through WordPress) or "rescue" (rescue.php, without
 	// it). Omitted when nothing was rolled back (Spec Content-Push P3 §9).
 	Via string `json:"via,omitempty"`
@@ -257,21 +271,33 @@ type RolledBackError struct {
 	PostActions []agentapi.PostAction
 	// Via: "agent" or "rescue". Content: what became of the content of the push – "" without
 	// content, "rolled_back" or "nothing" when it is back, "kept" when it still stands; then
-	// ContentError is the reason rescue.php named, if any (Spec Content-Push P3 §9).
+	// ContentError is the reason rescue.php named, if any (Spec Content-Push P3 §9). For a push that
+	// only switches plugins it tells the same about the database part.
 	Via          string
 	Content      string
 	ContentError *ContentErrorReport
 	// ContentLeft: what rescue.php left on inserted objects (R15).
 	ContentLeft      []agentapi.ContentKey
 	ContentLeftTotal int
+	// Plugins: what the rollback changed in the list of active plugins; PluginsNotRestored: what
+	// of the push still stands there because the database part stayed (Content "kept").
+	Plugins            *agentapi.RollbackPlugins
+	PluginsNotRestored *agentapi.PluginsKept
 }
 
-// RescueDBError: --require-rescue-db, and rescue.php cannot take the content of this push back
-// without WordPress. Reason is the agent's (no_crypto, driver, no_image_key, probe_failed,
-// write_failed) or agent_outdated for an agent before 0.8.0.
-type RescueDBError struct{ Reason string }
+// RescueDBError: rescue.php cannot take the database part of this push back without WordPress, and
+// the push must not go out without that – because of --require-rescue-db, or (Mandatory) because it
+// switches plugins (Spec Content-Push P4 A9). Reason is the agent's (no_crypto, driver,
+// no_image_key, probe_failed, write_failed) or agent_outdated for an agent before 0.8.0.
+type RescueDBError struct {
+	Reason    string
+	Mandatory bool
+}
 
 func (e *RescueDBError) Error() string {
+	if e.Mandatory {
+		return fmt.Sprintf("die Notfall-Rücknahme ohne WordPress ist auf dieser Site nicht möglich (%s) – ein Push, der Plugins schaltet, geht ohne sie nicht raus", e.Reason)
+	}
 	return fmt.Sprintf("die Notfall-Rücknahme der Inhalte ohne WordPress ist auf dieser Site nicht möglich (%s) – mit --require-rescue-db wird dann nicht gepusht", e.Reason)
 }
 
@@ -551,6 +577,11 @@ func Run(o Options) error {
 	if err := o.checkTarget(); err != nil {
 		return err
 	}
+	// A wrong call ends before the lock, the scan and any request (Spec Content-Push P4 §4.1).
+	sw, err := o.switches()
+	if err != nil {
+		return err
+	}
 	unlock, err := lock(o)
 	if err != nil {
 		return err
@@ -588,6 +619,10 @@ func Run(o Options) error {
 		if units, err = selectUnits(all, o.Units, o.Out); err != nil {
 			return err
 		}
+		// A3: a unit to activate is part of the set, changed or not.
+		if units, err = withActivated(docroot, base, units, all, sw.Activate, links); err != nil {
+			return err
+		}
 		deleted = gone
 	}
 	for _, unit := range deleted {
@@ -600,7 +635,7 @@ func Run(o Options) error {
 		// something new that should go out on purpose (U14).
 		var kept []Unit
 		for _, u := range units {
-			if u.New {
+			if u.New && !slices.Contains(sw.Activate, u.Path) { // a unit to activate counts as named (U14)
 				fmt.Fprintf(o.Out, "  übersprungen: %s – neu, nur mit ausdrücklicher Nennung: wpsync push %s code %s\n", u.Path, o.Site.Name, u.Path)
 				skipped = append(skipped, u.Path)
 				continue
@@ -629,7 +664,7 @@ func Run(o Options) error {
 			return err
 		}
 	}
-	if len(units) == 0 && up == nil && pkg == nil {
+	if len(units) == 0 && up == nil && pkg == nil && !sw.any() {
 		if len(skipped) > 0 {
 			return &SkippedNewError{Units: skipped}
 		}
@@ -674,9 +709,44 @@ func Run(o Options) error {
 		report.Units = append(append([]string{}, names...), UploadsUnit)
 		want++
 	}
+	// The plugin state: unit names, and for each unit to activate the heads of its PHP files with a
+	// plugin header – the agent checks them against the target in the dry run (A10).
+	var hooked []string // units to activate whose code registers an activation hook
+	if sw.any() {
+		req.Activate, req.Deactivate = sw.Activate, sw.Deactivate
+		for i := range units {
+			if !slices.Contains(sw.Activate, units[i].Path) {
+				continue
+			}
+			heads, hook, err := pluginHeads(docroot, &units[i])
+			if err != nil {
+				return err
+			}
+			if heads != nil {
+				if req.PluginHeads == nil {
+					req.PluginHeads = map[string]map[string][]byte{}
+				}
+				req.PluginHeads[units[i].Path] = heads
+			}
+			if hook {
+				hooked = append(hooked, units[i].Path)
+			}
+		}
+	}
 	if pkg != nil {
 		// The package lies on the site before the dry run, so that the agent checks all of it –
 		// staging needs no push window and writes nothing a visitor could reach.
+		if sw.any() {
+			// The package is staged before the dry run – an agent before 0.9.0 would take it and then
+			// ignore the switches. Ask for the version first: nothing is transmitted to an old agent (V10).
+			env, err := o.Client.Ping()
+			if err != nil {
+				return agentError(target, err)
+			}
+			if !AtLeast(env.AgentVersion, agentapi.MinAgentPlugins) {
+				return ErrAgentNoPlugins
+			}
+		}
 		if err := stagePackage(o, pkg); err != nil {
 			return err
 		}
@@ -693,7 +763,10 @@ func Run(o Options) error {
 		if pkg != nil && len(req.Units) == 0 && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_units" {
 			return fmt.Errorf("%w: %w", ErrAgentNoContent, err) // an agent without the channel wants units
 		}
-		return contentError(uploadError(agentError(target, err)))
+		if sw.any() && pkg == nil && len(req.Units) == 0 && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_units" {
+			return fmt.Errorf("%w: %w", ErrAgentNoPlugins, err) // an agent before 0.9.0 sees a begin without units
+		}
+		return pluginsError(contentError(uploadError(agentError(target, err))))
 	}
 	if !AtLeast(plan.AgentVersion, MinAgent) {
 		return ErrAgentTooOld
@@ -708,6 +781,11 @@ func Run(o Options) error {
 	// say it (0.7.0 was built with and, before its release, without the channel).
 	if pkg != nil && (plan.Content == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentContentPush)) {
 		return ErrAgentNoContent
+	}
+	// An agent before 0.9.0 ignores the fields and would push without switching anything (A19): told
+	// by the version and by the field plugins of the answer – after the dry run, before any write.
+	if sw.any() && (plan.Plugins == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentPlugins)) {
+		return ErrAgentNoPlugins
 	}
 	if err := answeredFor(target, plan.Target); err != nil {
 		return err
@@ -727,7 +805,7 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
 	}
-	conflict, readonly, versionChange := printPlan(o.Out, units, plan)
+	conflict, readonly, versionChange := printPlan(o.Out, units, plan, sw.Activate)
 	for i, u := range units {
 		// Such a unit was compared with the last push to staging, not with the last pull.
 		if len(plan.Units[i].Conflicts) > 0 && known.unit(u.Path) != nil {
@@ -742,19 +820,37 @@ func Run(o Options) error {
 	if pkg != nil {
 		printContent(o.Out, pkg, plan.Content)
 	}
+	if sw.any() {
+		printPlugins(o.Out, plan.Plugins)
+		report.Warnings = append(report.Warnings, plan.Plugins.Warnings...)
+	}
 	ev := planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content)
-	if pkg != nil && plan.Rescue.DB != nil {
+	if (pkg != nil || sw.any()) && plan.Rescue.DB != nil {
 		ev["rescue_db"] = plan.Rescue.DB // only from agent 0.8.0 (Spec Content-Push P3 §5.3)
+	}
+	if sw.any() {
+		// plan.plugins as the agent answered it, and what a push never runs: activation hooks of the
+		// units to activate (found in their code), deactivation hooks the agent found on the target.
+		ev["plugins"] = plan.Plugins
+		ev["hooks_skipped"] = map[string]any{"activate": nonNil(hooked), "deactivate": nonNil(deactHooked(plan.Plugins))}
 	}
 	o.event("plan", ev)
 	if readonly {
 		return ErrNotWritable
 	}
-	// Can rescue.php take the content back if WordPress fails? The dry run says what a real begin
-	// would yield; the real begin says it again after its probe.
+	// What the agent refuses of the plugin state stops the whole set, like a refusal of the package.
+	if sw.any() && !plan.Plugins.OK {
+		if plan.Plugins.Error == nil {
+			return &PluginsError{Reason: "plugins_failed", Message: "der Agent lehnt den Plugin-Zustand ohne Grund ab"}
+		}
+		return pluginsFailure(plan.Plugins.Error)
+	}
+	// Can rescue.php take the database part back if WordPress fails? The dry run says what a real
+	// begin would yield; the real begin says it again after its probe. For a push that switches
+	// plugins the answer must be yes (A9).
 	rescueWarned := false
-	if pkg != nil {
-		if err := o.rescueDB(plan.Rescue.DB, report, &rescueWarned); err != nil {
+	if pkg != nil || sw.any() {
+		if err := o.rescueDB(plan.Rescue.DB, report, &rescueWarned, sw.any()); err != nil {
 			return err
 		}
 	}
@@ -772,7 +868,7 @@ func Run(o Options) error {
 		}
 		return contentFailure(plan.Content.Error)
 	}
-	if len(units) == 0 && pkg == nil && len(upPlan.Need) == 0 {
+	if len(units) == 0 && pkg == nil && !sw.any() && len(upPlan.Need) == 0 {
 		return ErrUploadsThere // no code, and every upload is there already
 	}
 	if o.DryRun {
@@ -802,7 +898,18 @@ func Run(o Options) error {
 		} else {
 			where = "nach " + where
 		}
-		if !o.Confirm(fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan, pkg), where)) {
+		question := fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan, pkg, sw), where)
+		if sw.any() {
+			// A22: no blocklist of delicate plugins – but nobody switches one off without reading its name.
+			if names := deactivating(plan.Plugins); len(names) > 0 {
+				on := "auf " + o.Site.URL
+				if target == TargetStaging {
+					on = "in der Staging-Kopie von " + o.Site.URL
+				}
+				question = fmt.Sprintf("Deaktiviert %s: %s – das Plugin läuft danach nicht mehr. %s", on, strings.Join(names, ", "), question)
+			}
+		}
+		if !o.Confirm(question) {
 			return ErrAborted
 		}
 	}
@@ -815,9 +922,25 @@ func Run(o Options) error {
 	if pkg != nil {
 		pages = append(append([]string{}, pages...), plan.Content.HealthURLs...)
 	}
+	if sw.any() {
+		// A13: a page in the admin context – many plugins load their admin part only there.
+		pages = append(append([]string{}, pages...), plan.Plugins.HealthURLs...)
+	}
 	acc, urls, err := o.healthPages(pages)
 	if err != nil {
 		return err
+	}
+	if sw.any() {
+		// Not checked: the agent names no page in the admin context at all (NR-8), or one that is not
+		// of the paired site and was dropped.
+		checked := len(plan.Plugins.HealthURLs) > 0
+		for _, admin := range plan.Plugins.HealthURLs {
+			checked = checked && slices.Contains(urls, admin)
+		}
+		if !checked {
+			fmt.Fprintln(o.Out, "  ! Plugins im Admin-Kontext prüft dieser Push nicht: der Agent nennt dafür keine Seite, oder sie gehört nicht zur gekoppelten Adresse (http/https, www?)")
+			report.Warnings = append(report.Warnings, WarningAdminCheckSkipped)
+		}
 	}
 	before := check(o.ctx(), o.HTTP, urls, o.pause, acc)
 	if err := o.interrupted(); err != nil {
@@ -827,7 +950,7 @@ func Run(o Options) error {
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
 	if err != nil {
-		return contentError(uploadError(agentError(target, err)))
+		return pluginsError(contentError(uploadError(agentError(target, err))))
 	}
 	// Before the first byte travels: the push the agent created must be the one asked for.
 	if err := answeredFor(target, begin.Target); err != nil {
@@ -839,9 +962,10 @@ func Run(o Options) error {
 	expires := func(err error) error {
 		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
 	}
-	if pkg != nil {
-		// After the probe of the real begin: with --require-rescue-db nothing is uploaded or swapped.
-		if err := o.rescueDB(begin.Rescue.DB, report, &rescueWarned); err != nil {
+	if pkg != nil || sw.any() {
+		// After the probe of the real begin: with --require-rescue-db – and always for a push that
+		// switches plugins – nothing is uploaded or swapped without the envelope.
+		if err := o.rescueDB(begin.Rescue.DB, report, &rescueWarned, sw.any()); err != nil {
 			return expires(err)
 		}
 	}
@@ -862,6 +986,7 @@ func Run(o Options) error {
 	if pkg != nil {
 		journal.Content = &JournalContent{SHA256: pkg.SHA256, Rows: len(pkg.Rows)}
 	}
+	journal.Activate, journal.Deactivate = sw.Activate, sw.Deactivate
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
@@ -922,11 +1047,35 @@ func Run(o Options) error {
 		report.PostActions = committed.Content.PostActions
 		if rowsOff {
 			fmt.Fprintf(o.Out, "  ! der Agent nennt %d angewandte Zeilen, das Paket hat %d\n", committed.Content.Rows, len(pkg.Rows))
-		} else {
+		} else if pkg != nil { // without a package the database step ran for the plugin state alone
 			report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
 			fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
 		}
 		printActions(o.Out, committed.Content.PostActions)
+	}
+	// The same for the plugin state: an answer without it, or for other plugins than asked, is never confirmed.
+	switchOff := ""
+	if sw.any() {
+		switch {
+		case committed.Plugins == nil:
+			switchOff = "der Agent hat den Plugin-Zustand des Pushs nicht geschaltet"
+		case !switchedAsAsked(sw, committed.Plugins):
+			switchOff = "der Agent nennt andere Plugins als die, die der Push schalten sollte"
+		default:
+			report.Plugins = pluginsReport(committed.Plugins)
+			printSwitched(o.Out, committed.Plugins)
+			// A5, A17: a push writes the list itself – no activation and no deactivation hook ran.
+			if slices.ContainsFunc(report.Plugins.Activated, func(u string) bool { return slices.Contains(hooked, u) }) {
+				fmt.Fprintln(o.Out, "  ! Mindestens ein aktiviertes Plugin registriert eine Aktivierungsroutine – sie lief nicht.\n"+
+					"    Braucht das Plugin sie (eigene Tabellen, Rollen, Cron): im WP-Admin einmal deaktivieren und aktivieren.")
+				report.Warnings = append(report.Warnings, WarningActivationHooksSkipped)
+			}
+			off := deactHooked(plan.Plugins)
+			if slices.ContainsFunc(report.Plugins.Deactivated, func(u string) bool { return slices.Contains(off, u) }) {
+				fmt.Fprintln(o.Out, "  ! Mindestens ein abgeschaltetes Plugin registriert eine Deaktivierungsroutine – sie lief nicht (Cron-Einträge und Ähnliches bleiben).")
+				report.Warnings = append(report.Warnings, WarningDeactivationHooksSkipped)
+			}
+		}
 	}
 	o.event("commit", map[string]any{"push_id": begin.PushID})
 	fmt.Fprintln(o.Out, "  getauscht – prüfe die Site …")
@@ -947,6 +1096,29 @@ func Run(o Options) error {
 	}
 	if rowsOff && len(worse) == 0 {
 		worse = []string{fmt.Sprintf("der Agent nennt %d angewandte Zeilen, das Paket hat %d", committed.Content.Rows, len(pkg.Rows))}
+	}
+	if switchOff != "" && len(worse) == 0 {
+		worse = []string{switchOff}
+	}
+	// The list bypassed the object cache; it takes effect only when the cache lets go of the old one. If
+	// the agent could not make sure of that, the health check may have seen the old plugins – and the new
+	// list would take effect later, without a way back. Never confirm that (Security-Review P4 S4).
+	if sw.any() && committed.Content != nil && len(worse) == 0 {
+		if step := cacheStepFailed(committed.Content.PostActions); step != "" {
+			worse = []string{fmt.Sprintf("die Nacharbeit %s ist auf der Site nicht gelungen – ob die neue Liste der Plugins schon gilt, ist offen; ungeprüft wird nicht bestätigt", step)}
+		}
+	}
+	// And a missing read-back is no passed one (Nach-Review NR-3): on live, a push that really switched
+	// something needs the agent's word that WordPress loads the new list. The copy has no object cache
+	// of its own and no such step.
+	if target != TargetStaging && report.Plugins != nil && len(report.Plugins.Activated)+len(report.Plugins.Deactivated) > 0 && len(worse) == 0 {
+		var steps []agentapi.PostAction
+		if committed.Content != nil {
+			steps = committed.Content.PostActions
+		}
+		if !slices.ContainsFunc(steps, func(a agentapi.PostAction) bool { return a.Step == "plugins_effective" && a.OK }) {
+			worse = []string{"der Agent hat nicht bestätigt, dass WordPress die neue Liste der Plugins lädt (Nacharbeit plugins_effective fehlt) – ungeprüft wird nicht bestätigt"}
+		}
 	}
 	if len(worse) > 0 {
 		report.Health = WorsePages(before, after)
@@ -985,6 +1157,13 @@ func Run(o Options) error {
 		}
 		if o.NoCode {
 			next = strings.TrimSpace(next + " --no-code")
+		}
+		// The plugin state belongs to the set: without the switches the push to live would only carry the code.
+		if len(sw.Activate) > 0 {
+			next = strings.TrimSpace(next + " --activate " + strings.Join(sw.Activate, ","))
+		}
+		if len(sw.Deactivate) > 0 {
+			next = strings.TrimSpace(next + " --deactivate " + strings.Join(sw.Deactivate, ","))
 		}
 		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
 			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, next)
@@ -1068,7 +1247,7 @@ func selectUnits(changed []Unit, only []string, out io.Writer) ([]Unit, error) {
 }
 
 // printPlan shows what would happen and reports conflicts, missing permissions and version changes.
-func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict, readonly, versionChange bool) {
+func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin, activate []string) (conflict, readonly, versionChange bool) {
 	if plan.WindowOpen {
 		fmt.Fprintln(out, "Push-Fenster: offen")
 	} else {
@@ -1078,6 +1257,8 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 		p := plan.Units[i]
 		line := fmt.Sprintf("%s – %d von %d Dateien zu übertragen", u.Path, len(p.Need), len(u.Files))
 		switch {
+		case !p.Exists && slices.Contains(activate, u.Path):
+			line += " (neu)" // what becomes of it says the line „aktivieren:“ of the plugin plan
 		case !p.Exists:
 			line += " (neu, bleibt auf der Site inaktiv)"
 		case u.Version != p.Version:
@@ -1199,11 +1380,12 @@ func readExactly(root *os.Root, unit, rel string, want LocalFile) ([]byte, error
 	return data, nil
 }
 
-// rescueDB reads rescue.db of a begin for a push with content (Spec Content-Push P3 R12, §9): a
-// hint and the warning rescue_db_unavailable when rescue.php cannot take the content back – once –,
-// or with RequireRescueDB the refusal. An agent before 0.8.0 names no rescue.db: then nothing is
-// said (the push behaves as before), and RequireRescueDB refuses it.
-func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bool) error {
+// rescueDB reads rescue.db of a begin for a push with a database part (Spec Content-Push P3 R12, §9;
+// P4 A9): a hint and the warning rescue_db_unavailable when rescue.php cannot take it back – once –,
+// or the refusal with RequireRescueDB and, mandatory, for a push that switches plugins. An agent
+// before 0.8.0 names no rescue.db: then nothing is said (the push behaves as before), and a refusal
+// names agent_outdated.
+func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bool, mandatory bool) error {
 	if db != nil && db.OK {
 		return nil
 	}
@@ -1211,8 +1393,8 @@ func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bo
 	if db != nil {
 		reason = db.Reason
 	}
-	if o.RequireRescueDB {
-		return &RescueDBError{Reason: reason}
+	if o.RequireRescueDB || mandatory {
+		return &RescueDBError{Reason: reason, Mandatory: mandatory}
 	}
 	if db == nil || *warned {
 		return nil
@@ -1230,10 +1412,16 @@ func rolledBack(report *Result, err error) error {
 		report.Status = "rolled_back"
 		report.Via, report.ContentError = rolled.Via, rolled.ContentError
 		report.ContentLeft, report.ContentLeftTotal = rolled.ContentLeft, rolled.ContentLeftTotal
+		report.PluginsBack, report.PluginsNotRestored = rolled.Plugins, rolled.PluginsNotRestored
 		report.Warnings = append(report.Warnings, rolled.Warnings...)
-		// Through rescue.php the content stays on the site – then it is still what was applied.
+		// Through rescue.php the database part may stay on the site – then content and plugin state
+		// are still what was applied.
 		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
-			report.Content = nil
+			report.Content, report.Plugins = nil, nil
+			// The post actions of the commit describe a state that is gone. What stays are those of the
+			// rollback: the agent's – or none through rescue.php, which runs none (the agent catches up
+			// on them once WordPress loads again; they then stand in the push log).
+			report.PostActions = nil
 		}
 		if rolled.PostActions != nil {
 			report.PostActions = rolled.PostActions
@@ -1262,7 +1450,8 @@ func stagingPages(siteURL, base string, pages []string) []string {
 // back – an older agent, no envelope, rows changed since the push – code and uploads go back
 // anyway and the result says content_not_rolled_back. If the agent answers and refuses (a wpsync
 // code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php is not
-// called: the set stays whole. A push without content goes through rescue.php, always.
+// called: the set stays whole. A push without content goes through rescue.php, always. A push that
+// switches plugins has a database part like one with content (Spec Content-Push P4 §8.3).
 // ctx bounds the check after the rollback; a check cut short by it is left out of the error.
 func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
@@ -1272,7 +1461,7 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	var notes agentapi.RollbackNotes
 	var err error
 	viaAgent := false
-	if j.Content != nil {
+	if j.hasDB() {
 		var apiErr *agentapi.APIError
 		notes, err = agentRollback(o, j.PushID)
 		switch {
@@ -1306,11 +1495,13 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 	}
 	printKept(o.Out, notes.Kept)
 	printActions(o.Out, notes.PostActions)
-	rolled := &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions, Via: "rescue"}
+	printPluginsBack(o.Out, notes)
+	rolled := &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions, Via: "rescue",
+		Plugins: notes.Plugins, PluginsNotRestored: notes.PluginsNotRestored}
 	if viaAgent {
 		rolled.Via = "agent"
 	}
-	if j.Content != nil {
+	if j.hasDB() {
 		rolled.Content = "rolled_back"
 		if slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
 			rolled.Content = "kept"
@@ -1322,7 +1513,7 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 			printLeft(o.Out, notes.Content)
 		}
 		if !viaAgent && rolled.Content != "kept" {
-			fmt.Fprintln(o.Out, "  über rescue.php zurückgenommen, Inhalte eingeschlossen – die Nacharbeiten holt der Agent nach, sobald WordPress wieder lädt")
+			fmt.Fprintf(o.Out, "  über rescue.php zurückgenommen, %s eingeschlossen – die Nacharbeiten holt der Agent nach, sobald WordPress wieder lädt\n", j.dbName())
 		}
 	}
 	return rolled

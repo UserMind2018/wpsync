@@ -124,6 +124,20 @@ type fakeSite struct {
 	rbBusy       int                     // so many /push/rollback requests the agent answers with 423 wpsync_push_busy first
 	cacheStatus  int                     // HTTP status of action=cache; 0: 200
 	cacheBody    string                  // answer of action=cache; empty: {"ok":true,"cache":"flushed"}
+
+	// The plugin state (agent 0.9.0, plugins_run_test.go).
+	noPlugins     bool                           // an agent that ignores activate/deactivate: no plugins in any answer
+	pluginsFail   *agentapi.PluginsFailure       // the plan refuses: in the dry run's answer, as an error of the real begin
+	realBeginBody string                         // the real begin answers 409 with this body (a refusal only it can give)
+	pluginNames   map[string][2]string           // unit → name and version of a plugin on the site
+	inactive      map[string]bool                // units to deactivate that are not active on the site
+	deactHooks    map[string]bool                // units whose main file registers a deactivation hook
+	skipped       map[string]string              // units to activate the target skips, with the reason
+	adminBroken   bool                           // admin-ajax.php fails after the swap, the frontend does not
+	noSwitch      bool                           // /push/commit answers without plugins
+	tamperPlugins func(*agentapi.PluginsApplied) // changes what the commit answers about the plugins
+	adminURL      string                         // health url of the plugin plan; empty: admin-ajax.php of this site
+	hookAnswer    string                         // answer of /push/hooks; empty: every hook ok (Block B)
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -219,6 +233,16 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	route := r.URL.Query().Get("rest_route")
 	if route == "" { // frontend page for the health check
+		if r.URL.Path == "/wp-admin/admin-ajax.php" { // loads every plugin in the admin context; without an action: 400 and "0"
+			if (f.adminBroken || f.broken) && f.committed && !f.rolledBack {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("Fatal error"))
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("0"))
+			return
+		}
 		if f.stall && f.committed && !f.rolledBack {
 			<-r.Context().Done()
 			return
@@ -249,6 +273,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		f.stage(w, r)
 		return
 	}
+	if route == "/wpsync/v1/ping" {
+		f.routes = append(f.routes, "ping")
+		json.NewEncoder(w).Encode(map[string]any{"agent_version": f.version})
+		return
+	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
 	switch route {
 	case "/wpsync/v1/staging/login":
@@ -261,6 +290,18 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		if f.beginCode != "" {
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"code":"` + f.beginCode + `","message":"abgelehnt"}`))
+			return
+		}
+		wish := len(req.Activate)+len(req.Deactivate) > 0
+		if wish && f.noPlugins && len(req.Units) == 0 && req.Content == nil {
+			// An agent before 0.9.0 does not know the fields: to it this is a begin without units.
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"code":"wpsync_push_units","message":"units fehlt oder enthält zu viele Einheiten."}`))
+			return
+		}
+		if !req.Dry && f.realBeginBody != "" {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(f.realBeginBody))
 			return
 		}
 		res := agentapi.PushBegin{
@@ -322,6 +363,19 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusConflict)
 				json.NewEncoder(w).Encode(map[string]any{"code": "wpsync_content_" + f.contentFail.Code, "message": f.contentFail.Message,
 					"data": map[string]any{"status": 409, "keys": f.contentFail.Keys}})
+				return
+			}
+		}
+		if wish && !f.noPlugins {
+			res.Rescue.DB = f.rescueDB
+			if !req.Dry && f.rescueDBReal != nil {
+				res.Rescue.DB = f.rescueDBReal
+			}
+			res.Plugins = f.pluginsPlan(req)
+			if !req.Dry && f.pluginsFail != nil {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]any{"code": "wpsync_" + f.pluginsFail.Code, "message": f.pluginsFail.Message,
+					"data": map[string]any{"status": 409, "plugins": f.pluginsFail.Plugins}})
 				return
 			}
 		}
@@ -392,12 +446,31 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		answer := map[string]any{"next": nil, "stamps": stamps}
-		if ref := f.begins[len(f.begins)-1].Content; ref != nil && !f.noContent && !f.noApply {
+		last := f.begins[len(f.begins)-1]
+		if ref := last.Content; ref != nil && !f.noContent && !f.noApply {
 			applied := f.applied(ref.SHA256)
 			if f.tamper != nil {
 				f.tamper(applied)
 			}
 			answer["content"] = applied
+		}
+		if len(last.Activate)+len(last.Deactivate) > 0 && !f.noPlugins && !f.noSwitch {
+			if answer["content"] == nil { // the database step ran for the plugin state alone
+				steps := []agentapi.PostAction{{Step: "plugins_cache", OK: true}, {Step: "plugins_effective", OK: true}}
+				if f.actions != nil {
+					steps = f.actions
+				}
+				answer["content"] = &agentapi.ContentApplied{PostActions: steps, Seconds: 0.01}
+			}
+			if applied, ok := answer["content"].(*agentapi.ContentApplied); ok && f.actions == nil && last.Content != nil {
+				// with a package the steps are those of the content – plus the read-back of the list
+				applied.PostActions = append(append([]agentapi.PostAction{}, applied.PostActions...), agentapi.PostAction{Step: "plugins_effective", OK: true})
+			}
+			switched := f.switched(last)
+			if f.tamperPlugins != nil {
+				f.tamperPlugins(switched)
+			}
+			answer["plugins"] = switched
 		}
 		json.NewEncoder(w).Encode(answer)
 	case "/wpsync/v1/push/confirm":
@@ -457,6 +530,102 @@ func (f *fakeSite) rescuePath(req agentapi.PushBeginRequest) string {
 		return f.stub
 	}
 	return "/rescue.php"
+}
+
+// entryOf is the entry of active_plugins the fake site knows for a unit: <slug>/<slug>.php.
+func entryOf(unit string) string {
+	slug := strings.TrimPrefix(unit, "plugins/")
+	return slug + "/" + slug + ".php"
+}
+
+// pluginsPlan answers for the plugin state like PushPlugins::plan: a unit to activate is new unless
+// the client knows it from a pull, its file is the one head that came along; a plugin to
+// deactivate is active unless inactive says otherwise.
+func (f *fakeSite) pluginsPlan(req agentapi.PushBeginRequest) *agentapi.PluginsPlan {
+	plan := &agentapi.PluginsPlan{Activate: []agentapi.PluginActivate{}, Deactivate: []agentapi.PluginDeactivate{}, Warnings: []string{},
+		HealthURLs: []string{f.srv.URL + "/wp-admin/admin-ajax.php"}}
+	if req.Target == "staging" {
+		plan.HealthURLs = []string{f.srv.URL + testStaging + "/wp-admin/admin-ajax.php"}
+	}
+	if f.adminURL == "-" { // an agent that names no page in the admin context
+		plan.HealthURLs = []string{}
+	} else if f.adminURL != "" {
+		plan.HealthURLs = []string{f.adminURL}
+	}
+	label := func(unit string) (name, version *string) {
+		if n, ok := f.pluginNames[unit]; ok {
+			return &n[0], &n[1]
+		}
+		return nil, nil
+	}
+	unchecked := false
+	for _, unit := range req.Activate {
+		a := agentapi.PluginActivate{Unit: unit, State: "new", Requirements: agentapi.PluginRequirements{Checked: "at_commit", OK: true, Failed: []agentapi.PluginRequirement{}}}
+		for _, u := range req.Units {
+			if u.Path == unit && len(u.Base) > 0 {
+				a.State = "inactive"
+			}
+		}
+		if why, ok := f.skipped[unit]; ok {
+			a.State, a.Why = "skipped", why
+			plan.Activate = append(plan.Activate, a)
+			continue
+		}
+		if heads, ok := req.PluginHeads[unit]; ok {
+			a.Requirements.Checked = "head"
+			for file := range heads {
+				entry := strings.TrimPrefix(unit, "plugins/") + "/" + file
+				a.File = &entry
+			}
+			a.Name, a.Version = label(unit)
+		} else {
+			unchecked = true
+		}
+		plan.Activate = append(plan.Activate, a)
+	}
+	review := false
+	for _, unit := range req.Deactivate {
+		d := agentapi.PluginDeactivate{Unit: unit, State: "active", Files: []string{entryOf(unit)}, RequiredBy: []string{}, Hooks: f.deactHooks[unit]}
+		d.Name, d.Version = label(unit)
+		if f.inactive[unit] {
+			d.State, d.Files, d.Name, d.Version, d.Hooks = "inactive", []string{}, nil, nil, false
+		} else {
+			review = true
+		}
+		plan.Deactivate = append(plan.Deactivate, d)
+	}
+	if review {
+		plan.Warnings = append(plan.Warnings, "deactivation_review")
+	}
+	if unchecked {
+		plan.Warnings = append(plan.Warnings, "requirements_unchecked")
+	}
+	if f.pluginsFail != nil {
+		plan.Error = f.pluginsFail
+		return plan
+	}
+	plan.OK = true
+	return plan
+}
+
+// switched answers the plugin part of the commit like PushPlugins::result.
+func (f *fakeSite) switched(req agentapi.PushBeginRequest) *agentapi.PluginsApplied {
+	out := &agentapi.PluginsApplied{Activated: []agentapi.PluginActivated{}, Deactivated: []agentapi.PluginDeactivated{}, Unchanged: []string{}, Skipped: []agentapi.PluginSkipped{}}
+	for _, unit := range req.Activate {
+		if why, ok := f.skipped[unit]; ok {
+			out.Skipped = append(out.Skipped, agentapi.PluginSkipped{Unit: unit, Why: why})
+			continue
+		}
+		out.Activated = append(out.Activated, agentapi.PluginActivated{Unit: unit, File: entryOf(unit)})
+	}
+	for _, unit := range req.Deactivate {
+		if f.inactive[unit] {
+			out.Unchanged = append(out.Unchanged, unit)
+			continue
+		}
+		out.Deactivated = append(out.Deactivated, agentapi.PluginDeactivated{Unit: unit, Files: []string{entryOf(unit)}})
+	}
+	return out
 }
 
 // restoreCopy puts the units of the last commit back as they were: a rollback renames the

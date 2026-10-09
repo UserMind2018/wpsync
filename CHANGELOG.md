@@ -3,6 +3,90 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [Unreleased] · CLI 0.9.0 · Agent 0.9.0
+
+### Plugins im Push aktivieren und deaktivieren (Content-Push P4)
+
+**Agent und CLI ändern sich.** Neue Mindestversion nur für die neuen Schalter: `--activate` und
+`--deactivate` brauchen Agent ≥ 0.9.0 (sonst Exit 11, `error.required: "0.9.0"`, nichts
+übertragen). Ohne die Schalter verhalten sich CLI ≥ 0.9.0 gegen ältere Agents und ältere CLIs gegen
+Agent ≥ 0.9.0 wie bisher.
+
+**Neu**
+- `wpsync push … --activate plugins/<slug>` und `--deactivate plugins/<slug>` (mehrfach oder mit
+  Komma): Der Agent schreibt `active_plugins` selbst – auf dem Server gebaut, in der Transaktion des
+  DB-Schritts, mit oder ohne Inhalts-Paket, bytegleich mit dem, was `activate_plugin()` des Core
+  schreibt. Im Commit läuft kein Code des Plugins. Eine Einheit aus `--activate` geht immer in den
+  Satz; `--deactivate` braucht weder Einheit noch lokalen Ordner und geht auch mit `--no-code`
+- Der Probelauf prüft Hauptdatei, `Requires PHP`, `Requires at least`, `Requires Plugins` gegen das
+  Ziel und beim Deaktivieren `required_by` – auch ohne Push-Fenster; verbindlich noch einmal im
+  Commit vor dem Tausch, an der gebauten Datei
+- Nur in einem Push-Fenster, das ein Benutzer mit `activate_plugins` im WP-Admin geöffnet hat
+  (`plugins_not_allowed` sonst); nie `plugins/wpsync-agent`, kein Theme, nicht `mu-plugins` (Exit 2)
+- Der Agent schützt den Ordner, in dem er wirklich liegt, und den Namen, unter dem WordPress ihn
+  bei einem Symlink führt (nicht nur den Namen `wpsync-agent`): nie
+  als Schalter, nie als Einheit eines Pushs, und sein Eintrag wird nie aus `active_plugins` gestrichen
+- Die Rücknahme eines **bestätigten** Pushs, der Plugins geschaltet hat, braucht dasselbe Recht
+  (`plugins_not_allowed` sonst; auf der Admin-Seite fehlt der Knopf); ein unbestätigter Push geht
+  immer zurück
+- Rücknahme der Liste als **Delta** des authentisierten Vorher-Abbilds – über den Agent und über
+  `rescue.php` ohne WordPress; fremde Änderungen an der Liste bleiben und sperren nichts
+- Der Health-Check prüft zusätzlich `wp-admin/admin-ajax.php` (Plugins im Admin-Kontext)
+- `rescue.hardening` nennt ein Sicherheits-Plugin auch dann, wenn der Satz es erst aktiviert
+- Nacharbeit `plugins_effective`: der Agent liest nach dem Leeren des Object-Cache zurück, welche
+  Liste WordPress als Nächstes lädt (alloptions, sonst Cache der Option, sonst die Zeile). Scheitert
+  sie oder `object_cache`/`plugins_cache` – oder fehlt sie auf Live, obwohl etwas geschaltet wurde –,
+  bestätigt die CLI einen Satz mit Plugin-Zustand nicht, sondern nimmt ihn zurück (Exit 43)
+- `--to staging`: nur die Tabelle der Kopie; was die Kopie abschaltet, wird dort nicht aktiviert
+  (`skipped`)
+- `--json`: im `plan` `plugins` und `hooks_skipped`; im Ergebnis `plugins`, nach einer Rücknahme
+  `plugins_back` und ggf. `plugins_not_restored`; Warnungen `deactivation_review`,
+  `requirements_unchecked`, `activation_hooks_skipped`, `deactivation_hooks_skipped`,
+  `plugins_not_restored`, `admin_check_skipped`; `error.reason` `plugins_invalid`, `plugins_requirements`,
+  `plugins_not_allowed`, `plugins_unsupported`, `plugins_failed` mit `error.plugins`
+- Agent und CLI nennen jeden Eintrag, den ein Push schaltet – auch mit Klammern oder Umlauten im
+  Dateinamen (in der Ausgabe gequotet); gekappte Listen tragen `<liste>_total`, und
+  `plugins_not_restored.unknown: true` sagt, wenn die Site die Einträge des Pushs nicht kennt
+- Push-Protokoll (`wpsync pushes`) und Admin-Seite zeigen die Einheit `plugins` mit dem, was
+  geschaltet wurde
+- Eine Ablehnung der Inhalte nennt im Fehlerobjekt der CLI jetzt auch `error.total`,
+  `error.state_bytes` und `error.tables`
+- `scripts/e2e-plugins.sh`: E2E für den Plugin-Zustand; `scripts/e2e-rescue-db.sh` pusht Code,
+  Uploads, Inhalte und Plugin-Zustand in einem Satz
+
+**Geändert**
+- Ein Satz mit Plugin-Zustand braucht den Umschlag für `rescue.php` – immer, auch ohne
+  `--require-rescue-db` (`rescue_db_unavailable` mit `error.detail`, schon nach dem Probelauf)
+- „Überholt“ zählt auch geschaltete Einheiten: ein späterer, noch stehender Push, der dieselbe
+  Einheit tauscht oder schaltet, sperrt die Rücknahme des älteren (`rescue.json`: `switched`,
+  `committed_at`). Gerechnet wird aus allen Datensätzen: jeder spätere Push sperrt, nicht nur der
+  erste – auch einer, dessen Datenbank-Anteil nach `rescue.php` noch steht
+- Ein Satz mit Plugin-Zustand hat einen Datenbank-Anteil: Die Rücknahme geht zuerst über den Agent
+  und schickt `rescue.php` `content=1`, auch ohne Paket
+- `--no-code` braucht `--uploads`, `--content` oder `--deactivate`
+- Die CLI liest eine JSON-Antwort des Agents nur noch bis zu einer Grenze je Route (nach dem
+  Entpacken gezählt): 16 MiB, für `/push/begin`, `/push/commit` und das Infosheet 64 MiB, für
+  `/delta` 256 MiB; `pair` und die Suche nach dem Agent 1 MiB. Darüber bricht der Befehl mit einem
+  klaren Fehler ab. Dateien, Tabellen und das Inhalts-Manifest
+  werden weiter gestreamt
+- Nach einer Rücknahme über `rescue.php` trägt das Ergebnis kein `post_actions` mehr (bisher standen
+  dort die Nacharbeiten des Commits)
+- Die Rückfrage vor einem Push nennt die Plugins, die abgeschaltet werden, beim Namen; ohne Terminal
+  (Container-Modus, `--json`) gilt wie bisher `--yes`
+- Der Plan nennt eine neue Einheit aus `--activate` nicht mehr „bleibt auf der Site inaktiv“; der
+  Hinweis „Nach dem Test nach Live“ nach einem Push nach Staging nennt die Schalter mit
+
+**Grenzen**
+- Kein Downgrade des Agents auf 0.8.x, solange Pushes mit Plugin-Zustand offen oder aufbewahrt sind:
+  der ältere Agent nimmt sie ohne die Liste zurück
+- Die Aktivierungsroutine (`register_activation_hook`) läuft nicht – die CLI warnt mit
+  `activation_hooks_skipped` (Textsuche im Code der Einheit); Deaktivierungsroutinen laufen nie.
+  Keine Multisite, keine Themes, keine Einzeldatei-Plugins
+- Solange der Commit eines Pushs nicht quittiert ist, zählt für die Liste der Abdruck statt des
+  Deltas; ein von Hand hergestellter, bytegleicher Stand ist dann nicht vom Push zu unterscheiden
+- Stirbt `rescue.php` zwischen dem COMMIT seiner Rücknahme und dem Vermerk, kann ein persistenter
+  Object-Cache `active_plugins` im gepushten Stand behalten
+
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld

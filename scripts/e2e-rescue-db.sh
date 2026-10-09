@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # E2E DB-Rücknahme ohne WordPress (Spec Content-Push P3; AC-158, AC-160, AC-161–AC-166, AC-168,
-# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15; Security-Review P3: M1, M2, N3, N7, NR-1, NR-2): rescue.php
+# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15; Security-Review P3: M1, M2, N3, N7, NR-1, NR-2;
+# P4: AC-176, AC-209 – Code, Uploads, Inhalte und Plugin-Zustand in einem Satz): rescue.php
 # nimmt nach einem Push mit Inhalten
 # auch die Datenbank-Zeilen zurück – über eine eigene mysqli-Verbindung aus dem versiegelten
 # Umschlag des Pushs. Es ist der einzige Test, in dem MysqliLink und RescueDb eine echte
@@ -474,7 +475,7 @@ no "AC-171 Gegenprobe: in einer strengen Sitzung scheitert das Null-Datum" sql -
 WP_MODE="$(ddev wp eval 'global $wpdb; echo $wpdb->get_var("SELECT @@SESSION.sql_mode");')"
 no "AC-171: die Sitzung von WordPress ist nicht streng" contains "$WP_MODE" "STRICT"
 
-echo "== Agent 0.8.0; die Installation hat (noch) keinen Schlüssel – AUTH_KEY wie in wp-config-sample.php"
+echo "== Agent; die Installation hat (noch) keinen Schlüssel – AUTH_KEY wie in wp-config-sample.php"
 cp "$ROOT/agent/dist/wpsync-agent.zip" public/wpsync-agent.zip
 ddev wp plugin install /var/www/html/public/wpsync-agent.zip --force --activate
 rm public/wpsync-agent.zip
@@ -1176,6 +1177,31 @@ finished "AC-169 Schritt für Schritt" "$HELD"
 state_clean "AC-169 Schritt für Schritt"
 src exec rm -f /var/www/html/public/wp-content/object-cache.php /var/www/html/public/wp-content/e2e-object-cache.ser
 eq "Object-Cache: ohne Drop-in antwortet die Site" "$(code "$SOURCE_URL/")" 200
+
+echo "== P4 (AC-176, AC-209): Code, Uploads, Inhalte und Plugin-Zustand in einem Satz – bestätigt, dann über den Agent zurück"
+disarm
+open_window # ein Fenster mit Öffner, der Plugins schalten darf (A12)
+P4_LIST="$(lopt active_plugins)"
+jrun p4-set "$WPSYNC" push "$TARGET" code themes/e2e-theme --uploads "$E2E/uploads.txt" --content "$PKG/klein.jsonl" --deactivate plugins/e2e-health --yes --json
+eq "P4 Satz: Exit 0, bestätigt, alle Teile" "$RC $(last p4-set '[.data.status, (.data.units | join(",")), (.data.content.rows | tostring), (.data.plugins.deactivated | join(","))] | join(" ")')" "0 confirmed themes/e2e-theme,uploads,content 2 plugins/e2e-health"
+ok "P4 Satz: Code und Upload liegen auf Live" sh -c "grep -q 'e2e-marker v2' '$WPC/themes/e2e-theme/index.php' && test -e '$WPC/uploads/2026/10/e2e-satz.png'"
+no "P4 Satz: e2e-health steht nicht mehr in der Liste" sh -c "printf %s \"\$1\" | grep -q 'e2e-health/e2e-health.php'" sh "$(lopt active_plugins)"
+eq "P4 Satz: die Zeile des Pakets steht (die Sicherung trägt den gepushten Wert)" "$(lopt options_e2e_fuse)" an
+jrun p4-set-back "$WPSYNC" rollback "$TARGET" "$(last p4-set '.data.push_id')" --json
+eq "P4 Satz: Rücknahme über den Agent, die Liste nennt, was wieder läuft" "$RC $(last p4-set-back '[.data.via, (.data.plugins_back.reactivated | join(","))] | join(" ")')" "0 agent e2e-health/e2e-health.php"
+eq "P4 Satz: die Liste Byte für Byte wie vorher" "$(lopt active_plugins)" "$P4_LIST"
+state_clean "P4 Satz über den Agent"
+
+echo "== P4 (AC-176, AC-209): derselbe Satz, der Inhalt legt die Site lahm – rescue.php nimmt Zeilen und Liste in einer Transaktion zurück"
+arm
+jrun p4-both "$WPSYNC" push "$TARGET" code themes/e2e-theme --uploads "$E2E/uploads.txt" --content "$PKG/klein.jsonl" --deactivate plugins/e2e-health --yes --json
+eq "P4: der Inhalt legt die Site lahm – Exit 43 über rescue.php, DB-Anteil ganz zurück" "$RC $(last p4-both '[.data.via, (.data.warnings // [] | map(select(. == "content_not_rolled_back" or . == "plugins_not_restored")) | length | tostring)] | join(" ")')" "43 rescue 0"
+eq "P4: die Liste Byte für Byte wie vorher" "$(lopt active_plugins)" "$P4_LIST"
+eq "P4: plugins_back nennt, was wieder läuft" "$(last p4-both '.data.plugins_back.reactivated | join(",")')" "e2e-health/e2e-health.php"
+ok "P4: Meldung der CLI nennt den Plugin-Zustand" contains "$(last p4-both '.error.message')" "über rescue.php, Datenbank-Anteil samt Plugin-Zustand eingeschlossen"
+leaks "P4" "$JSON/p4-both.jsonl" "$JSON/p4-both.err"
+disarm
+state_clean "P4 Paket und Plugin-Zustand"
 
 echo "== AC-164: Push nach Staging, WordPress stumm – rescue.php nimmt nur die Tabellen der Kopie zurück"
 disarm

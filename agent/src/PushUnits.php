@@ -12,6 +12,17 @@ final class PushUnits
 {
     public const MU = 'mu-plugins';
 
+    /**
+     * @var string Ordner unter wp-content/plugins, in dem der laufende Agent liegt (Push::register()). Der
+     *             Selbstschutz hängt nicht daran, dass er wpsync-agent heisst (Security-Review P4 S3).
+     */
+    public static $agent = 'wpsync-agent';
+    /**
+     * @var string der Ordner, unter dem WordPress den Agent kennt, wenn er über einen Symlink in plugins/
+     *             eingebunden ist (plugin_basename()); leer ohne (Nach-Review NR-7).
+     */
+    public static $agentLink = '';
+
     public static function valid(string $unit): bool
     {
         if ($unit === self::MU || $unit === 'uploads') {
@@ -20,7 +31,10 @@ final class PushUnits
         if (preg_match('#^(plugins|themes)/[A-Za-z0-9][A-Za-z0-9._-]*\z#', $unit) !== 1) {
             return false;
         }
-        return strtolower($unit) !== 'plugins/wpsync-agent';
+        // Nie der Agent selbst: sein fester Name – und der Ordner, in dem er gerade wirklich liegt (S3).
+        $lower = strtolower($unit);
+        return $lower !== 'plugins/wpsync-agent' && $lower !== 'plugins/' . strtolower(self::$agent)
+            && (self::$agentLink === '' || $lower !== 'plugins/' . strtolower(self::$agentLink));
     }
 
     /** Pfad einer Datei relativ zur Einheit, wie ihn der Client im Manifest und im Upload nennt. */

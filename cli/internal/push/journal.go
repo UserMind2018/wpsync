@@ -53,6 +53,9 @@ type Journal struct {
 	UploadsBefore map[string]baseline.FileStamp `json:"uploads_before,omitempty"`
 	// Content: the push carried a content package (Spec Content-Push §7); nil without.
 	Content *JournalContent `json:"content,omitempty"`
+	// Activate and Deactivate: the plugins the push switches, as units (Spec Content-Push P4 §11).
+	Activate   []string `json:"activate,omitempty"`
+	Deactivate []string `json:"deactivate,omitempty"`
 }
 
 // JournalContent notes the package of a push. Applied: manifest and baseline of this site folder
@@ -69,6 +72,27 @@ func (j *Journal) target() string {
 		return TargetStaging
 	}
 	return TargetLive
+}
+
+// hasDB reports whether the push has a database part: a content package or a plugin state. Such a
+// set is taken back through the agent first (D25), asks rescue.php with content=1 (R11) and may
+// need the cache step afterwards.
+func (j *Journal) hasDB() bool {
+	return j.Content != nil || len(j.Activate)+len(j.Deactivate) > 0
+}
+
+// switched reports whether the push carried a plugin state.
+func (j *Journal) switched() bool { return len(j.Activate)+len(j.Deactivate) > 0 }
+
+// dbName names the database part of the push for a message.
+func (j *Journal) dbName() string {
+	switch {
+	case j.Content != nil && j.switched():
+		return "Inhalte und Plugin-Zustand"
+	case j.switched():
+		return "Plugin-Zustand"
+	}
+	return "Inhalte"
 }
 
 func knownTarget(target string) bool {

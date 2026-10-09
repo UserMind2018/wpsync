@@ -221,6 +221,30 @@ same(['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'content_failed
 same(2, count($links), 'reconnected once');
 same(false, in_array('COMMIT', array_merge($links[0]->queries, $links[1]->queries), true), 'no commit');
 
+// 6. Der Plugin-Zustand (Spec Content-Push P4 §8.4, AC-189): das Delta des Abbilds geht ohne WordPress
+//    zurück – auf einer Liste mit Lücken und einem fremden Eintrag, der bleibt.
+ContentImage::$keys = [hash('sha256', 'key of the installation', true)];
+$delta              = ['added' => ['kunde/kunde.php'], 'removed' => ['old/old.php']];
+ContentImage::put($dir, ContentImage::BEFORE, ['keys' => [], 'plugins' => $delta]);
+ContentImage::put($dir, ContentImage::AFTER, ['keys' => [], 'changes' => ['plugins' => $delta + ['h' => hash('sha256', 'not the value on the site')]]]);
+ContentImage::$keys     = [];
+$store                  = new ContentMemory(['options' => ['active_plugins' => ContentFixtures::option('active_plugins', serialize([4 => 'kunde/kunde.php', 0 => 'akismet/akismet.php', 9 => 'fremd/fremd.php']), '33')]]);
+RescueContent::$resolve = static function () use (&$store): \WpSync\ContentTarget {
+    return ContentFixtures::live($store);
+};
+same(true, RescueSeal::put($work, ID, (string) RescueSeal::seal($envelope, $key, ID)), 'an envelope for the plugin state');
+same(
+    ['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'changed_since_push', 'keys' => [['table' => 'options', 'key' => 'active_plugins']], 'total' => 1]],
+    RescueContent::run($content, $work, ID, $key, false),
+    'while the commit is unacknowledged the fingerprint of the list counts'
+);
+same(
+    ['state' => 'rolled_back', 'wrote' => true, 'plugins' => ['deactivated' => ['kunde/kunde.php'], 'reactivated' => ['old/old.php']]],
+    RescueContent::run($content, $work, ID, $key),
+    'the plugin delta goes back without wordpress'
+);
+same(serialize(['akismet/akismet.php', 'fremd/fremd.php', 'old/old.php']), $store->data['options']['active_plugins']['option_value'], 'what the push added is gone, what it removed is back, what others switched stays');
+
 $final = array_merge(['PushRescue', 'PushSwap', 'RescueContent'], RescueContent::CLASSES);
 sort($final);
 same($final, loaded(), 'nothing else was loaded on the way');

@@ -228,7 +228,8 @@ func rescuePost(hc *http.Client, rescueURL string, form url.Values) (map[string]
 }
 
 // rescueBack takes a push back through rescue.php, the way that needs no WordPress (Spec
-// Content-Push P3 §9): with content=1 when the push carried content, repeated while another run
+// Content-Push P3 §9): with content=1 when the push has a database part (content or a plugin
+// state), repeated while another run
 // holds the lock of the push; then – if rows were written back while a persistent object cache
 // holds the pushed state – the cache step; and one push/list, best effort, so that the agent
 // catches up on the post actions as soon as WordPress answers again.
@@ -241,18 +242,22 @@ func rescueBack(o Options, j *Journal) (agentapi.RollbackNotes, error) {
 	var notes agentapi.RollbackNotes
 	var err error
 	for attempt := 0; ; attempt++ {
-		notes, err = RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, key, j.Content != nil)
+		notes, err = RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, key, j.hasDB())
 		if !errors.Is(err, ErrRescueBusy) || attempt == busyRetries {
 			break
 		}
 		o.Sleep(busyPause)
 	}
-	if err != nil || j.Content == nil {
+	if err != nil || !j.hasDB() {
 		return notes, err
 	}
 	if notes.Content == nil || notes.Content.State == "kept" {
 		if !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
 			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack)
+		}
+		// A18: with the database part the plugin state stays too – the list still carries the push.
+		if j.switched() && !slices.Contains(notes.Warnings, WarningPluginsNotRestored) {
+			notes.Warnings = append(notes.Warnings, WarningPluginsNotRestored)
 		}
 		return notes, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -163,5 +164,72 @@ func TestRequireRescueDBNamesReasonAndDetail(t *testing.T) {
 	// No other failure carries a detail.
 	if f := Classify(push.ErrNothing); f.Detail != "" {
 		t.Errorf("detail = %q", f.Detail)
+	}
+}
+
+// Spec Content-Push P4 §4.5: eine Ablehnung des Plugin-Zustands ist Exit 1 mit reason und den Einheiten –
+// ein falscher Schalter Exit 2, ein Agent unter 0.9.0 Exit 11.
+func TestPluginRefusalsHaveReasonAndUnits(t *testing.T) {
+	refused := []agentapi.PluginRefusal{{Unit: "plugins/kunde", Why: "requires_php", Needs: "8.2", Has: "8.0"}}
+	for _, reason := range []string{"plugins_invalid", "plugins_requirements", "plugins_not_allowed", "plugins_unsupported", "plugins_failed"} {
+		f := Classify(fmt.Errorf("Push nicht begonnen: %w", &push.PluginsError{Reason: reason, Message: "abgelehnt", Plugins: refused,
+			Err: &agentapi.APIError{Status: 409, Code: "wpsync_" + reason}}))
+		if f.Exit != ExitUnknown || f.Reason != reason || !reflect.DeepEqual(f.Plugins, refused) || f.Detail != "" {
+			t.Errorf("%s: failure = %+v", reason, f)
+		}
+	}
+	f := Classify(&push.PluginsError{Reason: "rescue_db_unavailable", Detail: "probe_failed"})
+	if f.Exit != ExitUnknown || f.Reason != "rescue_db_unavailable" || f.Detail != "probe_failed" || f.Plugins != nil {
+		t.Errorf("failure = %+v", f)
+	}
+	f = Classify(&push.RescueDBError{Reason: "no_image_key", Mandatory: true})
+	if f.Exit != ExitUnknown || f.Reason != "rescue_db_unavailable" || f.Detail != "no_image_key" {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := Classify(fmt.Errorf("%w: --activate \"themes/x\"", push.ErrPluginSwitch)); f.Exit != ExitUsage || f.Reason != "" {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := Classify(fmt.Errorf("%w: --activate plugins/l – %w", push.ErrPluginSwitch, push.ErrSymlink)); f.Exit != ExitUsage {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := Classify(push.ErrAgentNoPlugins); f.Exit != ExitAgentOutdated {
+		t.Errorf("failure = %+v", f)
+	}
+	// Kein anderer Fehler trägt plugins.
+	if f := Classify(push.ErrNothing); f.Plugins != nil {
+		t.Errorf("plugins = %v", f.Plugins)
+	}
+	raw, _ := json.Marshal(Classify(&push.PluginsError{Reason: "plugins_requirements", Plugins: refused}))
+	if !strings.Contains(string(raw), `"plugins":[{"unit":"plugins/kunde","why":"requires_php","needs":"8.2","has":"8.0"}]`) {
+		t.Errorf("json = %s", raw)
+	}
+}
+
+// Eine Ablehnung der Inhalte reicht durch, was der Agent über keys und paths hinaus nennt: total
+// (wie viele Schlüssel es sind – keys trägt höchstens 200), state_bytes und tables.
+func TestContentRefusalsCarryTotalStateBytesAndTables(t *testing.T) {
+	keys := []agentapi.ContentKey{{Table: "posts", Key: "219"}}
+	f := Classify(fmt.Errorf("push: %w", &push.ContentError{Reason: "conflict", Message: "geändert", Keys: keys, Total: 731}))
+	if f.Total != 731 || f.StateBytes != 0 || f.Tables != nil {
+		t.Errorf("failure = %+v", f)
+	}
+	raw, _ := json.Marshal(f)
+	if !strings.Contains(string(raw), `"total":731`) || strings.Contains(string(raw), "state_bytes") || strings.Contains(string(raw), "tables") {
+		t.Errorf("json = %s", raw)
+	}
+	raw, _ = json.Marshal(Classify(&push.ContentError{Reason: "package_too_large", StateBytes: 73400320}))
+	if !strings.Contains(string(raw), `"state_bytes":73400320`) || strings.Contains(string(raw), `"total"`) {
+		t.Errorf("json = %s", raw)
+	}
+	raw, _ = json.Marshal(Classify(&push.ContentError{Reason: "engine_unsupported", Tables: []string{"options", "postmeta"}}))
+	if !strings.Contains(string(raw), `"tables":["options","postmeta"]`) {
+		t.Errorf("json = %s", raw)
+	}
+	// Kein anderer Fehler trägt die Felder.
+	raw, _ = json.Marshal(Classify(push.ErrNothing))
+	for _, field := range []string{"total", "state_bytes", "tables"} {
+		if strings.Contains(string(raw), field) {
+			t.Errorf("json = %s", raw)
+		}
 	}
 }

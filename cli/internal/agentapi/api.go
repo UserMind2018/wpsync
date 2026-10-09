@@ -125,7 +125,7 @@ func Discover(hc *http.Client, rawURL string) (string, error) {
 	var index struct {
 		Namespace string `json:"namespace"`
 	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&index) != nil || index.Namespace != "wpsync/v1" {
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(&boundedReader{r: resp.Body, left: smallAnswerBytes}).Decode(&index) != nil || index.Namespace != "wpsync/v1" {
 		return "", fmt.Errorf("%w: discover %s: wpsync agent not found (HTTP %d)", ErrUnreachable, rawURL, resp.StatusCode)
 	}
 	final := resp.Request.URL
@@ -150,7 +150,7 @@ func Pair(hc *http.Client, baseURL, code, device string) (*PairResult, error) {
 	}
 	defer resp.Body.Close()
 	var res PairResult
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || res.KeyID == "" || res.Secret == "" {
+	if err := json.NewDecoder(&boundedReader{r: resp.Body, left: smallAnswerBytes}).Decode(&res); err != nil || res.KeyID == "" || res.Secret == "" {
 		return nil, fmt.Errorf("pair: invalid response")
 	}
 	return &res, nil
