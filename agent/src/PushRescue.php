@@ -440,6 +440,10 @@ final class PushRescue
                 } finally {
                     self::unlock($lock);
                 }
+                if ($answer[0] === 200) {
+                    // Welchen Push die Antwort meint: die CLI vergleicht es mit dem, den sie zurücknehmen wollte.
+                    $answer[1]['push_id'] = $pushId;
+                }
                 if ($answer[0] === 200 && !is_link(self::pendingFile($workDir))) {
                     @touch(self::pendingFile($workDir)); // der Agent holt nach, was WordPress braucht (§8.1)
                 }

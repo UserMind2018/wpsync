@@ -147,6 +147,11 @@ final class PushRescueDbTest extends ContentApplyCase
     private function rescue(array $over = [], ?array $dirs = null): array
     {
         $answer          = PushRescue::handle($dirs ?? [$this->content], $over + ['action' => 'rollback', 'push_id' => self::ID, 'key' => $this->key, 'content' => '1'], 1000);
+        // Jede Antwort einer Rücknahme nennt ihren Push (die CLI vergleicht ihn); geprüft hier, einmal für alle.
+        if ($answer[0] === 200 && ($answer[1]['status'] ?? '') === 'rolled_back') {
+            $this->assertSame(self::ID, $answer[1]['push_id'] ?? null);
+            unset($answer[1]['push_id']);
+        }
         $this->answers[] = $answer[1];
         return $answer;
     }

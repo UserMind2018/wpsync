@@ -128,7 +128,7 @@ final class RescueScriptTest extends TestCase
         $this->committed(null);
         $this->assertSame([403, '{"ok":false,"error":"wrong key"}'], $this->request($this->post('rollback', ['key' => 'falsch'])));
         $this->assertSame('new', file_get_contents($this->content . '/plugins/x/main.php'));
-        $this->assertSame([200, '{"ok":true,"status":"rolled_back"}'], $this->request($this->post('rollback')));
+        $this->assertSame([200, '{"ok":true,"status":"rolled_back","push_id":"' . self::ID . '"}'], $this->request($this->post('rollback')));
         $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
         $this->assertFileExists($this->work . '/rescue.pending');
     }
@@ -147,7 +147,7 @@ final class RescueScriptTest extends TestCase
         list($status, $body) = $this->request($this->post('rollback', ['content' => '1']));
         $this->assertSame(200, $status);
         $this->assertSame(
-            ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], 'warnings' => ['content_not_rolled_back']],
+            ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], 'warnings' => ['content_not_rolled_back'], 'push_id' => self::ID],
             json_decode($body, true)
         );
         $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));

@@ -68,7 +68,13 @@ abstract class PushRescueFlowCase extends PushContentFlowCase
     protected function rescueDb(string $id, array $over = []): array
     {
         $key = PushRescue::key((string) Store::secretFor(self::KEY), $id, $this->salt);
-        return PushRescue::handle(PushRescue::contentDirs($this->live), $over + ['action' => 'rollback', 'push_id' => $id, 'key' => $key, 'content' => '1'], time());
+        $answer = PushRescue::handle(PushRescue::contentDirs($this->live), $over + ['action' => 'rollback', 'push_id' => $id, 'key' => $key, 'content' => '1'], time());
+        // Jede Antwort einer Rücknahme nennt ihren Push (die CLI vergleicht ihn); geprüft hier, einmal für alle.
+        if ($answer[0] === 200 && ($answer[1]['status'] ?? '') === 'rolled_back') {
+            $this->assertSame($id, $answer[1]['push_id'] ?? null);
+            unset($answer[1]['push_id']);
+        }
+        return $answer;
     }
 
     /** Begin und Upload des Codes; der Commit steht noch aus. */

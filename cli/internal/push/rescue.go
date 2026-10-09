@@ -154,6 +154,13 @@ func RescueRollbackNotes(hc *http.Client, rescueURL, pushID, key string, content
 	if status, _ := body["status"].(string); status != rescueRolledBack {
 		return agentapi.RollbackNotes{}, fmt.Errorf("rescue.php meldet den Push nicht als zurückgerollt (HTTP 200 ohne status %q)", rescueRolledBack)
 	}
+	// An agent from 0.8.0 on names the push its answer is about: then it has to be this one. Older
+	// ones leave the field out, and the answer counts as before.
+	if named, present := body["push_id"]; present {
+		if id, _ := named.(string); id != pushID {
+			return agentapi.RollbackNotes{}, errors.New("rescue.php antwortet für einen anderen Push als den gefragten")
+		}
+	}
 	raw, _ := json.Marshal(body)
 	var notes agentapi.RollbackNotes
 	_ = json.Unmarshal(raw, &notes) // a field of another type stays empty

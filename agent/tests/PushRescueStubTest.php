@@ -83,7 +83,7 @@ final class PushRescueStubTest extends TestCase
 
         $key = PushRescue::key(str_repeat('ab', 32), self::ID, 'salt');
         PushRescue::write($this->root . '/wp-content/wpsync-push-0123456789abcdef', self::ID, hash('sha256', $key), [], PushRescue::COMMITTED);
-        $this->assertSame('{"ok":true,"status":"rolled_back"}', $this->post($name, ['action' => 'rollback', 'push_id' => self::ID, 'key' => $key]));
+        $this->assertSame('{"ok":true,"status":"rolled_back","push_id":"' . self::ID . '"}', $this->post($name, ['action' => 'rollback', 'push_id' => self::ID, 'key' => $key]));
     }
 
     /** N1: Agent-Ordner per FTP gelöscht – der verwaiste Stub verrät keinen Serverpfad. */

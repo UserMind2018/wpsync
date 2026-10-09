@@ -55,7 +55,13 @@ final class PushRescueTest extends TestCase
     /** @return array{0: int, 1: array<string, mixed>} */
     private function post(string $id, string $key, int $now = 1000): array
     {
-        return PushRescue::handle([$this->content], ['action' => 'rollback', 'push_id' => $id, 'key' => $key], $now);
+        $answer = PushRescue::handle([$this->content], ['action' => 'rollback', 'push_id' => $id, 'key' => $key], $now);
+        // Jede Antwort einer Rücknahme nennt ihren Push (die CLI vergleicht ihn); geprüft hier, einmal für alle.
+        if ($answer[0] === 200 && ($answer[1]['status'] ?? '') === 'rolled_back') {
+            $this->assertSame($id, $answer[1]['push_id'] ?? null);
+            unset($answer[1]['push_id']);
+        }
+        return $answer;
     }
 
     public function testIdAndKey(): void

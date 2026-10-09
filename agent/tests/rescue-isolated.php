@@ -174,7 +174,7 @@ same([403, ['ok' => false, 'error' => 'wrong key']], PushRescue::handle([$conten
 same($pushed['options'], array_intersect_key($store->data['options'], $pushed['options']), 'and touches nothing');
 $left = [['table' => 'postmeta', 'key' => "1000001\0farbe"]];
 same(
-    [200, ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'rolled_back', 'cache' => 'none', 'left' => $left, 'left_total' => 1], 'warnings' => ['content_left_extra']]],
+    [200, ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'rolled_back', 'cache' => 'none', 'left' => $left, 'left_total' => 1], 'warnings' => ['content_left_extra'], 'push_id' => ID]],
     PushRescue::handle([$content], $request, time()),
     'the content goes back, what grew stays'
 );

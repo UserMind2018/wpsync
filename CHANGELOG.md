@@ -91,7 +91,10 @@ sich wie bisher (`content_not_rolled_back`).
 - Die CLI wertet eine Antwort von `rescue.php` nur noch als Rücknahme, wenn sie
   `status: "rolled_back"` trägt (das tut `rescue.php` seit Agent 0.4.0) – HTTP 200 mit `ok` allein
   genügt nicht mehr. Sonst: „ROLLBACK FEHLGESCHLAGEN“ (Health-Rücknahme) bzw. „Rollback über
-  rescue.php fehlgeschlagen“ (`wpsync rollback`, Exit 1); Manifest, Baseline und Journal bleiben
+  rescue.php fehlgeschlagen“ (`wpsync rollback`, Exit 1); Manifest, Baseline und Journal bleiben.
+  `rescue.php` nennt in der Antwort einer Rücknahme ausserdem `push_id`; nennt sie einen anderen
+  Push als den gefragten, gilt sie der CLI ebenfalls nicht (fehlt das Feld – Agent < 0.8.0 –, wie
+  bisher)
 - Ein Webroot, dessen Pfad `[`, `]`, `*` oder `?` enthält: `rescue.php` fand den Push nicht (404
   `unknown push`), der Agent weder den Marker `rescue.pending` noch – beim Deaktivieren – seine
   Arbeitsordner, und Plugin-Versionen blieben leer. Der Agent listet Ordner jetzt ohne `glob()`

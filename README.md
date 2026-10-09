@@ -1230,7 +1230,9 @@ abbilden lässt, sofern das Profil sie kopiert.
   dann wieder der alte), ohne Plugins, Themes und mu-plugins – Drop-ins in `wp-content`
   (`object-cache.php`, `db.php`, `advanced-cache.php`) lädt WordPress dabei wie in jedem Request.
   Den Schlüssel finden sie nicht mehr in `$_POST`/`$_REQUEST`, und eine Umleitung, die sie
-  setzen (`Location`), geht nicht mit der Antwort hinaus.
+  setzen (`Location`), geht nicht mit der Antwort hinaus. Grenze: den rohen Rumpf des Requests
+  (`php://input`) kann PHP nicht zurücknehmen – ein Drop-in, das ihn gezielt liest, sähe den
+  Schlüssel dieses einen, dann schon zurückgenommenen Pushs.
 - **Rescue-Stub:** `wpsync-rescue-<32 hex>.php` im Webroot enthält nur ein `require` auf
   `rescue.php` mit relativem Pfad. Er entsteht nur, wenn die CLI pushen will, liegt solange ein
   Push läuft oder unbestätigt ist und höchstens etwa 10 Minuten darüber hinaus; Deaktivieren des
