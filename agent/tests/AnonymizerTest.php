@@ -242,4 +242,54 @@ final class AnonymizerTest extends TestCase
         $row = ['order_id' => '10', 'net_total' => '16.80', 'customer_id' => '3'];
         $this->assertSame($row, $this->one('wp_wc_order_stats', $row));
     }
+
+    /** Spec Content-Push §6.2: die starken Muster erkennen, was der Anonymizer erzeugt */
+    public function testPatternsMatchWhatTheAnonymizerProduces(): void
+    {
+        $a    = new Anonymizer(str_repeat('ab', 32), 'wp_');
+        $user = $a->rows('wp_users', [[
+            'user_login' => 'erika', 'user_pass' => 'hash', 'user_nicename' => 'erika', 'user_email' => 'erika@kunde.example',
+            'user_url' => '', 'user_activation_key' => '', 'display_name' => 'Erika Mustermann',
+        ]])[0];
+        $this->assertSame('tag', Anonymizer::find((string) $user['user_login']));
+        $this->assertSame('email', Anonymizer::find((string) $user['user_email']));
+        $this->assertSame('name', Anonymizer::find('Hallo ' . $user['display_name'] . ','));
+        $this->assertSame('fixed', Anonymizer::find((string) $user['user_pass']));
+        $note = $a->rows('wp_comments', [['comment_type' => 'order_note', 'comment_content' => 'x', 'comment_author' => 'Max']])[0];
+        $this->assertSame('fixed', Anonymizer::find((string) $note['comment_content']));
+        $this->assertSame('name', Anonymizer::find((string) $note['comment_author']));
+        $key = $a->rows('wp_woocommerce_api_keys', [['consumer_key' => 'ck_x', 'consumer_secret' => 'cs_x', 'truncated_key' => 'abc']])[0];
+        $this->assertSame('tag', Anonymizer::find((string) $key['consumer_key']));
+        $this->assertSame('tag', Anonymizer::find((string) $key['consumer_secret']));
+        $order = $a->rows('wp_postmeta', [['meta_key' => '_order_key', 'meta_value' => 'wc_order_abc']])[0];
+        $this->assertSame('tag', Anonymizer::find((string) $order['meta_value']));
+    }
+
+    /** Schwache Platzhalter und echte Inhalte lösen nichts aus */
+    public function testPatternsLeaveRealContentAlone(): void
+    {
+        foreach (['Musterstadt', 'Musterstraße 1', '00000', '0.0.0.0', 'info@kunde.de', 'user_meta_key', 'Vorname Nachname', 'Gast 2024', 'user-profile@example.invalid'] as $value) {
+            $this->assertNull(Anonymizer::find($value), $value);
+        }
+    }
+
+    public function testPatternsAreVersioned(): void
+    {
+        $p = Anonymizer::patterns();
+        $this->assertSame(Anonymizer::RULES_VERSION, $p['rules_version']);
+        $this->assertSame(['email', 'tag', 'name', 'fixed'], array_column($p['patterns'], 'id'));
+        foreach ($p['patterns'] as $pattern) {
+            $this->assertNotFalse(@preg_match('/' . $pattern['pattern'] . '/', ''), $pattern['id']);
+        }
+    }
+
+    public function testRuleIntrospection(): void
+    {
+        $this->assertSame(['shop_order', 'shop_order_refund', 'shop_subscription'], Anonymizer::postTypes());
+        $this->assertContains('_customer_ip_address', Anonymizer::metaKeys('postmeta'));
+        $this->assertContains('_billing_email', Anonymizer::metaKeys('postmeta'));
+        $this->assertSame(['admin_email', 'new_admin_email'], Anonymizer::metaKeys('options'));
+        $this->assertSame([], Anonymizer::metaKeys('terms'));
+        $this->assertContains('user_email', Anonymizer::columns('users', true));
+    }
 }

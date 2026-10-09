@@ -21,6 +21,18 @@ final class Anonymizer
     /** Kein Hash: höchstens 32 Zeichen vergleicht WordPress mit md5(), das nie mit „!“ beginnt. */
     public const NO_LOGIN = '!wpsync-anonymized';
 
+    /**
+     * Starke Muster (Spec Content-Push §6.2): was der Anonymizer erzeugt und echte Inhalte praktisch
+     * nie enthalten. Schwache Platzhalter (Musterstadt, 00000, 0.0.0.0) gehören nicht dazu. Ändert
+     * sich eine Strategie oder ein Präfix in rules(), müssen die Muster mit – AnonymizerTest prüft es.
+     */
+    public const PATTERNS = [
+        'email' => 'user-[0-9a-f]{16}@example\.invalid',
+        'tag'   => '\b(user_|user-|wc_order_|ck_|cs_|tok_)[0-9a-f]{16}\b',
+        'name'  => '\b(Vorname|Nachname|Nutzer|Gast) [0-9a-f]{6}\b',
+        'fixed' => '!wpsync-anonymized|Bestellnotiz \(anonymisiert\)',
+    ];
+
     /** Adressfelder von WooCommerce – als Spalten (HPOS) und, mit Präfix, als Meta-Schlüssel. Land und Bundesland bleiben. */
     private const ADDRESS = [
         'first_name' => 'name:Vorname',
@@ -61,6 +73,71 @@ final class Anonymizer
     public static function changes(string $table, string $prefix): bool
     {
         return (self::rules()[self::name($table, $prefix)] ?? []) !== [];
+    }
+
+    /** @return array{rules_version: int, patterns: list<array{id: string, pattern: string}>} für den Manifest-Kopf */
+    public static function patterns(): array
+    {
+        $patterns = [];
+        foreach (self::PATTERNS as $id => $pattern) {
+            $patterns[] = ['id' => $id, 'pattern' => $pattern];
+        }
+        return ['rules_version' => self::RULES_VERSION, 'patterns' => $patterns];
+    }
+
+    /** @return string|null id des ersten Musters, das im Wert vorkommt */
+    public static function find(string $value): ?string
+    {
+        foreach (self::PATTERNS as $id => $pattern) {
+            if (preg_match('/' . $pattern . '/', $value) === 1) {
+                return $id;
+            }
+        }
+        return null;
+    }
+
+    /** @return list<string> Beitragstypen, deren Zeilen in posts ersetzt werden */
+    public static function postTypes(): array
+    {
+        $types = [];
+        foreach (self::rules()['posts'] ?? [] as $rule) {
+            if (isset($rule['when']) && $rule['when'][0] === 'post_type') {
+                $types = array_merge($types, $rule['when'][1]);
+            }
+        }
+        return array_values(array_unique($types));
+    }
+
+    /**
+     * @param string $table Tabelle ohne Präfix
+     * @return list<string> Schlüssel, deren Wert eine meta-Regel der Tabelle ersetzt
+     */
+    public static function metaKeys(string $table): array
+    {
+        $keys = [];
+        foreach (self::rules()[$table] ?? [] as $rule) {
+            if (isset($rule['meta'])) {
+                $keys = array_merge($keys, array_map('strval', array_keys($rule['meta'][2])));
+            }
+        }
+        return array_values(array_unique($keys));
+    }
+
+    /**
+     * @param string $table Tabelle ohne Präfix
+     * @param bool   $unconditional nur Regeln ohne when
+     * @return list<string> Spalten, die eine set-Regel der Tabelle ersetzt
+     */
+    public static function columns(string $table, bool $unconditional): array
+    {
+        $columns = [];
+        foreach (self::rules()[$table] ?? [] as $rule) {
+            if ($unconditional && isset($rule['when'])) {
+                continue;
+            }
+            $columns = array_merge($columns, array_keys($rule['set'] ?? []));
+        }
+        return array_values(array_unique($columns));
     }
 
     /**
