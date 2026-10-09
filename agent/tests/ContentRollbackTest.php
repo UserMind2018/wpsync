@@ -343,6 +343,28 @@ final class ContentRollbackTest extends ContentApplyCase
         }
     }
 
+    /** N5: ist seit dem Push eine der sieben Tabellen nicht mehr InnoDB, gäbe es keine Transaktion – nichts wird zurückgenommen. */
+    public function testRollbackNeedsInnoDbOnEveryContentTable(): void
+    {
+        $this->apply($this->rows());
+        $pushed = $this->store->data;
+        foreach (['termmeta', 'posts'] as $table) {
+            $this->store->engines = [$table => 'MyISAM'];
+            $this->store->log     = [];
+            try {
+                ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+                $this->fail('no exception');
+            } catch (ContentException $e) {
+                $this->assertSame('engine_unsupported', $e->reason());
+                $this->assertSame([$table], $e->toArray()['tables']);
+            }
+            $this->assertSame($pushed, $this->store->data);
+            $this->assertSame([], $this->store->log, 'nicht einmal eine Transaktion');
+        }
+        $this->store->engines = [];
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+    }
+
     /** Fehlt after.json, obwohl sich Zeilen geändert haben, ist nicht zu beweisen, dass es der Push war. */
     public function testRollbackWithoutAfterImage(): void
     {

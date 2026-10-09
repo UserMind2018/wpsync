@@ -172,6 +172,9 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Ziels), und nimmt `_wp_attachment_backup_sizes` dazu: `file` jedes Eintrags ist ein blosser
   Dateiname im Ordner der Datei des Attachments, sonst `blocked_row`; fehlt die Datei,
   `upload_missing`
+- Agent: Die Engine-Prüfung gilt immer allen sieben Inhaltstabellen des Ziels, nicht nur denen,
+  die das Paket nennt, und läuft auch vor einer Rücknahme: ist eine nicht InnoDB,
+  `engine_unsupported` – nichts wird geschrieben bzw. zurückgenommen
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

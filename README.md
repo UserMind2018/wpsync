@@ -670,7 +670,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
 | `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
 | `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB), oder die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen grösser als `limits.max_state_bytes` (64 MB; `error.state_bytes` nennt die Summe) – in mehreren Pushes übertragen |
-| `engine_unsupported` | eine betroffene Tabelle ist nicht InnoDB, oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
+| `engine_unsupported` | eine der sieben Inhaltstabellen des Ziels ist nicht InnoDB (`error.tables`; geprüft werden immer alle, auch vor einer Rücknahme), oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
 | `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
 | `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
 | `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt) oder sieht serialisiert aus und lässt sich nicht lesen |

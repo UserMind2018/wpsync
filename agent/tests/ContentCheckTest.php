@@ -145,7 +145,7 @@ final class ContentCheckTest extends TestCase
         $this->store->engines = ['postmeta' => 'MyISAM'];
         $e                    = $this->refused('engine_unsupported', [ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'))]);
         $this->assertSame(['postmeta'], $e->toArray()['tables'], 'trash schreibt auch postmeta');
-        $this->check([$this->updatePost()])->run();
+        $this->refused('engine_unsupported', [$this->updatePost()]); // N5: jede der sieben Tabellen zählt, auch ohne Zeile im Paket
     }
 
     public function testListVersionMismatch(): void
@@ -444,6 +444,25 @@ final class ContentCheckTest extends TestCase
             ContentCheck::$maxStateBytes = ContentCheck::MAX_STATE_BYTES;
         }
         $this->assertSame(ContentCheck::MAX_STATE_BYTES, ContentPackage::limits()['max_state_bytes']);
+    }
+
+    /**
+     * N5: geprüft werden immer alle sieben Inhaltstabellen des Ziels, nicht nur die des Pakets –
+     * Papierkorb-Meta, Zuordnungen und die Rücknahme schreiben auch in Tabellen, die es nicht nennt.
+     */
+    public function testEveryContentTableMustBeInnoDb(): void
+    {
+        $rows = [ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => 'Neu'])];
+        $this->check($rows)->run();
+        foreach (['posts', 'postmeta', 'terms', 'termmeta', 'term_taxonomy', 'term_relationships', 'options'] as $table) {
+            $this->store->engines = [$table => 'MyISAM'];
+            $e                    = $this->refused('engine_unsupported', $rows);
+            $this->assertSame([$table], $e->toArray()['tables'], $table);
+        }
+        $this->store->engines = ['posts' => 'Aria', 'termmeta' => ''];
+        $this->assertSame(['posts', 'termmeta'], $this->refused('engine_unsupported', $rows)->toArray()['tables']);
+        $this->store->engines = ['posts' => 'innodb'];
+        $this->check($rows)->run();
     }
 
     /** AC-151: der Konflikt nennt alle abweichenden Schlüssel, nicht nur den ersten. */

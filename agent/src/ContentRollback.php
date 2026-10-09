@@ -19,7 +19,7 @@ final class ContentRollback
     /**
      * @param string $dir Ordner content im Arbeitsordner des Pushs
      * @return array{state: string, changes: array<string, mixed>|null} changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war
-     * @throws ContentException changed_since_push, before_image_invalid oder content_failed
+     * @throws ContentException changed_since_push, before_image_invalid, engine_unsupported oder content_failed
      */
     public static function run(ContentTarget $target, string $dir): array
     {
@@ -47,6 +47,8 @@ final class ContentRollback
         }
         $changes = $pushed['changes'] ?? null;
         unset($image, $pushed);
+        // Ohne InnoDB gäbe es keine Transaktion – auch nicht, wenn die Tabelle erst seit dem Push eine andere Engine hat.
+        ContentCheck::innodb($target->store);
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         try {

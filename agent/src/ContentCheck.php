@@ -146,14 +146,20 @@ final class ContentCheck
     /** Nr. 3: ohne InnoDB keine Transaktion. */
     private function engines(): void
     {
-        $tables = array_keys($this->package->counts());
-        foreach ($this->package->rows() as $row) {
-            if ($row['op'] === 'trash' && !in_array('postmeta', $tables, true)) {
-                $tables[] = 'postmeta'; // die Papierkorb-Meta schreibt der Agent selbst
-            }
-        }
+        self::innodb($this->target->store);
+    }
+
+    /**
+     * Alle sieben Inhaltstabellen des Ziels müssen InnoDB sein – nicht nur die, die ein Paket nennt:
+     * Papierkorb-Meta, Zuordnungen und die Rücknahme (purge) schreiben auch in andere. Auch die
+     * Rücknahme prüft das, bevor sie schreibt.
+     *
+     * @throws ContentException engine_unsupported
+     */
+    public static function innodb(ContentStore $store): void
+    {
         $bad = [];
-        foreach ($this->target->store->engines($tables) as $table => $engine) {
+        foreach ($store->engines(Canon::TABLES) as $table => $engine) {
             if (strtolower($engine) !== 'innodb') {
                 $bad[] = (string) $table;
             }
