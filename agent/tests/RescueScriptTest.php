@@ -151,6 +151,20 @@ final class RescueScriptTest extends TestCase
         $this->assertFileDoesNotExist($this->root . '/loaded.txt', 'die Rücknahme lädt nie WordPress');
     }
 
+    /** Fehlt dem Agent die Rücknahme der Inhalte (halb aktualisiert), antwortet rescue.php trotzdem – und nimmt den Code zurück. */
+    public function testAMissingContentClassIsNoFatal(): void
+    {
+        $this->committed();
+        PushRescue::setContent($this->work, self::ID, PushRescue::CONTENT_APPLIED);
+        mkdir($this->work . '/' . self::ID . '/content');
+        file_put_contents($this->work . '/' . self::ID . '/content/before.json', '{"keys":[]}');
+        unlink($this->content . '/plugins/wpsync-agent/src/RescueContent.php');
+        list($status, $body) = $this->request($this->post('rollback', ['content' => '1']));
+        $this->assertSame(200, $status);
+        $this->assertSame(['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], json_decode($body, true)['content']);
+        $this->assertSame('old', file_get_contents($this->content . '/plugins/x/main.php'));
+    }
+
     /**
      * R8, AC-169: action=cache lädt WordPress mit SHORTINIT im globalen Geltungsbereich – ein
      * Drop-in sieht die Variablen aus wp-config.php –, verwirft jede Ausgabe und leert den Cache.

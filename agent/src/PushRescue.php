@@ -351,6 +351,11 @@ final class PushRescue
                     return [423, ['ok' => false, 'error' => 'busy']];
                 }
                 try {
+                    // Unter der Sperre noch einmal: der Push kann zwischen Lesen und Sperren bestätigt worden sein.
+                    $fresh = self::read($workDir, $pushId);
+                    if ($fresh !== null && $fresh['status'] === self::CONFIRMED) {
+                        return [409, ['ok' => false, 'error' => 'confirmed']];
+                    }
                     // Ohne Sperre (false) keine Datenbank: dann wie bisher nur Code und Uploads.
                     $content = ($post['content'] ?? '') === '1' ? ['key' => $key, 'locked' => $lock !== false] : null;
                     $answer  = self::rollback((string) $contentDir, $workDir, $pushId, $content);
@@ -483,6 +488,9 @@ final class PushRescue
             $result = ['state' => 'nothing', 'wrote' => false];
         } elseif (empty($content['locked'])) {
             // Ohne Sperre könnte ein laufender Commit die Inhalte nach der Rücknahme festschreiben (R10).
+            $result = ['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'rescue_db_unavailable']];
+        } elseif (!class_exists(__NAMESPACE__ . '\\RescueContent', false) && !is_file(__DIR__ . '/RescueContent.php')) {
+            // Ein halb aktualisierter Agent: lieber Code und Uploads zurück als ein Fatal ohne Antwort.
             $result = ['state' => 'kept', 'wrote' => false, 'error' => ['code' => 'rescue_db_unavailable']];
         } else {
             require_once __DIR__ . '/RescueContent.php';
