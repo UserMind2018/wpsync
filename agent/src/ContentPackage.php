@@ -133,7 +133,12 @@ final class ContentPackage
         return $this->head;
     }
 
-    /** @return list<array{op: string, table: string, key: string, expected: string, row: array<string, mixed>|null}> */
+    /**
+     * dates: nur bei op trash und nur, wenn die Zeile sie trägt – post_date und post_date_gmt, die der
+     * Beitrag im Papierkorb bekommt. row ist bei op trash immer null.
+     *
+     * @return list<array{op: string, table: string, key: string, expected: string, row: array<string, mixed>|null, dates: array{post_date: string, post_date_gmt: string}|null}>
+     */
     public function rows(): array
     {
         return $this->rows;
@@ -217,7 +222,7 @@ final class ContentPackage
 
     /**
      * @param mixed $raw
-     * @return array{op: string, table: string, key: string, expected: string, row: array<string, mixed>|null}
+     * @return array{op: string, table: string, key: string, expected: string, row: array<string, mixed>|null, dates: array{post_date: string, post_date_gmt: string}|null}
      */
     private static function parseRow($raw, int $n): array
     {
@@ -241,10 +246,16 @@ final class ContentPackage
             throw $bad('expected passt nicht zu op.');
         }
         if ($op === 'trash') {
-            if ($table !== 'posts' || ($raw['row'] ?? null) !== null) {
-                throw $bad('trash gibt es nur für posts und ohne row.');
+            if ($table !== 'posts') {
+                throw $bad('trash gibt es nur für posts.');
             }
-            return ['op' => $op, 'table' => $table, 'key' => $key, 'expected' => $expected, 'row' => null];
+            // WordPress gibt einem nie veröffentlichten Entwurf beim Weg in den Papierkorb das Datum des
+            // Verschiebens: die Zeile darf genau diese beiden Spalten tragen, sonst nichts.
+            $dates = ($raw['row'] ?? null) === null ? null : self::dates($raw['row']);
+            if (($raw['row'] ?? null) !== null && $dates === null) {
+                throw $bad('row eines trash trägt genau post_date und post_date_gmt (JJJJ-MM-TT hh:mm:ss) oder fehlt.');
+            }
+            return ['op' => $op, 'table' => $table, 'key' => $key, 'expected' => $expected, 'row' => null, 'dates' => $dates];
         }
         if (!is_array($raw['row'] ?? null)) {
             throw $bad('row fehlt.');
@@ -259,7 +270,30 @@ final class ContentPackage
         if ($table === 'posts' && $op === 'insert' && $row['post_status'] === 'trash') {
             throw $bad('ein neuer Beitrag kann nicht im Papierkorb liegen.');
         }
-        return ['op' => $op, 'table' => $table, 'key' => $key, 'expected' => $expected, 'row' => $row];
+        return ['op' => $op, 'table' => $table, 'key' => $key, 'expected' => $expected, 'row' => $row, 'dates' => null];
+    }
+
+    /**
+     * row einer Zeile mit op trash: genau post_date und post_date_gmt, base64, als Datum mit Zeit.
+     *
+     * @param mixed $raw
+     * @return array{post_date: string, post_date_gmt: string}|null null: nicht diese Form
+     */
+    private static function dates($raw): ?array
+    {
+        $names = ['post_date', 'post_date_gmt'];
+        if (!is_array($raw) || count($raw) !== 2 || array_diff($names, array_keys($raw)) !== []) {
+            return null;
+        }
+        $out = [];
+        foreach ($names as $name) {
+            $value = is_string($raw[$name]) ? base64_decode($raw[$name], true) : false;
+            if ($value === false || preg_match(self::DATE, $value) !== 1) {
+                return null;
+            }
+            $out[$name] = $value;
+        }
+        return $out;
     }
 
     private static function validKey(string $table, string $key): bool

@@ -13,7 +13,8 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
 - `wpsync push <site> code … --content <package.jsonl>`: Inhalte als dritter Kanal eines Pushs –
   ein Paket aus Zeilen der sieben Inhaltstabellen (`update`, `insert` mit fester ID, `trash` –
   der Agent tut dabei, was WordPress beim Weg in den Papierkorb tut, samt `__trashed` am Namen
-  und `_wp_desired_post_slug`),
+  und `_wp_desired_post_slug`; `trash` darf `row` mit genau `post_date` und `post_date_gmt`
+  tragen – das Datum, das WordPress einem nie veröffentlichten Entwurf beim Verschieben gibt),
   transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
   Vorher-Abbild, Nacharbeiten (`data.post_actions`) und Health-Check der geänderten Seiten.
   `--dry-run` prüft das ganze Paket ohne Push-Fenster; das `plan`-Ereignis nennt

@@ -157,6 +157,11 @@ final class ContentPackageTest extends TestCase
             'Zuordnung NULL'                  => ContentFixtures::row('update', 'term_relationships', "219\0category", $h, ['values' => [null]]),
             'trash für Meta'                  => ContentFixtures::row('trash', 'postmeta', "219\0_x", $h),
             'trash mit row'                   => ContentFixtures::row('trash', 'posts', '219', $h, ContentFixtures::postRow('219')),
+            'trash mit einer Datumsspalte'    => ContentFixtures::row('trash', 'posts', '219', $h, ['post_date' => '2026-10-09 12:00:00']),
+            'trash mit fremder Spalte'        => ContentFixtures::row('trash', 'posts', '219', $h, ['post_date' => '2026-10-09 12:00:00', 'post_date_gmt' => '2026-10-09 10:00:00', 'post_title' => 'x']),
+            'trash mit falschem Datum'        => ContentFixtures::row('trash', 'posts', '219', $h, ['post_date' => '2026-10-09 12:00:00', 'post_date_gmt' => 'gestern']),
+            'trash mit Datum ohne Zeit'       => ContentFixtures::row('trash', 'posts', '219', $h, ['post_date' => '2026-10-09', 'post_date_gmt' => '2026-10-09 10:00:00']),
+            'trash mit leerem row'            => ['op' => 'trash', 'table' => 'posts', 'key' => '219', 'expected' => $h, 'row' => []],
             'update ohne row'                 => ContentFixtures::row('update', 'posts', '219', $h),
             'Spalte fehlt'                    => ContentFixtures::row('update', 'posts', '219', $h, array_diff_key(ContentFixtures::postRow('219'), ['post_title' => 1])),
             'fremde Spalte'                   => ContentFixtures::row('update', 'posts', '219', $h, ['post_author' => '1'] + ContentFixtures::postRow('219')),
@@ -188,6 +193,24 @@ final class ContentPackageTest extends TestCase
         $raw = ContentFixtures::text([ContentFixtures::row('update', 'options', 'blogname', $h, ['option_value' => 'x'])]);
         $this->assertRefused('package_invalid', str_replace('"eA=="', '"kein base64!"', $raw), 'kein base64');
         $this->assertRefused('package_invalid', str_replace('"op":"update"', '"op":"update","zusatz":1', $raw), 'unbekanntes Feld in der Zeile');
+    }
+
+    /**
+     * op trash darf row mit genau post_date und post_date_gmt tragen: WordPress gibt einem nie
+     * veröffentlichten Entwurf beim Weg in den Papierkorb das Datum des Verschiebens.
+     */
+    public function testTrashMayCarryTheTwoDates(): void
+    {
+        $h    = str_repeat('a', 64);
+        $rows = ContentPackage::read($this->write(ContentFixtures::text([
+            ContentFixtures::row('trash', 'posts', '219', $h, ['post_date' => '2026-10-09 12:00:00', 'post_date_gmt' => '2026-10-09 10:00:00']),
+            ContentFixtures::row('trash', 'posts', '220', $h, ['post_date' => '0000-00-00 00:00:00', 'post_date_gmt' => '0000-00-00 00:00:00']),
+            ContentFixtures::row('trash', 'posts', '221', $h),
+        ])))->rows();
+        $this->assertNull($rows[0]['row'], 'row bleibt den ganzen Zeilen vorbehalten');
+        $this->assertSame(['post_date' => '2026-10-09 12:00:00', 'post_date_gmt' => '2026-10-09 10:00:00'], $rows[0]['dates']);
+        $this->assertSame(['post_date' => '0000-00-00 00:00:00', 'post_date_gmt' => '0000-00-00 00:00:00'], $rows[1]['dates']);
+        $this->assertNull($rows[2]['dates']);
     }
 
     /** Die Meldung nennt die Zeile, nie einen Wert. */

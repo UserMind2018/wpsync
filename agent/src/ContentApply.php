@@ -91,7 +91,7 @@ final class ContentApply
 
     /**
      * Was geschrieben wird, in der Reihenfolge von ContentState::ORDER: [Tabelle, Schlüssel,
-     * neuer Rohzustand oder null]. Für op trash kommen die beiden Papierkorb-Meta dazu, die das
+     * neuer Rohzustand oder null]. Für op trash kommen die Papierkorb-Meta dazu, die das
      * Paket nicht setzen darf (Studio §5.2, W8).
      *
      * @return list<array{0: string, 1: string, 2: array<string, mixed>|null}>
@@ -112,7 +112,9 @@ final class ContentApply
                 // _wp_desired_post_slug, Status und Zeit des Papierkorbs. add_post_meta() hängt an, es ersetzt nicht.
                 $meta = ['_wp_trash_meta_status' => (string) $current['post_status'], '_wp_trash_meta_time' => (string) $now];
                 $name = (string) ($current['post_name'] ?? '');
-                $row  = ['post_status' => 'trash'];
+                // Trägt die Zeile post_date und post_date_gmt (WordPress setzt sie beim Papierkorb eines nie
+                // veröffentlichten Entwurfs), gehen sie mit – der Abdruck ist dann der der Arbeitskopie.
+                $row  = ['post_status' => 'trash'] + ($row['dates'] ?? []);
                 if (substr($name, -9) !== '__trashed') {
                     $meta['_wp_desired_post_slug'] = $name;
                     $row['post_name']              = self::trashedName($name, $key, $current, $target);

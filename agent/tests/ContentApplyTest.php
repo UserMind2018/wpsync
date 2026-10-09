@@ -351,6 +351,35 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertArrayNotHasKey("220\0_wp_trash_meta_time", $data['postmeta']);
     }
 
+    /**
+     * Trägt op trash post_date und post_date_gmt, setzt der Agent sie mit Status und Name: nach dem
+     * Push ist der Abdruck der Zeile der der Arbeitskopie. Die Rücknahme stellt die alten Daten her.
+     */
+    public function testTrashSetsTheDatesOfThePackage(): void
+    {
+        $this->store->data['posts']['220']['post_date_gmt'] = '0000-00-00 00:00:00'; // nie veröffentlicht
+        $old    = $this->store->data;
+        $dates  = ['post_date' => '2026-10-09 16:13:20', 'post_date_gmt' => '2026-10-09 14:13:20'];
+        $result = $this->apply([ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'), $dates)]);
+        $row    = $this->store->data['posts']['220'];
+        $this->assertSame(['trash', 'seite-220__trashed', '2026-10-09 16:13:20', '2026-10-09 14:13:20'], [$row['post_status'], $row['post_name'], $row['post_date'], $row['post_date_gmt']]);
+        $this->assertSame($this->h('posts', '220'), $result['after'][0]['h'], 'content.after trägt den Abdruck mit den neuen Daten');
+        $local = array_merge($old['posts']['220'], $dates, ['post_status' => 'trash', 'post_name' => 'seite-220__trashed']);
+        $this->assertSame(ContentFixtures::hash('posts', '220', $local), $result['after'][0]['h'], 'so steht die Zeile in der Arbeitskopie');
+
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
+
+    /** Liegt der Beitrag auf dem Ziel schon im Papierkorb, schreibt op trash nichts – auch keine Daten. */
+    public function testTrashWithDatesOfAPostAlreadyInTheTrashWritesNothing(): void
+    {
+        $this->store->data['posts']['220']['post_status'] = 'trash';
+        $old = $this->store->data;
+        $this->apply([ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'), ['post_date' => '2026-10-09 16:13:20', 'post_date_gmt' => '2026-10-09 14:13:20'])]);
+        $this->assertSame($old, $this->store->data);
+    }
+
     /** Wie _truncate_post_slug( …, 191 ) und der Fall „trägt das Suffix schon“ in wp_add_trashed_suffix_to_post_name_for_post(). */
     public function testTrashedNamesFollowCore(): void
     {

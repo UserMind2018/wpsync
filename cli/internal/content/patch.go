@@ -29,6 +29,7 @@ type Change struct {
 	// package has no row for.
 	Row json.RawMessage
 	// Trash: the package moved the post to the trash; the baseline keeps its row with that status.
+	// Row then holds at most post_date and post_date_gmt, the dates the post got in the trash.
 	Trash bool
 }
 
@@ -111,6 +112,19 @@ func Patch(siteDir string, changes map[Key]Change) (*Undo, error) {
 			row["post_status"] = packValue("trash")
 			if name, ok := unpackValue(row["post_name"]); ok {
 				row["post_name"] = packValue(TrashedName(name))
+			}
+			// The two dates a trash may carry (WordPress sets them when a draft that was never
+			// published goes to the trash) – nothing else of its row.
+			if c.Row != nil {
+				dates := map[string]json.RawMessage{}
+				if err := json.Unmarshal(c.Row, &dates); err != nil {
+					return nil, false, fmt.Errorf("row of a trash: %w", err)
+				}
+				for _, name := range []string{"post_date", "post_date_gmt"} {
+					if value, ok := dates[name]; ok {
+						row[name] = value
+					}
+				}
 			}
 			packed, err := json.Marshal(row)
 			if err != nil {

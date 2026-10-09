@@ -53,6 +53,21 @@ const (
 	rowMeta   = `{"op":"insert","table":"postmeta","key":"219\u0000_x","expected":"absent","row":{"values":["eA=="]}}`
 )
 
+// A trash may carry row with post_date and post_date_gmt; the form is the agent's to check.
+func TestLoadPackageKeepsTheDatesOfATrash(t *testing.T) {
+	dates := `{"post_date":"MjAyNi0xMC0wOSAxNjoxMzoyMA==","post_date_gmt":"MjAyNi0xMC0wOSAxNDoxMzoyMA=="}`
+	row := strings.Replace(rowTrash, `"}`, `","row":`+dates+`}`, 1)
+	p, err := LoadPackage(writePackage(t, packageText(t, []string{row, rowTrash219()}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Rows[0].Op != "trash" || string(p.Rows[0].Row) != dates || p.Rows[1].Row != nil {
+		t.Errorf("rows = %+v", p.Rows)
+	}
+}
+
+func rowTrash219() string { return strings.Replace(rowTrash, "220", "219", 1) }
+
 func TestLoadPackageReadsHeadRowsAndTheNameOfTheFile(t *testing.T) {
 	text := packageText(t, []string{rowUpdate, rowTrash, rowMeta}, nil)
 	p, err := LoadPackage(writePackage(t, text))

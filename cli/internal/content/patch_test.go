@@ -211,6 +211,46 @@ func TestPatchRefusesAnOverlongLine(t *testing.T) {
 	}
 }
 
+// op trash with the two dates WordPress sets when a never published draft goes to the trash:
+// the baseline takes them over with status and name, nothing else of the row changes.
+func TestPatchTakesTheDatesOfATrashedDraft(t *testing.T) {
+	siteDir := patchSite(t)
+	dir := filepath.Join(siteDir, ".wpsync", "content")
+	baseline := `{"t":"posts","k":"220","h":"h220","row":{"post_date":"` + b64("2026-10-01 08:00:00") + `","post_date_gmt":"` + b64("0000-00-00 00:00:00") + `","post_name":"` + b64("entwurf") + `","post_status":"` + b64("draft") + `","post_title":"` + b64("Entwurf") + `"},"p":true}
+`
+	if err := os.WriteFile(filepath.Join(dir, baselineName), []byte(baseline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := read(t, siteDir, baselineName)
+	dates := `{"post_date":"` + b64("2026-10-09 16:13:20") + `","post_date_gmt":"` + b64("2026-10-09 14:13:20") + `"}`
+	undo, err := Patch(siteDir, map[Key]Change{{"posts", "220"}: {H: str("n220"), Trash: true, Row: json.RawMessage(dates)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := lineOf(t, read(t, siteDir, baselineName), "posts", "220")
+	want := map[string]any{
+		"post_date": b64("2026-10-09 16:13:20"), "post_date_gmt": b64("2026-10-09 14:13:20"),
+		"post_name": b64("entwurf__trashed"), "post_status": b64("trash"), "post_title": b64("Entwurf"),
+	}
+	if post["h"] != "n220" || !reflect.DeepEqual(post["row"], want) {
+		t.Errorf("posts 220 = %v", post)
+	}
+	if err := Unpatch(siteDir, undo); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, siteDir, baselineName); got != before {
+		t.Errorf("baseline after Unpatch = %s", got)
+	}
+	// Anything but the two dates in the row of a trash is not the baseline's business.
+	bad := `{"post_date":"` + b64("2026-10-09 16:13:20") + `","post_date_gmt":"` + b64("2026-10-09 14:13:20") + `","post_title":"` + b64("fremd") + `"}`
+	if _, err := Patch(siteDir, map[Key]Change{{"posts", "220"}: {H: str("n220"), Trash: true, Row: json.RawMessage(bad)}}); err != nil {
+		t.Fatal(err)
+	}
+	if row := lineOf(t, read(t, siteDir, baselineName), "posts", "220")["row"].(map[string]any); row["post_title"] != b64("Entwurf") {
+		t.Errorf("a column other than the dates came through: %v", row)
+	}
+}
+
 // op trash: the agent does what WordPress does – __trashed at the name, the old name in
 // _wp_desired_post_slug, status and time of the trash. The baseline follows with what it can
 // know (name, status, the two metas it has the values for); h is always the agent's.
