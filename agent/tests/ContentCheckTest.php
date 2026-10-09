@@ -345,38 +345,47 @@ final class ContentCheckTest extends TestCase
         $this->assertSame([['table' => 'posts', 'key' => '999999999999999999']], $e->keys());
         $this->refused('id_outside_corridor', [ContentFixtures::row('insert', 'posts', '9007199254740992', 'absent', ContentFixtures::postRow('9007199254740992'))], $wide);
 
-        // Höchste ID der Beiträge ist 400: bis 1000400 geht es, darüber nicht.
-        $this->assertSame(1000000, ContentCheck::ID_HEADROOM);
-        $this->check([ContentFixtures::row('insert', 'posts', '1000400', 'absent', ContentFixtures::postRow('1000400'))], $wide)->run();
-        $e = $this->refused('id_outside_corridor', [
+        // Das Studio vergibt neue IDs ab id_max + 1.000.001 (Studio §6.1): schon die erste läge über einem
+        // Abstand von einer Million. Der Abstand ist deshalb doppelt so gross – Platz für eine Million
+        // neuer Objekte seit dem Pull. Höchste ID der Beiträge ist 400: bis 2000400 geht es, darüber nicht.
+        $this->assertSame(2000000, ContentCheck::ID_HEADROOM);
+        $this->check([
             ContentFixtures::row('insert', 'posts', '1000401', 'absent', ContentFixtures::postRow('1000401')),
+            ContentFixtures::row('insert', 'posts', '2000400', 'absent', ContentFixtures::postRow('2000400')),
             ContentFixtures::row('insert', 'terms', '1000010', 'absent', ['name' => 'N', 'slug' => 'n', 'term_group' => '0']),
-            ContentFixtures::row('insert', 'term_taxonomy', '1000010', 'absent', ['term_id' => '1000009', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000010', 'absent', ['term_id' => '1000010', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+        ], $wide)->run();
+        $e = $this->refused('id_outside_corridor', [
+            ContentFixtures::row('insert', 'posts', '2000401', 'absent', ContentFixtures::postRow('2000401')),
+            ContentFixtures::row('insert', 'terms', '2000010', 'absent', ['name' => 'N', 'slug' => 'n', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '2000010', 'absent', ['term_id' => '2000009', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
         ], $wide);
-        $this->assertSame(['1000401', '1000010', '1000010'], array_column($e->keys(), 'key'), 'Terme und term_taxonomy: höchste ID 9');
+        $this->assertSame(['2000401', '2000010', '2000010'], array_column($e->keys(), 'key'), 'Terme und term_taxonomy: höchste ID 9');
 
         // AUTO_INCREMENT − 1 zählt wie im Manifest (id_max): gelöschte Objekte haben den Zähler schon verschoben.
         $this->store->counters = ['posts' => 5000, 'terms' => 5000, 'term_taxonomy' => 5000];
         $this->check([
-            ContentFixtures::row('insert', 'posts', '1005000', 'absent', ContentFixtures::postRow('1005000')),
-            ContentFixtures::row('insert', 'terms', '1005000', 'absent', ['name' => 'N', 'slug' => 'n', 'term_group' => '0']),
-            ContentFixtures::row('insert', 'term_taxonomy', '1005000', 'absent', ['term_id' => '1005000', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('insert', 'posts', '2005000', 'absent', ContentFixtures::postRow('2005000')),
+            ContentFixtures::row('insert', 'terms', '2005000', 'absent', ['name' => 'N', 'slug' => 'n', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '2005000', 'absent', ['term_id' => '2005000', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
         ], $wide)->run();
-        $this->refused('id_outside_corridor', [ContentFixtures::row('insert', 'posts', '1005001', 'absent', ContentFixtures::postRow('1005001'))], $wide);
+        $this->refused('id_outside_corridor', [ContentFixtures::row('insert', 'posts', '2005001', 'absent', ContentFixtures::postRow('2005001'))], $wide);
     }
 
     /** M1: auf Staging zählen die Tabellen der Kopie – ihr Store, nicht der von Live. */
     public function testTheHeadroomIsThatOfTheTargetsOwnTables(): void
     {
         $copy = new ContentMemory(['posts' => ['7' => ContentFixtures::post('7')], 'options' => ['stylesheet' => ContentFixtures::option('stylesheet', 'hello-child')]]);
-        $row  = ContentFixtures::row('insert', 'posts', '1000008', 'absent', ContentFixtures::postRow('1000008'));
+        $wide = ['corridor' => ['offset' => 1000000, 'posts' => [1000001, 9999999], 'terms' => [1000001, 9999999], 'term_taxonomy' => [1000001, 9999999]]];
+        $row  = ContentFixtures::row('insert', 'posts', '2000008', 'absent', ContentFixtures::postRow('2000008'));
         try {
-            $this->check([$row], [], ContentFixtures::staging($copy))->run();
+            $this->check([$row], $wide, ContentFixtures::staging($copy))->run();
             $this->fail('accepted');
         } catch (ContentException $e) {
             $this->assertSame('id_outside_corridor', $e->reason());
         }
-        $this->check([ContentFixtures::row('insert', 'posts', '1000007', 'absent', ContentFixtures::postRow('1000007'))], [], ContentFixtures::staging($copy))->run();
+        $this->check([ContentFixtures::row('insert', 'posts', '2000007', 'absent', ContentFixtures::postRow('2000007'))], $wide, ContentFixtures::staging($copy))->run();
+        $this->check([ContentFixtures::row('insert', 'posts', '1000008', 'absent', ContentFixtures::postRow('1000008'))], $wide, ContentFixtures::staging($copy))->run();
     }
 
     /**

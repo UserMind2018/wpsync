@@ -108,10 +108,11 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   weder mit Leerraum an den Rändern noch eine Ebene tiefer
 - Agent: Neue IDs eines Inhalts-Pakets (`posts`, `terms`, `term_taxonomy`) prüft der Agent nicht
   mehr nur gegen den Korridor aus dem Paket, sondern gegen das Ziel: höchstens
-  `limits.id_headroom` (1.000.000) über `max(MAX(id), AUTO_INCREMENT − 1)` der Tabelle – auf
+  `limits.id_headroom` (2.000.000) über `max(MAX(id), AUTO_INCREMENT − 1)` der Tabelle – auf
   Staging der Kopie – und nie über 2^53 − 1, sonst `id_outside_corridor` mit `error.keys`. Ein
   `insert` mit einer ID wie 999999999999999999 verschob sonst den `AUTO_INCREMENT` von Live
-  dauerhaft (auch eine Rücknahme setzt ihn nicht zurück). `limits` nennt die Grenze als
+  dauerhaft (auch eine Rücknahme setzt ihn nicht zurück). Zwei Millionen, weil neue Objekte
+  der Arbeitskopie bei `id_max` + 1.000.001 beginnen. `limits` nennt die Grenze als
   `id_headroom`, auch im `plan`-Ereignis der CLI
 - Agent: Eine gescheiterte Abfrage des Inhaltskanals landet nicht mehr samt allen Werten im
   PHP-Fehlerprotokoll. `hide_errors()` schaltete nur die Ausgabe ab; `wpdb::print_error()`

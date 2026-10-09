@@ -102,7 +102,7 @@ func TestPushBeginCarriesTheContentAndItsPlan(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.Write([]byte(`{"push_id":"","agent_version":"0.7.0","window_open":false,"units":[],"rescue":{"url":"x"},
 "content":{"ok":false,"partial":true,"error":{"code":"conflict","message":"ge\u0007ändert","keys":[{"table":"posts","key":"219"},{"table":"postmeta","key":"219\u0000_x"},{"table":"../x","key":"1"}],"total":3},
-"rows":{"posts":2,"postmeta":1},"limits":{"max_rows":5000,"max_bytes":8388608,"budget_seconds":12,"id_headroom":1000000,"max_state_bytes":67108864},
+"rows":{"posts":2,"postmeta":1},"limits":{"max_rows":5000,"max_bytes":8388608,"budget_seconds":12,"id_headroom":2000000,"max_state_bytes":67108864},
 "conflicts":[{"table":"posts","key":"219"}],"health_urls":["https://kunde.de/a/"],
 "extensions":{"post_types":["referenz","../x"],"taxonomies":[],"meta_exceptions":["design_token"]}}}`))
 	}))
@@ -118,7 +118,7 @@ func TestPushBeginCarriesTheContentAndItsPlan(t *testing.T) {
 	}
 	ct := plan.Content
 	if ct == nil || ct.OK || !ct.Partial || ct.Error.Code != "conflict" || ct.Error.Total != 3 || ct.Rows["posts"] != 2 || ct.Limits.MaxRows != 5000 ||
-		ct.Limits.BudgetSeconds != 12 || ct.Limits.IDHeadroom != 1000000 || ct.Limits.MaxStateBytes != 64<<20 || len(ct.Conflicts) != 1 || ct.HealthURLs[0] != "https://kunde.de/a/" {
+		ct.Limits.BudgetSeconds != 12 || ct.Limits.IDHeadroom != 2000000 || ct.Limits.MaxStateBytes != 64<<20 || len(ct.Conflicts) != 1 || ct.HealthURLs[0] != "https://kunde.de/a/" {
 		t.Fatalf("content = %+v", ct)
 	}
 	if e := ct.Extensions; e == nil || !reflect.DeepEqual(*e, ContentExtensions{PostTypes: []string{"referenz"}, Taxonomies: []string{}, MetaExceptions: []string{"design_token"}}) {

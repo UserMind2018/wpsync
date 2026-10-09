@@ -14,8 +14,10 @@ final class ContentCheck
      * So weit über der höchsten vergebenen ID des Ziels darf ein neues Objekt liegen. Der Korridor
      * kommt aus dem Paket und begrenzt allein nichts: ein Insert weit darüber verschöbe den
      * AUTO_INCREMENT der Tabelle auf Dauer – auch eine Rücknahme setzt ihn nicht zurück.
+     * Zwei Millionen: das Studio vergibt neue IDs ab id_max + 1.000.001 (Studio §6.1); eine Million
+     * Abstand schlösse schon die erste aus. So bleibt Platz für eine Million neuer Objekte seit dem Pull.
      */
-    public const ID_HEADROOM = 1000000;
+    public const ID_HEADROOM = 2000000;
     /** Darüber ist eine ID in JSON und JavaScript keine genaue Zahl mehr (2^53 − 1). */
     public const MAX_ID = 9007199254740991;
     /**
