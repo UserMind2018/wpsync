@@ -53,6 +53,7 @@ eq() { if [ "$2" = "$3" ]; then pass; else bad "$1 (ist: $2, soll: $3)"; fi; } #
 ok() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then pass; else bad "$what"; fi; }
 no() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$what"; else pass; fi; }
 hasF() { grep -qF -- "$2" "$1"; } # hasF <datei> <text>
+contains() { case "$1" in *"$2"*) return 0 ;; esac; return 1; } # contains <text> <teilstring>
 src() { (cd "$SRC" && ddev "$@"); }
 http_url() { (cd "$1" && ddev describe -j | jq -r '.raw.httpurl'); }
 code() { curl -s -o /dev/null -m 20 -w '%{http_code}' "$@" || true; }
@@ -139,7 +140,7 @@ trust_ddev() { # gibt .ddev des Ziels frei – ohne Terminal nur über den Finge
 # Stellt her, was ein abgebrochener Lauf an der Quelle verstellt haben kann.
 restore_source() {
   rm -f "$CTL/hold" "$CTL/needs" "$PUB/.maintenance" "$WPC/e2e-plg-loaded.log" "$WPC/object-cache.php" "$WPC/e2e-object-cache.ser"
-  rm -rf "$WPC/plugins/plg-ok" "$WPC/plugins/plg-fatal" "$WPC/plugins/plg-admin-fatal" "$WPC/plugins/wp-rocket" "$WPC/plugins/plg-php99" "$WPC/plugins/plg-wp99" "$WPC/plugins/plg-needs" "$WPC/plugins/plg-nohead" "$WPC/plugins/plg-two"
+  rm -rf "$WPC/plugins/plg-x" "$WPC/plugins/plg-ok" "$WPC/plugins/plg-fatal" "$WPC/plugins/plg-admin-fatal" "$WPC/plugins/wp-rocket" "$WPC/plugins/plg-php99" "$WPC/plugins/plg-wp99" "$WPC/plugins/plg-needs" "$WPC/plugins/plg-nohead" "$WPC/plugins/plg-two"
   if [ -s "$E2E/auth-key" ] && [ -f "$PUB/wp-config.php" ]; then
     (cd "$SRC" && ddev wp config set AUTH_KEY "$(cat "$E2E/auth-key")" --type=constant) >/dev/null 2>&1 || true
   fi
@@ -470,6 +471,16 @@ jrun act-again-back "$WPSYNC" rollback "$TARGET" "$(last act-again '.data.push_i
 eq "AC-182: die Rücknahme eines Satzes, der nichts änderte, lässt das Plugin aktiv" "$RC $(active)" "0 $WANT"
 
 echo "== AC-184, AC-193: die Rücknahme über den Agent"
+# Security-Review P4 S1: die Rücknahme eines BESTÄTIGTEN Pushs, der Plugins geschaltet hat, braucht denselben Öffner
+# wie der Push – ein per WP-CLI geöffnetes Fenster (ohne Öffner) genügt nicht; mit dem Fenster des Administrators geht es.
+window "$(($(date +%s) + 3600))"
+jrun act-back-cli "$WPSYNC" rollback "$TARGET" "$ACT_ID" --json
+eq "S1: Fenster per WP-CLI – Rücknahme des bestätigten Pushs abgelehnt" "$RC $(last act-back-cli '.error.reason')" "1 plugins_not_allowed"
+eq "S1: die Liste Byte für Byte wie zuvor, der Code steht noch" "$(active) $(test -f "$WPC/plugins/plg-ok/plg-ok.php" && echo da)" "$WANT da"
+src wp eval "WpSync\\Admin::openWindow('$KEY_ID', 28800, $EDITOR_ID);" >/dev/null
+jrun act-back-editor "$WPSYNC" rollback "$TARGET" "$ACT_ID" --json
+eq "S1: Öffner ohne activate_plugins – ebenso abgelehnt" "$RC $(last act-back-editor '.error.reason') $(active)" "1 plugins_not_allowed $WANT"
+open_window
 jrun act-back "$WPSYNC" rollback "$TARGET" "$ACT_ID" --json
 eq "Rücknahme: Exit 0 über den Agent" "$RC $(last act-back '.data.via')" "0 agent"
 eq "Rücknahme: plugins_back nennt den Eintrag" "$(last act-back '.data.plugins_back.deactivated | join(",")')" "plg-ok/plg-ok.php"
@@ -627,6 +638,57 @@ ok "AC-187: der Cache trägt die Liste mit dem Plugin" sh -c "grep -a -q 'plg-so
 src exec rm -f "$CTL_IN/needs" /var/www/html/public/wp-content/object-cache.php /var/www/html/public/wp-content/e2e-object-cache.ser
 clean "AC-187"
 
+echo "== Security-Review P4 S2: ein späterer Push, der dieselbe Einheit tauscht oder schaltet, sperrt die Rücknahme des älteren"
+# Szenario 1: A aktiviert plg-ok (neuer Code), B schaltet es ohne Einheit wieder ab. Erst B zurück, dann A.
+jrun s2-a "$WPSYNC" push "$TARGET" code --activate plugins/plg-ok --yes --json
+jrun s2-b "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-ok --yes --json
+eq "S2 Szenario 1: beide Pushes bestätigt" "$(last s2-a '.data.status') $(last s2-b '.data.status')" "confirmed confirmed"
+jrun s2-a-back "$WPSYNC" rollback "$TARGET" "$(last s2-a '.data.push_id')" --json
+eq "S2 Szenario 1: die Rücknahme von A ist gesperrt, solange B steht" "$RC" 1
+ok "S2 Szenario 1: die Meldung nennt den späteren Push" contains "$(last s2-a-back '.error.message')" "$(last s2-b '.data.push_id')"
+ok "S2 Szenario 1: der Code von A steht noch" test -f "$WPC/plugins/plg-ok/plg-ok.php"
+no "S2 Szenario 1: plg-ok ist aus – nicht mit altem Code wieder aktiv" is_active plg-ok/plg-ok.php
+jrun s2-b-back "$WPSYNC" rollback "$TARGET" "$(last s2-b '.data.push_id')" --json
+eq "S2 Szenario 1: B geht zurück – plg-ok läuft wieder, mit dem Code von A" "$RC $(last s2-b-back '.data.plugins_back.reactivated | join(",")')" "0 plg-ok/plg-ok.php"
+jrun s2-a-back2 "$WPSYNC" rollback "$TARGET" "$(last s2-a '.data.push_id')" --json
+eq "S2 Szenario 1: danach geht auch A zurück" "$RC $(last s2-a-back2 '.data.plugins_back.deactivated | join(",")')" "0 plg-ok/plg-ok.php"
+sql -e "DELETE FROM ${PREFIX}options WHERE option_name IN ('plg_ok_activated', 'recently_activated')" || true
+clean "S2 Szenario 1"
+# Szenario 2: A schaltet plg-solo ab, B tauscht danach seinen Code. Die Rücknahme von A aktivierte sonst den Code von B.
+cp -p "$LWPC/plugins/plg-solo/plg-solo.php" "$E2E/plg-solo.good"
+jrun s2-c "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-solo --yes --json
+printf '\n// e2e: geändert für S2\n' >>"$LWPC/plugins/plg-solo/plg-solo.php"
+jrun s2-d "$WPSYNC" push "$TARGET" code plugins/plg-solo --yes --json
+eq "S2 Szenario 2: beide Pushes bestätigt" "$(last s2-c '.data.status') $(last s2-d '.data.status')" "confirmed confirmed"
+jrun s2-c-back "$WPSYNC" rollback "$TARGET" "$(last s2-c '.data.push_id')" --json
+eq "S2 Szenario 2: die Rücknahme der Deaktivierung ist gesperrt, solange der spätere Code-Push steht" "$RC" 1
+no "S2 Szenario 2: plg-solo ist nicht mit dem ungeprüften Code wieder aktiv" is_active plg-solo/plg-solo.php
+jrun s2-d-back "$WPSYNC" rollback "$TARGET" "$(last s2-d '.data.push_id')" --json
+eq "S2 Szenario 2: der Code-Push geht zurück" "$RC" 0
+jrun s2-c-back2 "$WPSYNC" rollback "$TARGET" "$(last s2-c '.data.push_id')" --json
+eq "S2 Szenario 2: danach die Deaktivierung" "$RC $(last s2-c-back2 '.data.plugins_back.reactivated | join(",")')" "0 plg-solo/plg-solo.php"
+cp -p "$E2E/plg-solo.good" "$LWPC/plugins/plg-solo/plg-solo.php"
+clean "S2 Szenario 2"
+
+echo "== Security-Review P4 S6: ein Eintrag mit Klammern im Dateinamen wird geschaltet, zurückgenommen und genannt – in der Ausgabe gequotet"
+# Aktivieren lässt sich eine solche Hauptdatei über einen Push nicht (file_name) – sie steht schon auf der Site.
+ODD='plg-x/mein(plugin).php'
+mkdir -p "$WPC/plugins/plg-x"
+printf '<?php\n/* Plugin Name: PLG Klammer\n * Version: 1.0 */\n' >"$WPC/plugins/plg-x/mein(plugin).php"
+src wp eval "\$l = (array) get_option('active_plugins'); \$l[] = '$ODD'; sort(\$l); update_option('active_plugins', \$l);" >/dev/null
+ODD_LIST="$(active)"
+jrun odd "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-x --yes --json
+eq "S6: deaktiviert, Exit 0" "$RC $(last odd '.data.plugins.deactivated | join(",")')" "0 plugins/plg-x"
+no "S6: der Eintrag steht nicht mehr in der Liste" is_active "$ODD"
+ok "S6: die Ausgabe nennt den Eintrag gequotet" hasF "$JSON/odd.err" "deaktiviert: plugins/plg-x (\"$ODD\")"
+jrun odd-back "$WPSYNC" rollback "$TARGET" "$(last odd '.data.push_id')" --json
+eq "S6: plugins_back nennt den Eintrag unverändert" "$RC $(last odd-back '.data.plugins_back.reactivated | join(",")')" "0 $ODD"
+ok "S6: die Ausgabe der Rücknahme nennt ihn gequotet" hasF "$JSON/odd-back.err" "wieder aktiviert: \"$ODD\""
+eq "S6: die Liste Byte für Byte wie vor dem Push" "$(active)" "$ODD_LIST"
+src wp eval "\$l = array_values(array_diff((array) get_option('active_plugins'), ['$ODD'])); sort(\$l); update_option('active_plugins', \$l);" >/dev/null
+rm -rf "$WPC/plugins/plg-x"
+clean "S6"
+
 echo "== AC-192: Staging – nur die Tabelle der Kopie; was die Kopie abschaltet, bleibt aus"
 jrun staging-create "$WPSYNC" staging create "$TARGET" --yes --json --rps 20
 [ "$RC" = 0 ] || fail "staging create (Exit $RC, siehe $JSON/staging-create.err)"
@@ -678,6 +740,8 @@ echo "SKIP: AC-183 (eine Transaktion – Paketzeile scheitert im COMMIT, Verbind
 echo "SKIP: AC-180 Multisite, MyISAM (engine_unsupported), AC-210 (Kopie schaltet das Plugin ohnehin ab): Sache des Zielsystems bzw. der Liste DISABLED_ON_STAGING – decken PushPluginsPlanTest und ContentApplyPluginsTest."
 echo "SKIP: rescue.php stirbt zwischen dem COMMIT der Rücknahme und dem Vermerk in rescue.json (die Wiederholung findet dann „nichts zu tun“, ohne Cache-Schritt): ein Prozess-Tod an genau dieser Stelle ist im E2E nicht herstellbar – bekannte Grenze, README."
 echo "SKIP: Beleg Nr. 1, zweiter Teil (admin-ajax.php der Kopie MIT Zugangs-Cookie antwortet 400): den Cookie holt nur der Health-Check der CLI; belegt ist, dass der Push nach Staging mit dieser Seite im Health-Check durchgeht (Exit 0)."
+echo "SKIP: Security-Review P4 S3 (der Agent unter einem anderen Ordnernamen): den laufenden Agent im E2E umzubenennen, risse Pairing und Arbeitsordner mit – decken PushPluginsTest und PushPluginsBeginTest."
+echo "SKIP: S4 (Object-Cache hält den alten Stand trotz Nacharbeit): bräuchte ein Drop-in, das Löschen verweigert – decken ContentPostActionsTest und TestRunNeverConfirmsAPluginStateWhoseCacheStepFailed."
 echo "SKIP: AC-198, AC-211 (Abnahme mit Borlabs auf vorlage): nach dem Release, Task 26."
 
 echo "== Aufräumen auf der Quelle"

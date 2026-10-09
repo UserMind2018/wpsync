@@ -957,7 +957,8 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   Elementor-CSS, Yoast-Indexables, bekannte Cache-Plugins (WP Rocket, W3 Total Cache, LiteSpeed,
   SG Optimizer, Breeze), Rewrite-Regeln bei Bedarf, Term-Zähler, eine Revision je geänderter
   Seite – jeder Schritt nur, wenn das Plugin da ist. Ein Fehlschlag (`ok: false`) ist kein
-  Fehler des Pushs. Nach einer Rücknahme nennt das Feld die Nacharbeiten der Rücknahme (über den
+  Fehler des Pushs – ausser bei einem Satz mit Plugin-Zustand für `object_cache`, `plugins_cache`
+  und `plugins_effective` ([Plugins im Push schalten](#plugins-im-push-schalten)). Nach einer Rücknahme nennt das Feld die Nacharbeiten der Rücknahme (über den
   Agent); nach einer Rücknahme über `rescue.php` fehlt es – die holt der Agent nach, sobald
   WordPress wieder lädt (`wpsync pushes`).
 - **Health-Check:** zusätzlich die veröffentlichten Seiten, die das Paket ändert (höchstens 10).
