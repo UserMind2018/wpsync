@@ -148,6 +148,17 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   vom Ziel liest (das Vorher-Abbild), ist in der Summe auf `limits.max_state_bytes` (64 MB)
   begrenzt, im Probelauf wie beim Anwenden: sonst `package_too_large` mit `error.state_bytes`,
   bevor etwas geschrieben wird
+- Agent: `before.json` und `after.json` eines Inhalts-Pushs liegen nicht mehr als ungeschützter
+  Klartext im Arbeitsordner. Mit einem Schlüssel der Installation (`WPSYNC_KEY`, sonst die
+  Salts aus `wp-config.php`) sind sie verschlüsselt und authentisiert (mit der PHP-Erweiterung
+  `sodium`), sonst mit einem HMAC-SHA256 versehen; an Push und Dateinamen gebunden, Modus 0600,
+  Ordner 0700. `rollback` prüft das vor dem Lesen, dazu die Form jedes Schlüssels, und schreibt
+  nur Schlüssel zurück, die `after.json` als vom Push geschrieben nennt – sonst der neue Grund
+  `before_image_invalid` (409, nichts wird zurückgenommen). Die Rücknahme über den WP-Admin
+  geht weiter ohne Gerät. Werden `WPSYNC_KEY` oder die Salts nach einem Push geändert, lässt
+  sich dessen Inhalt nicht mehr zurücknehmen. Ein beschädigtes Vorher-Abbild meldete bisher
+  `content_failed`. Abgelegte Pakete und ihre Kopie im Push sind nur noch für den Besitzer
+  lesbar; scheitert das Schreiben, steht kein Pfad im Fehlerprotokoll
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

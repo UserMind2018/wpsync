@@ -680,6 +680,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `package_missing` | das Paket liegt nicht (mehr) auf der Site |
 | `content_failed` | Datenbank oder Dateisystem haben versagt; nichts wurde übernommen |
 | `changed_since_push` | nur bei `rollback`: siehe unten |
+| `before_image_invalid` | nur bei `rollback`: das Vorher-Abbild des Pushs lässt sich nicht öffnen, wurde verändert oder passt nicht zu dem, was der Push geschrieben hat – nichts wird zurückgenommen |
 
 Die **Listen** gehören dem Agent (`ContentLists`, Version im Manifest-Kopf unter `list_version`
 und `lists`); die Angaben im Paket sind nur ein Abgleich. **Projekt-Erweiterungen**
@@ -726,6 +727,20 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   Arbeitsordner des Pushs (`content/before.json`), danach die neuen Abdrücke
   (`content/after.json`). Scheitert etwas, bleibt keine Zeile, und Code und Uploads werden
   zurückgetauscht.
+- **Die Abbilder liegen geschützt:** `before.json` trägt Inhalte der Site, und die Rücknahme
+  schreibt zurück, was darin steht. Mit einem Schlüssel der Installation (`WPSYNC_KEY`, sonst
+  `AUTH_KEY` und `SECURE_AUTH_KEY` aus `wp-config.php` – derselbe wie für die Pairing-Secrets,
+  nie aus der Datenbank) legt der Agent beide Dateien verschlüsselt und authentisiert ab
+  (XSalsa20-Poly1305, mit der PHP-Erweiterung `sodium`), ohne die Erweiterung lesbar, aber mit
+  einem HMAC-SHA256; der Schlüssel jeder Datei ist an den Push und an ihren Namen gebunden.
+  Dateien und Ordner sind nur für den Besitzer lesbar (0600/0700). Die Rücknahme prüft beides
+  vor dem Lesen, dazu die Form jedes Schlüssels, und nimmt nur Schlüssel zurück, die `after.json`
+  als vom Push geschrieben nennt – sonst `before_image_invalid`, nichts wird geschrieben. Sie
+  geht weiter ohne Gerät über den WP-Admin. Werden `WPSYNC_KEY` oder die Salts nach einem Push
+  geändert (auch Sicherheits-Plugins erneuern Salts), lassen sich die Inhalte dieses Pushs nicht
+  mehr zurücknehmen; ein eigener `WPSYNC_KEY` vermeidet das. Ohne jeden Schlüssel (keine Salts,
+  kein `WPSYNC_KEY`) bleiben die Abbilder Klartext ohne Schutz – die Admin-Seite warnt dann
+  ohnehin. `rescue.php` braucht die Abbilder nie.
 - **Was der Agent selbst setzt:** `post_modified` (Zeit des Pushs), bei neuen Beiträgen
   `post_author` (wer das Push-Fenster geöffnet hat) und `guid`, bei neuen Optionen `autoload`.
   `post_author` und `guid` bestehender Beiträge bleiben.
@@ -993,8 +1008,12 @@ abbilden lässt, sofern das Profil sie kopiert.
   Objekte in Werten lehnt der Agent ab (`unsafe_value`), ebenso Pseudonyme und Reste der lokalen
   Adresse. Das Ablegen eines Pakets (`/content/stage`) braucht kein Fenster, schreibt aber nur
   in den geschützten Push-Arbeitsordner: höchstens fünf Dateien je Kopplung, je höchstens 16 MB,
-  24 Stunden. Dort liegt auch das Vorher-Abbild eines Pushs (`before.json`, Inhalte der Site im
-  Klartext) – es wird mit dem Snapshot aufgeräumt. Fehlerantworten nennen Tabelle und
+  24 Stunden. Dort liegt auch das Vorher-Abbild eines Pushs (`before.json`, Inhalte der Site) –
+  verschlüsselt und authentisiert mit einem Schlüssel aus `wp-config.php`, ohne die
+  PHP-Erweiterung `sodium` mit einem HMAC, nur ohne jeden Schlüssel im Klartext; es wird mit dem
+  Snapshot aufgeräumt. Das abgelegte Paket selbst liegt dort im Klartext (nur für den Besitzer
+  lesbar): seine Prüfsumme adressiert es, und der Agent prüft es vor dem Anwenden noch einmal
+  ganz. Fehlerantworten nennen Tabelle und
   Schlüssel, nie einen Wert. Auch ins Fehlerprotokoll des Servers schreibt der Kanal keine Werte:
   seine Abfragen und seine Nacharbeiten laufen mit unterdrücktem `$wpdb`-Fehler (sonst schriebe
   WordPress eine gescheiterte Abfrage samt allen Werten per `error_log()` mit); dort steht nur

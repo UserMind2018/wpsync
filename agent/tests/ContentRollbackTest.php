@@ -232,9 +232,115 @@ final class ContentRollbackTest extends ContentApplyCase
             ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
             $this->fail('no exception');
         } catch (ContentException $e) {
-            $this->assertSame(ContentException::FAILED, $e->reason());
+            $this->assertSame('before_image_invalid', $e->reason());
         }
         $this->assertSame($pushed, $this->store->data);
+    }
+
+    /** @return list<string> Schlüssel einer Installation, mit der die Abbilder geschützt abgelegt werden */
+    private function protect(): array
+    {
+        return \WpSync\ContentImage::$keys = [hash('sha256', 'schlüssel der installation', true)];
+    }
+
+    /** N2: mit einem Schlüssel der Installation liegen die Abbilder geschützt – und die Rücknahme geht wie zuvor. */
+    public function testRollbackFromProtectedImages(): void
+    {
+        $this->protect();
+        try {
+            $old = $this->store->data;
+            $this->apply($this->rows());
+            $before = (string) file_get_contents($this->dir . '/before.json');
+            $this->assertNull(json_decode($before, true), 'kein Klartext-JSON');
+            $this->assertStringNotContainsString(base64_encode('Kunde'), $before);
+            $this->assertNull(json_decode((string) file_get_contents($this->dir . '/after.json'), true));
+            $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+            $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+        } finally {
+            \WpSync\ContentImage::$keys = null;
+        }
+    }
+
+    /** @return array<string, array{0: callable(string, array<string, mixed>, array<string, mixed>): void}> */
+    public static function forgedImages(): array
+    {
+        $option = static function (string $value): array {
+            return ['t' => 'options', 'k' => 'blogname', 'state' => ['option_value' => base64_encode($value)]];
+        };
+        return [
+            'before.json durch Klartext ersetzt' => [static function (string $dir) use ($option): void {
+                file_put_contents($dir . '/before.json', json_encode(['keys' => [$option('<script>')]]));
+            }],
+            'before.json mit einem fremden Schlüssel versiegelt' => [static function (string $dir) use ($option): void {
+                file_put_contents($dir . '/before.json', \WpSync\ContentImage::pack((string) json_encode(['keys' => [$option('x')]]), [hash('sha256', 'fremd', true)], basename(dirname($dir)) . '/before.json', false));
+            }],
+            'before.json und after.json vertauscht' => [static function (string $dir): void {
+                rename($dir . '/before.json', $dir . '/x');
+                rename($dir . '/after.json', $dir . '/before.json');
+                rename($dir . '/x', $dir . '/after.json');
+            }],
+            'after.json abgeschnitten' => [static function (string $dir): void {
+                file_put_contents($dir . '/after.json', substr((string) file_get_contents($dir . '/after.json'), 0, 40));
+            }],
+            // Gültig geschützt, aber nicht das, was ein Push ablegt:
+            'ein Schlüssel, den der Push nicht geschrieben hat' => [static function (string $dir, array $before, array $after): void {
+                $before['keys'][] = ['t' => 'options', 'k' => 'siteurl', 'state' => ['option_value' => base64_encode('https://evil.example')]];
+                \WpSync\ContentImage::put($dir, 'before.json', $before);
+            }],
+            'ein anderer Schlüssel an derselben Stelle' => [static function (string $dir, array $before, array $after): void {
+                foreach ($before['keys'] as $i => $entry) {
+                    if ($entry['k'] === 'blogname') {
+                        $before['keys'][$i]['k'] = 'siteurl';
+                    }
+                }
+                \WpSync\ContentImage::put($dir, 'before.json', $before);
+            }],
+            'ein Schlüssel, der keine ID ist' => [static function (string $dir, array $before, array $after): void {
+                foreach (['before.json' => $before, 'after.json' => $after] as $name => $image) {
+                    foreach ($image['keys'] as $i => $entry) {
+                        if ($entry['t'] === 'posts' && $entry['k'] === '219') {
+                            $image['keys'][$i]['k'] = '219 OR 1=1';
+                        }
+                    }
+                    \WpSync\ContentImage::put($dir, $name, $image);
+                }
+            }],
+            'eine fremde Tabelle' => [static function (string $dir, array $before, array $after): void {
+                foreach (['before.json' => $before, 'after.json' => $after] as $name => $image) {
+                    $image['keys'][0]['t'] = 'users';
+                    \WpSync\ContentImage::put($dir, $name, $image);
+                }
+            }],
+        ];
+    }
+
+    /**
+     * N2: ein Abbild, das sich nicht öffnen lässt, verändert wurde oder nicht zu dem passt, was der
+     * Push geschrieben hat, ist ein eigener Grund – und nichts wird geschrieben.
+     *
+     * @param callable(string, array<string, mixed>, array<string, mixed>): void $forge
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('forgedImages')]
+    public function testRollbackRefusesForgedImages(callable $forge): void
+    {
+        $this->protect();
+        try {
+            $this->apply($this->rows());
+            $pushed = $this->store->data;
+            $forge($this->dir, (array) \WpSync\ContentImage::get($this->dir, 'before.json'), (array) \WpSync\ContentImage::get($this->dir, 'after.json'));
+            $this->store->log = [];
+            try {
+                ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+                $this->fail('no exception');
+            } catch (ContentException $e) {
+                $this->assertSame('before_image_invalid', $e->reason(), $e->getMessage());
+                $this->assertSame(409, $e->status());
+            }
+            $this->assertSame($pushed, $this->store->data);
+            $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+        } finally {
+            \WpSync\ContentImage::$keys = null;
+        }
     }
 
     /** Fehlt after.json, obwohl sich Zeilen geändert haben, ist nicht zu beweisen, dass es der Push war. */

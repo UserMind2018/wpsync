@@ -79,8 +79,14 @@ final class PushContent
         if ($offset === 0) {
             self::trim($dir, self::KEEP - 1); // Platz für dieses: nie mehr als KEEP Dateien je Kopplung
         }
+        // Nur für den Besitzer lesbar, und ohne PHP-Warnung (sie trüge den Pfad ins Fehlerprotokoll).
+        if ($offset === 0 && !is_link($part)) {
+            @unlink($part);
+            @touch($part);
+        }
+        @chmod($part, 0600);
         // Mit Sperre: zwei Uploads desselben Pakets schreiben nie ineinander.
-        if (file_put_contents($part, $data, ($offset === 0 ? 0 : FILE_APPEND) | LOCK_EX) !== strlen($data)) {
+        if (@file_put_contents($part, $data, ($offset === 0 ? 0 : FILE_APPEND) | LOCK_EX) !== strlen($data)) {
             return new \WP_Error('wpsync_content_store', 'Das Paket liess sich nicht ablegen.', ['status' => 500]);
         }
         $have = $offset + strlen($data);
@@ -125,9 +131,13 @@ final class PushContent
      */
     public static function take(string $staged, string $pushDir, string $sha256): bool
     {
-        $dir = $pushDir . '/' . self::UNIT;
-        wp_mkdir_p($dir);
-        return @copy($staged, $dir . '/package.jsonl') && hash_equals($sha256, (string) hash_file('sha256', $dir . '/package.jsonl'));
+        $dir  = $pushDir . '/' . self::UNIT;
+        $file = $dir . '/package.jsonl';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true); // hier liegen auch die Abbilder des Pushs (ContentImage)
+        }
+        // Erst die Rechte, dann der Inhalt.
+        return !is_link($file) && @touch($file) && @chmod($file, 0600) && @copy($staged, $file) && hash_equals($sha256, (string) @hash_file('sha256', $file));
     }
 
     /** Das Paket eines Pushs, wenn es noch genau das geprüfte ist; sonst null. */

@@ -28,6 +28,11 @@ final class ContentException extends \RuntimeException
     public const UPLOAD_MISSING   = 'upload_missing';
     public const AUTHOR           = 'author_unknown';
     public const CHANGED          = 'changed_since_push';
+    /**
+     * Nur bei der Rücknahme: das Vorher-Abbild des Pushs lässt sich nicht öffnen, wurde verändert
+     * oder passt nicht zu dem, was der Push geschrieben hat – nichts wird zurückgenommen.
+     */
+    public const IMAGE            = 'before_image_invalid';
     /** Ein Wert trägt ein serialisiertes Objekt oder sieht serialisiert aus und lässt sich nicht lesen. */
     public const UNSAFE           = 'unsafe_value';
     /** Was geschrieben würde oder wurde, ergibt nicht den Abdruck der Zeile des Pakets. */

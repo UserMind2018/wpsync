@@ -284,6 +284,9 @@ final class PushContentFlowTest extends TestCase
         $id   = (string) $begin->data['push_id'];
         $base = $this->work($this->live) . '/' . $id;
         $this->assertSame($sha, hash_file('sha256', $base . '/content/package.jsonl'));
+        $this->assertSame('0600', substr(sprintf('%o', fileperms($base . '/content/package.jsonl')), -4), 'N2: nur für den Besitzer lesbar');
+        $this->assertSame('0700', substr(sprintf('%o', fileperms($base . '/content')), -4));
+        $this->assertSame('0600', substr(sprintf('%o', fileperms($this->work($this->live) . '/packages/' . self::KEY . '/' . $sha . '.jsonl')), -4), 'auch die Ablage');
         $plan = json_decode((string) file_get_contents($base . '/plan.json'), true);
         $this->assertSame(['sha256' => $sha, 'rows' => 5], $plan['content']);
         $this->assertSame([], $plan['units']);

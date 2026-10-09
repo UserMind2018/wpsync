@@ -7,7 +7,8 @@ defined('ABSPATH') || exit;
  * Wendet ein Inhalts-Paket in einer Transaktion an (Spec Content-Push §7.3): alle Prüfungen
  * erneut unter Sperre, Vorher-Abbild nach before.json, schreiben mit der Origin des Ziels,
  * Nachher-Abdrücke nach after.json, COMMIT. Ohne geschriebenes Vorher-Abbild wird nichts
- * geschrieben; wirft irgendetwas, nimmt die Datenbank alles zurück.
+ * geschrieben; wirft irgendetwas, nimmt die Datenbank alles zurück. Beide Abbilder liegen
+ * geschützt (ContentImage).
  */
 final class ContentApply
 {
@@ -52,7 +53,7 @@ final class ContentApply
                 if (!$store->alive()) {
                     throw ContentRepair::lost();
                 }
-                self::put($dir, self::BEFORE, ['keys' => $before]);
+                ContentImage::put($dir, self::BEFORE, ['keys' => $before]);
                 foreach ($writes as $write) {
                     list($table, $key, $state) = $write;
                     try {
@@ -70,7 +71,7 @@ final class ContentApply
                 }
                 $after = self::verify($writes, $target, $wanted);
                 $out   = ['rows' => count($package->rows()), 'after' => $after, 'changes' => self::changes($writes, $check)];
-                self::put($dir, self::AFTER, ['keys' => $after, 'changes' => $out['changes']]);
+                ContentImage::put($dir, self::AFTER, ['keys' => $after, 'changes' => $out['changes']]);
                 $done = $out;
                 return $out;
             });
@@ -279,21 +280,4 @@ final class ContentApply
         ];
     }
 
-    /**
-     * Schreibt eine Datei des Pushs vollständig oder gar nicht.
-     *
-     * @param array<string, mixed> $data
-     * @throws ContentException
-     */
-    private static function put(string $dir, string $name, array $data): void
-    {
-        $json = json_encode($data, JSON_UNESCAPED_SLASHES);
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0755, true);
-        }
-        $file = $dir . '/' . $name;
-        if (!is_string($json) || @file_put_contents($file . '.tmp', $json) !== strlen($json) || !@rename($file . '.tmp', $file)) {
-            throw new ContentException(ContentException::FAILED, 'Das Abbild der betroffenen Zeilen liess sich nicht schreiben – nichts wurde übernommen.');
-        }
-    }
 }

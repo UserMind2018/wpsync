@@ -1003,6 +1003,8 @@ func contentNext(reason string, site *sites.Site) string {
 		return fmt.Sprintf(" – das Push-Fenster im WP-Admin öffnen (%s/wp-admin/tools.php?page=wpsync), nicht per WP-CLI: der Benutzer, der es öffnet, wird Autor neuer Beiträge", site.URL)
 	case "changed_since_push":
 		return " – nichts wurde zurückgenommen, auch Code und Uploads nicht. Die genannten Zeilen auf der Site von Hand prüfen; stehen sie wieder auf dem gepushten Stand, geht die Rücknahme"
+	case "before_image_invalid":
+		return " – nichts wurde zurückgenommen, auch Code und Uploads nicht. Das Vorher-Abbild liegt geschützt im Arbeitsordner des Pushs: wurden WPSYNC_KEY oder die Salts in wp-config.php seit dem Push geändert, lässt es sich nicht mehr öffnen"
 	case "package_too_large":
 		return " – in mehreren Pushes übertragen"
 	case "upload_missing":

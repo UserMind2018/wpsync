@@ -19,19 +19,34 @@ final class ContentRollback
     /**
      * @param string $dir Ordner content im Arbeitsordner des Pushs
      * @return array{state: string, changes: array<string, mixed>|null} changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war
-     * @throws ContentException changed_since_push oder content_failed
+     * @throws ContentException changed_since_push, before_image_invalid oder content_failed
      */
     public static function run(ContentTarget $target, string $dir): array
     {
-        if (!file_exists($dir . '/' . ContentApply::BEFORE)) {
+        // Beide Abbilder müssen unverändert die sein, die der Push abgelegt hat (ContentImage) – und
+        // zueinander passen: zurückgeschrieben wird nur ein Schlüssel, den der Push geschrieben hat.
+        $image = ContentImage::get($dir, ContentApply::BEFORE);
+        if ($image === null) {
             return ['state' => self::NOTHING, 'changes' => null]; // ohne Vorher-Abbild wurde nie geschrieben
         }
-        $before = self::keys($dir . '/' . ContentApply::BEFORE, true);
-        if ($before === null) {
-            throw new ContentException(ContentException::FAILED, 'Das Vorher-Abbild dieses Pushs ist nicht lesbar – die Inhalte lassen sich nicht zurücknehmen.');
+        $before = self::keys($image, true);
+        $pushed = ContentImage::get($dir, ContentApply::AFTER);
+        $after  = $pushed === null ? null : self::keys($pushed, false);
+        if ($before === null || ($pushed !== null && $after === null)) {
+            throw ContentImage::invalid();
         }
-        $after   = self::keys($dir . '/' . ContentApply::AFTER, false);
-        $changes = is_array($after) ? json_decode((string) file_get_contents($dir . '/' . ContentApply::AFTER), true)['changes'] ?? null : null;
+        if ($after !== null) {
+            if (count($after) !== count($before)) {
+                throw ContentImage::invalid();
+            }
+            foreach ($before as $i => $entry) {
+                if ($after[$i]['t'] !== $entry['t'] || $after[$i]['k'] !== $entry['k']) {
+                    throw ContentImage::invalid();
+                }
+            }
+        }
+        $changes = $pushed['changes'] ?? null;
+        unset($image, $pushed);
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         try {
@@ -213,22 +228,28 @@ final class ContentRollback
     }
 
     /**
-     * Die Schlüssel einer der beiden Dateien, geprüft. before.json: [{t, k, state}] mit dem
-     * Rohzustand dekodiert; after.json: [{t, k, h}].
+     * Die Schlüssel eines der beiden Abbilder, geprüft: nur die sieben Inhaltstabellen, jeder
+     * Schlüssel in der Form seiner Tabelle (wie im Paket), keiner doppelt. before.json:
+     * [{t, k, state}] mit dem Rohzustand dekodiert; after.json: [{t, k, h}].
      *
-     * @return list<array<string, mixed>>|null null: nicht lesbar
+     * @param array<string, mixed> $data aus ContentImage::get()
+     * @return list<array<string, mixed>>|null null: nicht die Form eines Abbilds
      */
-    private static function keys(string $file, bool $states): ?array
+    private static function keys(array $data, bool $states): ?array
     {
-        $data = is_file($file) && !is_link($file) ? json_decode((string) @file_get_contents($file), true) : null;
-        if (!is_array($data) || !is_array($data['keys'] ?? null)) {
+        if (!is_array($data['keys'] ?? null) || count($data['keys']) > 4 * ContentPackage::MAX_ROWS) {
             return null;
         }
-        $out = [];
+        $out  = [];
+        $seen = [];
         foreach ($data['keys'] as $entry) {
-            if (!is_array($entry) || !in_array($entry['t'] ?? null, Canon::TABLES, true) || !is_string($entry['k'] ?? null)) {
+            if (!is_array($entry) || !in_array($entry['t'] ?? null, Canon::TABLES, true) || !is_string($entry['k'] ?? null) || !self::validKey($entry['t'], $entry['k'])) {
                 return null;
             }
+            if (isset($seen[$entry['t'] . "\0\0" . $entry['k']])) {
+                return null;
+            }
+            $seen[$entry['t'] . "\0\0" . $entry['k']] = true;
             $row = ['t' => $entry['t'], 'k' => $entry['k']];
             if ($states) {
                 try {
@@ -246,5 +267,18 @@ final class ContentRollback
             $out[] = $row;
         }
         return $out;
+    }
+
+    /** Hat der Schlüssel die Form seiner Tabelle – eine reine ID, ein Paar <ID>\0<Name>, ein Optionsname? */
+    private static function validKey(string $table, string $key): bool
+    {
+        if (isset(ContentState::PK[$table])) {
+            return preg_match(ContentLists::OBJECT_ID, $key) === 1;
+        }
+        if ($table === 'options') {
+            return $key !== '' && strlen($key) <= 191;
+        }
+        list($object, $name) = ContentState::split($key);
+        return preg_match(ContentLists::OBJECT_ID, $object) === 1 && $name !== '' && strlen($name) <= 255;
     }
 }
