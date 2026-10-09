@@ -114,4 +114,43 @@ final class StagingReplaceTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new StagingReplace('kein-url', self::TAIL);
     }
+
+    /** Spec Content-Push §5.3: doppelt escaptes JSON (BUG-BACKLOG LOW) */
+    public function testReplacesDoubleEscapedJson(): void
+    {
+        $r = $this->r();
+        $this->assertSame(
+            '"https:\\\\\\/\\\\\\/example.com\\\\\\/wpsync-staging-0123456789ab\\\\\\/kontakt"',
+            $r->text('"https:\\\\\\/\\\\\\/example.com\\\\\\/kontakt"')
+        );
+        $inner = (string) json_encode(['url' => 'https://example.com/x']);
+        $outer = (string) json_encode(['data' => $inner]);
+        $back  = json_decode((string) json_decode($r->value($outer), true)['data'], true);
+        $this->assertSame('https://example.com/wpsync-staging-0123456789ab/x', $back['url']);
+    }
+
+    /** Spec Content-Push §5.3: Staging-Pfade wieder entfernen – exakte Umkehr */
+    public function testStripIsTheInverseOfText(): void
+    {
+        $r = $this->r();
+        foreach ([
+            '<a href="https://example.com/shop/">',
+            'src="//EXAMPLE.com/x.js"',
+            '{"url":"https:\/\/example.com\/kontakt"}',
+            '"https:\\\\\\/\\\\\\/example.com\\\\\\/kontakt"',
+            'https://example.com',
+            'https://example.com.evil.org/',
+        ] as $live) {
+            $this->assertSame($live, $r->strip($r->text($live)), $live);
+        }
+        $data = serialize(['url' => 'https://example.com/x', 'deep' => ['https://example.com']]);
+        $this->assertSame($data, $r->stripValue($r->value($data)));
+    }
+
+    public function testStripValueReportsUnreadableValues(): void
+    {
+        $r = $this->r();
+        $this->assertNull($r->stripValue('s:99:"https://example.com/wpsync-staging-0123456789ab/x";'));
+        $this->assertSame('C:3:"Cfg":3:{abc}', $r->stripValue('C:3:"Cfg":3:{abc}'), 'ohne Staging-Pfad bleibt der Wert, wie er ist');
+    }
 }
