@@ -16,7 +16,7 @@
 # WP-CLI ist von allem ausgenommen.
 #
 # Voraussetzung: Docker, DDEV, jq (≥ 1.6), openssl, Go; Mac-Modus (das Pairing-Secret der eigenen
-# Test-Site liegt in der Login-Keychain). Dauer rund 15 Minuten.
+# Test-Site liegt in der Login-Keychain). Dauer rund 5 Minuten.
 # Eine fehlgeschlagene Prüfung zählt und der Lauf geht weiter; nur was den Rest sinnlos macht,
 # bricht ab. Die JSON-Zeilen der Befehle liegen danach unter ~/wpsync-e2e/plg/json. Am Ende werden
 # beide Projekte gestoppt (nicht gelöscht); WPSYNC_E2E_KEEP=1 lässt sie laufen.
