@@ -502,4 +502,105 @@ final class ContentRollbackTest extends ContentApplyCase
         }
         $this->assertSame($now, $this->store->data);
     }
+
+    /**
+     * P3 R15: im Notfallweg (rescue.php) blockiert „gewachsen“ nicht. Die Zeilen des Pushs gehen
+     * zurück, was an den eingefügten Objekten hängt und nicht vom Push stammt, bleibt stehen –
+     * verwaist, nie gelöscht – und wird genannt.
+     *
+     * @param callable(ContentMemory): void           $grow
+     * @param list<array{table: string, key: string}> $keys
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('grownObjects')]
+    public function testLeavingWhatGrewTakesThePushBackAndNamesTheRest(callable $grow, array $keys): void
+    {
+        $expected = new ContentMemory($this->store->data);
+        $grow($expected);
+        $this->apply($this->rows());
+        $grow($this->store);
+        $this->store->log = [];
+
+        $back = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame(ContentRollback::DONE, $back['state']);
+        $this->assertSame($keys, $back['left']);
+        $this->assertSame(self::sorted($expected->data), self::sorted($this->store->data), 'der Stand vor dem Push plus das Fremde');
+        $this->assertSame([$expected->comments, $expected->orphans], [$this->store->comments, $this->store->orphans]);
+        $this->assertSame([], preg_grep('/^purge /', $this->store->log), 'purge() löschte das Fremde mit');
+        $this->assertSame('commit', $this->store->log[count($this->store->log) - 1]);
+
+        $again = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame(['state' => ContentRollback::NOTHING, 'changes' => null, 'left' => []], $again);
+    }
+
+    /** R15: ohne Fremdes ist das Ergebnis dasselbe wie beim Agent – nur ohne purge(). */
+    public function testLeavingWithNothingGrownRestoresEverything(): void
+    {
+        // Verwaistes an der ID eines neuen Beitrags, das der Push überschrieben hat, kommt auch so zurück.
+        $this->store->data['postmeta']["1000001\0_wp_page_template"] = ['values' => ['verwaist']];
+        $old  = $this->store->data;
+        $rows = $this->rows();
+        foreach ($rows as $i => $row) {
+            if ($row['key'] === "1000001\0_wp_page_template") {
+                $rows[$i] = ContentFixtures::row('update', 'postmeta', $row['key'], $this->h('postmeta', $row['key']), ['values' => ['default']]);
+            }
+        }
+        $result = $this->apply($rows);
+        $back   = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame(['state' => ContentRollback::DONE, 'changes' => $result['changes'], 'left' => []], $back);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
+
+    /**
+     * R15: Meta der festen Sperrliste, die WordPress selbst an den neuen Beitrag gehängt hat, ist
+     * auch hier keine Änderung. Gelöscht wird sie im Notfallweg aber nicht – das hat der Push nicht
+     * geschrieben –, sie bleibt verwaist und wird nicht eigens genannt.
+     */
+    public function testLeavingKeepsSystemMetaOfAnInsertedObject(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $this->store->data['postmeta']["1000001\0_edit_lock"] = ['values' => ['1:1']];
+        $back = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame([ContentRollback::DONE, []], [$back['state'], $back['left']]);
+        $this->assertSame(['values' => ['1:1']], $this->store->data['postmeta']["1000001\0_edit_lock"]);
+        unset($this->store->data['postmeta']["1000001\0_edit_lock"]);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
+
+    /** R15, R7: hart bleibt der Abdruck. Eine vom Push geschriebene Zeile, die sich geändert hat ⇒ nichts wird angefasst. */
+    public function testLeavingNeverOverridesAChangedRow(): void
+    {
+        $this->apply($this->rows());
+        $this->store->data['posts']['219']['post_title']        = 'nach dem Push geändert';
+        $this->store->data['postmeta']["1000001\0farbe"]        = ['values' => ['rot']]; // dazu etwas Fremdes
+        $pushed           = $this->store->data;
+        $this->store->log = [];
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::CHANGED, $e->reason());
+            $this->assertSame([['table' => 'posts', 'key' => '219']], $e->keys(), 'nur die geänderte Zeile – das Fremde ist kein Grund');
+        }
+        $this->assertSame($pushed, $this->store->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+    }
+
+    /** R15: unter WordPress bleibt D31 hart – der Schalter ist aus, solange ihn niemand setzt. */
+    public function testWithoutTheSwitchTheResultCarriesNoLeft(): void
+    {
+        $this->apply($this->rows());
+        $this->assertSame(['state', 'changes'], array_keys(ContentRollback::run(ContentFixtures::live($this->store), $this->dir)));
+    }
+
+    /** R15: ging die Verbindung im COMMIT verloren und kam er an, nennt das Ergebnis das Fremde trotzdem. */
+    public function testLeavingSurvivesAnUnclearCommit(): void
+    {
+        $this->apply($this->rows());
+        $this->store->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        $this->store->loseAtCommit                       = 'landed';
+        $back = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame(ContentRollback::DONE, $back['state']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "1000001\0farbe"]], $back['left']);
+    }
 }
