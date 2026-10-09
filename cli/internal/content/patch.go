@@ -111,6 +111,11 @@ func Patch(siteDir string, changes map[Key]Change) (*Undo, error) {
 		return out, true, err
 	})
 	if err != nil {
+		// Both files or neither: a manifest with the new fingerprints next to a baseline with the old
+		// rows would name every pushed row as changed locally.
+		if back := restore(root, manifestName, undo.Manifest); back != nil {
+			return nil, errors.Join(err, back)
+		}
 		return nil, err
 	}
 	return undo, nil
@@ -124,26 +129,33 @@ func Unpatch(siteDir string, undo *Undo) error {
 	}
 	defer root.Close()
 	for name, lines := range map[string]map[string]json.RawMessage{manifestName: undo.Manifest, baselineName: undo.Baseline} {
-		keys := map[Key]bool{}
-		for id := range lines {
-			t, k, ok := bytes.Cut([]byte(id), []byte{0})
-			if !ok {
-				return fmt.Errorf("undo of %s names no key", name)
-			}
-			keys[Key{T: string(t), K: string(k)}] = true
-		}
-		err := rewrite(root, name, nil, keys, func(k Key, old []byte) ([]byte, bool, error) {
-			before := lines[k.id()]
-			if bytes.Equal(before, null) || len(before) == 0 {
-				return nil, true, nil
-			}
-			return before, true, nil
-		})
-		if err != nil {
+		if err := restore(root, name, lines); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// restore puts the lines Patch replaced in one file back: "table\x00key" → the line before.
+func restore(root *os.Root, name string, lines map[string]json.RawMessage) error {
+	keys := map[Key]bool{}
+	for id := range lines {
+		t, k, ok := bytes.Cut([]byte(id), []byte{0})
+		if !ok {
+			return fmt.Errorf("undo of %s names no key", name)
+		}
+		keys[Key{T: string(t), K: string(k)}] = true
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return rewrite(root, name, nil, keys, func(k Key, old []byte) ([]byte, bool, error) {
+		before := lines[k.id()]
+		if bytes.Equal(before, null) || len(before) == 0 {
+			return nil, true, nil
+		}
+		return before, true, nil
+	})
 }
 
 func keysOf(changes map[Key]Change) map[Key]bool {

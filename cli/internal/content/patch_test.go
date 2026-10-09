@@ -190,9 +190,13 @@ func TestPatchRefusesAnOverlongLine(t *testing.T) {
 	}
 	defer func(old int) { maxRecordLine = old }(maxRecordLine)
 	maxRecordLine = 64
-	baseline := read(t, siteDir, baselineName)
+	manifest, baseline := read(t, siteDir, manifestName), read(t, siteDir, baselineName)
 	if _, err := Patch(siteDir, changes); !errors.Is(err, agentapi.ErrLineTooLong) || !strings.Contains(err.Error(), baselineName) {
 		t.Fatalf("Patch with an overlong baseline line: %v", err)
+	}
+	// Both files or neither: the manifest was patched first and is back as it was.
+	if got := read(t, siteDir, manifestName); got != manifest {
+		t.Errorf("manifest changed although the baseline could not be patched:\n%s", got)
 	}
 	if err := Unpatch(siteDir, undo); !errors.Is(err, agentapi.ErrLineTooLong) {
 		t.Fatalf("Unpatch with an overlong baseline line: %v", err)
