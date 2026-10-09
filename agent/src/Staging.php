@@ -173,7 +173,10 @@ final class Staging
      * Kopie gibt oder ihr Datensatz den Guard nicht besteht. Ob die Kopie gerade benutzbar ist,
      * entscheidet pushContent().
      *
-     * @return array{prefix: string, tables: array<string, string>, indexables: string, comments: string, replace: StagingReplace, url: string}|null
+     * dir, live_home und live_prefix nennt der Umschlag für rescue.php (Spec Content-Push P3 §5.2):
+     * daraus baut es denselben Ersetzer und prüft Ordner und Präfix ohne WordPress.
+     *
+     * @return array{prefix: string, tables: array<string, string>, indexables: string, comments: string, replace: StagingReplace, url: string, dir: string, live_home: string, live_prefix: string}|null
      */
     public static function contentTarget(): ?array
     {
@@ -195,6 +198,9 @@ final class Staging
                 'comments'   => $guard->table($prefix . 'comments'), // nur gelesen: Kommentare an eingefügten Beiträgen (Rücknahme)
                 'replace'    => new StagingReplace(home_url(), '/' . (string) $record['dir']),
                 'url'        => self::url($record),
+                'dir'        => (string) $record['dir'],
+                'live_home'  => (string) home_url(),
+                'live_prefix' => $guard->livePrefix(),
             ];
         } catch (StagingException | \InvalidArgumentException $e) {
             return null;

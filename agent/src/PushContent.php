@@ -27,6 +27,8 @@ final class PushContent
 
     /** @var (callable(string, string): ContentTarget)|null für Tests: liefert das Ziel anstelle von target() */
     public static $resolve = null;
+    /** @var (callable(string, string): (array<string, mixed>|string))|null für Tests: liefert, was rescueData() sammelt */
+    public static $rescueData = null;
 
     /**
      * POST /content/stage: nimmt ein Paket in Stücken an. Ohne data nur Auskunft, wie viel schon
@@ -250,6 +252,115 @@ final class PushContent
             return $target;
         } catch (\InvalidArgumentException $e) {
             throw new ContentException(ContentException::ORIGIN, 'Die Adresse oder die Tabellen dieser Site lassen sich nicht bestimmen.');
+        }
+    }
+
+    /**
+     * Was der Umschlag für rescue.php trägt (Spec Content-Push P3 §5.2) – aus dem laufenden
+     * WordPress, nie aus wp-config.php gelesen (R1): die Verbindung so, wie wpdb::db_connect() sie
+     * aufbaut, die Sitzung, wie sie gerade ist, Präfix und Adressen des Ziels und die Dateischlüssel
+     * der beiden Abbilder dieses Pushs.
+     *
+     * @return array<string, mixed>|string die Felder target, db, prefix, home, siteurl, staging, image_keys –
+     *         oder der Grund, aus dem es keinen Umschlag gibt (driver, no_image_key, probe_failed)
+     */
+    public static function rescueData(string $name, string $pushId)
+    {
+        global $wpdb;
+        if (self::$rescueData !== null) {
+            return (self::$rescueData)($name, $pushId);
+        }
+        // Nur die Verbindung, die rescue.php nachbauen kann: mysqli, direkt, mit den Konstanten der Installation.
+        if (!is_object($wpdb) || !(($wpdb->dbh ?? null) instanceof \mysqli) || !method_exists($wpdb, 'parse_db_host')
+            || is_a($wpdb, 'hyperdb') || is_a($wpdb, 'LudicrousDB')
+            || !defined('DB_HOST') || !defined('DB_USER') || !defined('DB_PASSWORD') || !defined('DB_NAME')) {
+            return RescueContent::DRIVER;
+        }
+        // Ohne Schlüssel der Installation lägen die Abbilder als Klartext da: aus denen schreibt rescue.php nie zurück.
+        $before = ContentImage::fileKeys($pushId, ContentImage::BEFORE);
+        $after  = ContentImage::fileKeys($pushId, ContentImage::AFTER);
+        if ($before === [] || $after === []) {
+            return RescueContent::NO_IMAGE_KEY;
+        }
+        // Wie wpdb::db_connect(): Host, Port und Socket aus DB_HOST; IPv6 mit mysqlnd in eckigen Klammern.
+        $host   = (string) constant('DB_HOST');
+        $port   = null;
+        $socket = null;
+        $parsed = $wpdb->parse_db_host($host);
+        if (is_array($parsed) && count($parsed) >= 4) {
+            list($host, $port, $socket, $ipv6) = array_values($parsed);
+            if ($ipv6 && extension_loaded('mysqlnd')) {
+                $host = '[' . $host . ']';
+            }
+        }
+        // Die sql_mode der wpdb-Sitzung, gelesen statt nachgerechnet (R6).
+        list($mode, $bad) = ContentSql::silent($wpdb, static function () use ($wpdb): array {
+            return [$wpdb->get_var('SELECT @@SESSION.sql_mode'), (string) $wpdb->last_error !== ''];
+        });
+        if ($bad) {
+            return RescueContent::PROBE_FAILED;
+        }
+        $data = [
+            'target'     => $name,
+            'db'         => [
+                'host'     => (string) $host,
+                'port'     => $port === null || (int) $port === 0 ? null : (int) $port,
+                'socket'   => $socket === null || (string) $socket === '' ? null : (string) $socket,
+                'user'     => (string) constant('DB_USER'),
+                'password' => (string) constant('DB_PASSWORD'),
+                'name'     => (string) constant('DB_NAME'),
+                'flags'    => (defined('MYSQL_CLIENT_FLAGS') ? (int) constant('MYSQL_CLIENT_FLAGS') : 0) & RescueContent::FLAGS,
+                'charset'  => (string) ($wpdb->charset ?? ''),
+                'collate'  => (string) ($wpdb->collate ?? ''),
+                'sql_mode' => (string) $mode,
+            ],
+            'prefix'     => (string) $wpdb->prefix,
+            'home'       => rtrim((string) get_option('home'), '/'),
+            'siteurl'    => (string) get_option('siteurl'),
+            'staging'    => null,
+            'image_keys' => [
+                ContentImage::BEFORE => array_map('base64_encode', $before),
+                ContentImage::AFTER  => array_map('base64_encode', $after),
+            ],
+        ];
+        if ($name === 'staging') {
+            $copy = Staging::contentTarget();
+            if ($copy === null) {
+                return RescueContent::PROBE_FAILED;
+            }
+            $data['prefix']  = $copy['prefix'];
+            $data['staging'] = ['dir' => $copy['dir'], 'live_home' => $copy['live_home'], 'live_prefix' => $copy['live_prefix']];
+        }
+        return $data;
+    }
+
+    /**
+     * Der Teil rescue.db der Antwort des Begin (P3 §5.3): gibt es für diesen Push den Umschlag, mit
+     * dem rescue.php die Inhalte ohne WordPress zurücknimmt? Im echten Begin legt das ihn an – nach
+     * einer Probe über genau diese Verbindung (R13) und nur, wenn sich der Push sperren lässt (R10).
+     *
+     * @param string      $work   Arbeitsordner im wp-content des Ziels
+     * @param string|null $pushId der angelegte Push; null: Probelauf – nur Auskunft, ohne Probe und ohne Datei
+     * @param string      $key    der Rescue-Key des Pushs; im Probelauf ''
+     * @return array{ok: bool, reason?: string}
+     */
+    public static function rescueDb(string $name, string $content, string $work, ?string $pushId, string $key): array
+    {
+        $real = $pushId !== null;
+        $id   = $pushId ?? 'p_00000000_000000000000';
+        try {
+            if ($real) {
+                // Ohne Sperre nähme rescue.php die Inhalte nicht zurück – dann lieber gleich kein Umschlag.
+                $lock   = PushRescue::lock($work, $id);
+                $locked = is_resource($lock);
+                PushRescue::unlock($lock);
+                if (!$locked) {
+                    return ['ok' => false, 'reason' => RescueContent::PROBE_FAILED];
+                }
+            }
+            return RescueContent::prepare($work, $id, $content, $key, self::rescueData($name, $id), $real);
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'reason' => RescueContent::PROBE_FAILED];
         }
     }
 

@@ -627,8 +627,12 @@ final class ContentSql implements ContentStore
         if (!is_object($db) || (string) ($db->last_error ?? '') === '') {
             return;
         }
-        $link  = $db->dbh ?? null;
-        $errno = $link instanceof \mysqli ? (int) mysqli_errno($link) : 0;
+        $link = $db->dbh ?? null;
+        try {
+            $errno = $link instanceof \mysqli ? (int) mysqli_errno($link) : 0;
+        } catch (\Throwable $e) {
+            $errno = 0; // eine Verbindung, die keine mehr ist: das Protokollieren wirft nie
+        }
         if ($errno > 0) {
             error_log('wpsync: a query of the content channel failed (MySQL error ' . $errno . '); query and values are withheld');
         }

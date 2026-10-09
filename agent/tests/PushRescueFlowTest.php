@@ -5,8 +5,14 @@ namespace WpSync\Tests;
 
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use WpSync\ContentImage;
+use WpSync\ContentTarget;
 use WpSync\Push;
+use WpSync\PushContent;
 use WpSync\PushRescue;
+use WpSync\RescueContent;
+use WpSync\RescueSeal;
+use WpSync\Staging;
 use WpSync\Store;
 
 require_once __DIR__ . '/PushContentFlowCase.php';
@@ -20,6 +26,42 @@ require_once __DIR__ . '/PushContentFlowCase.php';
 #[PreserveGlobalState(false)]
 final class PushRescueFlowTest extends PushContentFlowCase
 {
+    /** @var int wie oft rescue.php bzw. die Probe des Begin „verbunden“ hat */
+    private int $connected = 0;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Die Installation hat einen Schlüssel, die Datenbank ist mysqli: der Begin kann einen Umschlag anlegen.
+        ContentImage::$keys      = [hash('sha256', 'schlüssel der installation', true)];
+        ContentImage::$encrypt   = false;
+        PushContent::$rescueData = static function (string $name, string $id): array {
+            return [
+                'target'     => $name,
+                'db'         => ['host' => 'db.internal', 'port' => null, 'socket' => null, 'user' => 'wp_user', 'password' => 'geh3im!', 'name' => 'wordpress_db', 'flags' => 0, 'charset' => 'utf8mb4', 'collate' => '', 'sql_mode' => ''],
+                'prefix'     => $name === 'staging' ? 'stgabcdef_' : 'wp_',
+                'home'       => ContentFixtures::HOME,
+                'siteurl'    => ContentFixtures::HOME,
+                'staging'    => $name === 'staging' ? ['dir' => Staging::DIR, 'live_home' => ContentFixtures::HOME, 'live_prefix' => 'wp_'] : null,
+                'image_keys' => [
+                    ContentImage::BEFORE => array_map('base64_encode', ContentImage::fileKeys($id, ContentImage::BEFORE)),
+                    ContentImage::AFTER  => array_map('base64_encode', ContentImage::fileKeys($id, ContentImage::AFTER)),
+                ],
+            ];
+        };
+        RescueContent::$resolve = function (array $data, string $contentDir): ?ContentTarget {
+            $this->connected++;
+            return $data['target'] === 'staging'
+                ? ContentFixtures::staging($this->stagingDb, $contentDir . '/uploads')
+                : ContentFixtures::live($this->liveDb, $contentDir . '/uploads');
+        };
+    }
+
+    private function sealed(string $content, string $id): string
+    {
+        return RescueSeal::file($this->work($content), $id);
+    }
+
     /**
      * rescue.php, wie eine CLI 0.8.0 es aufruft: mit content=1.
      *
@@ -134,5 +176,176 @@ final class PushRescueFlowTest extends PushContentFlowCase
         $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
         $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
         $this->assertSame('rolled_back', Store::getPush($id)['status']);
+    }
+
+    /** R1, R2, R13: der echte Begin eines Pushs mit Inhalten legt den Umschlag an – nach einer Probe, nur für den Besitzer lesbar. */
+    public function testTheBeginSealsAnEnvelopeForAPushWithContent(): void
+    {
+        $begin = $this->begin($this->stage($this->rows()), [], 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
+        $this->assertSame(['ok' => true], $begin->data['rescue']['db']);
+        $this->assertSame(['url', 'salt', 'hardening', 'db'], array_keys($begin->data['rescue']));
+        $this->assertSame(1, $this->connected, 'die Probe hat einmal verbunden');
+        $id   = (string) $begin->data['push_id'];
+        $file = $this->sealed($this->live, $id);
+        $this->assertSame('0600', substr(sprintf('%o', fileperms($file)), -4));
+        $raw = (string) file_get_contents($file);
+        $this->assertStringNotContainsString('geh3im!', $raw);
+
+        // Öffnen kann ihn, wer aus Pairing-Secret und Salt den Rescue-Key ableitet – der Hash im Plan genügt nicht.
+        $key    = PushRescue::key((string) Store::secretFor(self::KEY), $id, (string) $begin->data['rescue']['salt']);
+        $plan   = json_decode((string) file_get_contents($this->work($this->live) . '/' . $id . '/plan.json'), true);
+        $opened = RescueSeal::open($raw, $key, $id);
+        $this->assertSame(hash('sha256', $key), $plan['key_hash']);
+        $this->assertSame(['geh3im!', 'wp_', 'live'], [$opened['db']['password'], $opened['prefix'], $opened['target']]);
+        $this->assertNull(RescueSeal::open($raw, $plan['key_hash'], $id));
+        $this->assertStringNotContainsString($key, (string) json_encode($plan));
+        $this->assertNotNull(RescueContent::check($opened, $id, $this->live));
+        // Die Sperre der Probe ist wieder frei.
+        $lock = PushRescue::lock($this->work($this->live), $id);
+        $this->assertIsResource($lock);
+        PushRescue::unlock($lock);
+    }
+
+    /** §5.3: der Probelauf sagt, was ein echter Begin ergäbe – ohne Probe, ohne Datei; ohne Inhalte kein Wort. */
+    public function testTheDryRunOnlyTellsAndCodeAloneSaysNothing(): void
+    {
+        $dry = $this->begin($this->stage($this->rows()), ['dry' => true], 'new');
+        $this->assertSame(['ok' => true], $dry->data['rescue']['db']);
+        $this->assertSame(0, $this->connected);
+        $this->assertSame([], glob($this->work($this->live) . '/p_*') ?: []);
+
+        PushContent::$rescueData = null; // die Attrappe der Datenbank ist kein mysqli
+        $dry = $this->begin($this->stage($this->rows()), ['dry' => true], 'new');
+        $this->assertSame(['ok' => false, 'reason' => 'driver'], $dry->data['rescue']['db']);
+
+        $code = $this->begin(null, ['dry' => true], 'new');
+        $this->assertArrayNotHasKey('db', $code->data['rescue']);
+        $real = $this->begin(null, [], 'new');
+        $this->assertArrayNotHasKey('db', $real->data['rescue']);
+        $this->assertFileDoesNotExist($this->sealed($this->live, (string) $real->data['push_id']));
+    }
+
+    /** Richtet her, warum es keinen Umschlag gibt (Closures lassen sich einem Test im eigenen Prozess nicht mitgeben). */
+    private function withoutEnvelope(string $reason): void
+    {
+        switch ($reason) {
+            case 'driver': // die Attrappe der Datenbank ist kein mysqli
+                PushContent::$rescueData = null;
+                return;
+            case 'no_image_key':
+                PushContent::$rescueData = static function (): string {
+                    return RescueContent::NO_IMAGE_KEY;
+                };
+                return;
+            case 'probe_failed':
+                RescueContent::$resolve = static function (): ?ContentTarget {
+                    return null;
+                };
+                return;
+            case 'throws':
+                PushContent::$rescueData = static function (): array {
+                    throw new \RuntimeException("Access denied for user 'wp_user'");
+                };
+                return;
+        }
+    }
+
+    /**
+     * R12, AC-160: ohne Umschlag wird trotzdem gepusht – der Begin nennt den Grund. Im Notfall gehen
+     * dann nur Code und Uploads zurück, der Push bleibt offen, und der Agent holt die Inhalte nach.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['driver', 'driver'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['no_image_key', 'no_image_key'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['probe_failed', 'probe_failed'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['throws', 'probe_failed'])]
+    public function testWithoutAnEnvelopeThePushStillGoesAndRescueKeepsTheContent(string $case, string $reason): void
+    {
+        $old = $this->liveDb->data;
+        $this->withoutEnvelope($case);
+        $begin = $this->begin($this->stage($this->rows()), [], 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
+        $this->assertSame(['ok' => false, 'reason' => $reason], $begin->data['rescue']['db']);
+        $id         = (string) $begin->data['push_id'];
+        $this->salt = (string) $begin->data['rescue']['salt'];
+        $this->assertFileDoesNotExist($this->sealed($this->live, $id));
+        Push::upload(['push_id' => $id, 'unit' => 0, 'files' => [['path' => 'main.php', 'data' => base64_encode('new'), 'offset' => 0]]], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::commit(['push_id' => $id], self::KEY));
+        $pushed = $this->liveDb->data;
+
+        list($status, $body) = $this->rescueDb($id);
+        $this->assertSame(200, $status);
+        $this->assertSame(['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], $body['content']);
+        $this->assertSame(['content_not_rolled_back'], $body['warnings']);
+        $this->assertSame($pushed, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+
+        // Wie nach P2: offen, bis der Agent die Inhalte nachholt.
+        Push::sync();
+        $this->assertSame('committed', Store::getPush($id)['status']);
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollback(['push_id' => $id], self::KEY));
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+    }
+
+    /** AC-158 (soweit ohne echte Datenbank): ein Aufruf von rescue.php nimmt Inhalte, Code und Uploads zurück. */
+    public function testRescueTakesTheWholeSetBack(): void
+    {
+        $old               = $this->liveDb->data;
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->assertFileExists($this->sealed($this->live, $id));
+        $this->connected = 0;
+        ContentImage::$keys = []; // rescue.php kennt den Schlüssel der Installation nicht
+
+        list($status, $body) = $this->rescueDb($id);
+        $this->assertSame(200, $status);
+        $this->assertSame(['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'rolled_back', 'cache' => 'none']], $body);
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->live . '/uploads/2026/10/neu.png');
+        $this->assertSame(1, $this->connected);
+        $this->assertFileDoesNotExist($this->sealed($this->live, $id));
+    }
+
+    /** AC-164: ein Push nach Staging legt den Umschlag in der Kopie ab; rescue.php nimmt dort zurück und fasst Live nicht an. */
+    public function testAStagingPushIsSealedAndTakenBackInTheCopy(): void
+    {
+        $old               = $this->stagingDb->data;
+        $live              = $this->liveDb->data;
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', [], 'staging');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->assertFileExists($this->sealed($this->staging, $id));
+        $this->assertFileDoesNotExist($this->sealed($this->live, $id));
+        $this->liveDb->log = [];
+
+        list($status, $body) = $this->rescueDb($id);
+        $this->assertSame(200, $status);
+        $this->assertSame(['state' => 'rolled_back', 'cache' => 'none'], $body['content']);
+        ksort($old['postmeta']);
+        ksort($this->stagingDb->data['postmeta']);
+        $this->assertSame($old, $this->stagingDb->data);
+        $this->assertSame($live, $this->liveDb->data);
+        $this->assertSame([], $this->liveDb->log, 'keine Zeile von Live');
+        $this->assertSame('stg-old', file_get_contents($this->staging . '/plugins/x/main.php'));
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+    }
+
+    /** R10, R13: lässt sich der Push nicht sperren, nähme rescue.php die Inhalte nicht zurück – der Begin legt dann keinen Umschlag an. */
+    public function testWithoutAWorkingLockTheBeginSealsNothing(): void
+    {
+        $id = 'p_20261009_0123456789ab';
+        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->root . '/gibt-es-nicht', $id, 'schlüssel'));
+        $this->assertSame(0, $this->connected, 'ohne Sperre keine Probe');
+        mkdir($this->work($this->live) . '/' . $id, 0777, true);
+        $held = PushRescue::lock($this->work($this->live), $id);
+        $this->assertSame(['ok' => false, 'reason' => 'probe_failed'], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, 'schlüssel'));
+        PushRescue::unlock($held);
+        $this->assertSame(['ok' => true], PushContent::rescueDb('live', $this->live, $this->work($this->live), $id, 'schlüssel'));
+        $this->assertFileExists($this->sealed($this->live, $id));
     }
 }

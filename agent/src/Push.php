@@ -234,6 +234,10 @@ final class Push
             $answer['content'] = $contentPlan;
         }
         if (!empty($params['dry'])) {
+            if ($contentSha !== null) {
+                // Was ein echter Begin ergäbe – ohne Probe und ohne Datei (Spec Content-Push P3 §5.3).
+                $answer['rescue']['db'] = PushContent::rescueDb($target, $content, '', null, '');
+            }
             return new \WP_REST_Response($answer);
         }
 
@@ -302,10 +306,13 @@ final class Push
             ];
         }
         wp_mkdir_p($work . '/' . $pushId . '/stage');
-        $plan = [
+        // Der Rescue-Key entsteht nur hier: der Server behält seinen Hash – und, für einen Push mit
+        // Inhalten, den Umschlag, den nur dieser Schlüssel öffnet (P3 R1, R2).
+        $rescueKey = PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt);
+        $plan      = [
             'push_id'  => $pushId,
             'key_id'   => $keyId,
-            'key_hash' => hash('sha256', PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt)),
+            'key_hash' => hash('sha256', $rescueKey),
             'units'    => $planned,
         ];
         // Das geprüfte Paket kommt in den Arbeitsordner des Pushs (bei Staging: in die Kopie) – der
@@ -318,7 +325,10 @@ final class Push
             $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows] + $extensions;
             $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows] + $extensions;
             $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
+            // Ohne Umschlag wird trotzdem gepusht (R12): die CLI warnt oder bricht mit --require-rescue-db ab.
+            $answer['rescue']['db'] = $taken ? PushContent::rescueDb($target, $content, $work, $pushId, $rescueKey) : ['ok' => false, 'reason' => RescueContent::WRITE_FAILED];
         }
+        unset($rescueKey);
         $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
             && Store::addPush([
                 'push_id' => $pushId,
