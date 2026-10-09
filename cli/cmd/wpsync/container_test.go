@@ -40,7 +40,7 @@ func TestPullJSONContainerFirstAndFollowUp(t *testing.T) {
 		`{"event":"phase","name":"delta","done":1,"total":1}`,
 		`{"event":"phase","name":"files","done":0,"total":1,"bytes_done":0,"bytes_total":10}`,
 		`{"event":"phase","name":"files","done":1,"total":1,"bytes_done":10,"bytes_total":10}`,
-		`{"event":"phase","name":"db_download","done":1,"total":1,"table":"wp_options","bytes_done":34,"bytes_total":40}`,
+		`{"event":"phase","name":"db_download","done":1,"total":1,"table":"wp_options","bytes_done":40,"bytes_total":40}`,
 		`{"event":"phase","name":"db_import","done":1,"total":1}`,
 	} {
 		if !strings.Contains(r.stdout, want+"\n") {

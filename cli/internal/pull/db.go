@@ -33,22 +33,25 @@ type DBProgress struct {
 	Done, Total int
 	// Table is the table that just finished or, between two chunks, the one being loaded.
 	Table string
-	// BytesDone is the SQL that lies in the cache for the tables of this run: what was received
-	// plus the files of tables a previous, interrupted run had finished. BytesTotal is the sum
-	// of the site's size estimates (transferBytes). The two measure different things and need
-	// not meet; BytesDone is not capped at BytesTotal.
+	// BytesDone and BytesTotal are estimated bytes – the unit of transferBytes, the size the site
+	// names for a table – not measured traffic. BytesTotal sums the tables of this run. A
+	// finished table adds exactly its estimate to BytesDone (also one a previous, interrupted
+	// run left in the cache), the table being loaded its estimate times the share received, at
+	// most 99 %. So BytesDone never falls, never exceeds BytesTotal and equals it at the end.
 	BytesDone, BytesTotal int64
 }
 
 // progressInterval is the least time between two reports that do not finish a table.
 const progressInterval = time.Second
 
-// dbProgress counts tables and bytes of one DB download and reports them.
+// dbProgress counts tables and estimated bytes of one DB download and reports them.
 type dbProgress struct {
-	report func(DBProgress)
-	now    func() time.Time
-	last   time.Time // time of the last report; zero before the first
-	state  DBProgress
+	report   func(DBProgress)
+	now      func() time.Time
+	last     time.Time // time of the last report; zero before the first
+	finished int64     // estimates of the finished tables
+	current  int64     // share of the table being loaded
+	state    DBProgress
 }
 
 func newDBProgress(tables []agentapi.Table, o DBOptions) *dbProgress {
@@ -62,11 +65,22 @@ func newDBProgress(tables []agentapi.Table, o DBOptions) *dbProgress {
 	return p
 }
 
-// add counts received bytes without reporting.
-func (p *dbProgress) add(n int64) { p.state.BytesDone += n }
-
-// chunk reports the table being loaded, unless the last report is less than progressInterval ago.
-func (p *dbProgress) chunk(table string) {
+// chunk counts what has arrived of t so far and reports it, unless the last report is less than
+// progressInterval ago. The share is rows received by the row estimate of the site (the chunks
+// are counted in rows); without a row estimate, bytes received by the size estimate.
+func (p *dbProgress) chunk(t agentapi.Table, rows, received int64) {
+	estimate := transferBytes(t)
+	var part int64
+	switch {
+	case estimate <= 0:
+	case t.Rows > 0:
+		part = int64(float64(estimate) * float64(rows) / float64(t.Rows))
+	default:
+		part = received
+	}
+	// At most 99 % (rounded down) before the table is finished, also when more arrives than the
+	// site estimated; never backwards.
+	p.current = max(p.current, min(part, estimate-(estimate+99)/100))
 	if p.report == nil {
 		return
 	}
@@ -74,20 +88,23 @@ func (p *dbProgress) chunk(table string) {
 	if !p.last.IsZero() && now.Sub(p.last) < progressInterval {
 		return
 	}
-	p.emit(table, now)
+	p.emit(t.Name, now)
 }
 
-// finished counts table as done and always reports it.
-func (p *dbProgress) finished(table string) {
+// done counts t as finished with its whole estimate and always reports it.
+func (p *dbProgress) done(t agentapi.Table) {
 	p.state.Done++
+	p.finished += transferBytes(t)
+	p.current = 0
 	if p.report != nil {
-		p.emit(table, p.now())
+		p.emit(t.Name, p.now())
 	}
 }
 
 func (p *dbProgress) emit(table string, now time.Time) {
 	p.last = now
 	p.state.Table = table
+	p.state.BytesDone = p.finished + p.current
 	p.report(p.state)
 }
 
@@ -142,8 +159,7 @@ func downloadTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o
 	for _, t := range tables {
 		switch {
 		case markerMatches(dir, t):
-			progress.add(storedBytes(dir, t))
-			progress.finished(t.Name)
+			progress.done(t)
 		case t.Mode == profile.ModeStructure || (t.Rows <= int64(o.RowsPerChunk) && t.Bytes <= o.BundleBytes):
 			small = append(small, t)
 		default:
@@ -159,22 +175,9 @@ func downloadTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o
 		if err := fetchChunks(c, dir, t, o.RowsPerChunk, o.Scope, progress); err != nil {
 			return err
 		}
-		progress.finished(t.Name)
+		progress.done(t)
 	}
 	return nil
-}
-
-// storedBytes is the size of a table file a previous run left in the cache (0 if unreadable).
-func storedBytes(dir *os.Root, t agentapi.Table) int64 {
-	name, err := tableFile(t.Name, sqlSuffix)
-	if err != nil {
-		return 0
-	}
-	info, err := safefs.Lstat(dir, name)
-	if err != nil || !info.Mode().IsRegular() {
-		return 0
-	}
-	return info.Size()
 }
 
 // countingWriter counts what passes through to w.
@@ -228,12 +231,10 @@ func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limi
 			if !ok {
 				return fmt.Errorf("unexpected table %s", name)
 			}
-			n, err := storeTable(dir, t, sql)
-			progress.add(n)
-			if err != nil {
+			if err := storeTable(dir, t, sql); err != nil {
 				return err
 			}
-			progress.finished(name)
+			progress.done(t)
 			return nil
 		})
 		if err != nil {
@@ -271,10 +272,11 @@ func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, 
 		return err
 	}
 	req := agentapi.ChunkRequest{Table: t.Name, Limit: limit, Scope: scope}
+	into := &countingWriter{w: f}
+	var rows int64
 	for {
-		into := &countingWriter{w: f}
 		res, err := c.DBChunk(req, into)
-		progress.add(into.n)
+		rows += int64(res.Rows)
 		if err != nil {
 			f.Close()
 			return err
@@ -282,7 +284,7 @@ func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, 
 		if res.Rows < limit {
 			break // the caller reports the finished table
 		}
-		progress.chunk(t.Name)
+		progress.chunk(t, rows, into.n)
 		if res.Mode == "keyset" {
 			if res.Next == nil {
 				f.Close()
@@ -310,29 +312,28 @@ func createFresh(dir *os.Root, name string) (*os.File, error) {
 	return dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 }
 
-// storeTable writes one table of a bundle and returns the bytes it received.
-func storeTable(dir *os.Root, t agentapi.Table, sql io.Reader) (int64, error) {
+func storeTable(dir *os.Root, t agentapi.Table, sql io.Reader) error {
 	tmp, err := tableFile(t.Name, partSuffix)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	final, err := tableFile(t.Name, sqlSuffix)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	f, err := createFresh(dir, tmp)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	n, copyErr := io.Copy(f, sql)
+	_, copyErr := io.Copy(f, sql)
 	if err := f.Close(); err != nil || copyErr != nil {
 		dir.Remove(tmp)
-		return n, errors.Join(err, copyErr)
+		return errors.Join(err, copyErr)
 	}
 	if err := dir.Rename(tmp, final); err != nil {
-		return n, err
+		return err
 	}
-	return n, writeMarker(dir, t)
+	return writeMarker(dir, t)
 }
 
 // markerValue ties a downloaded table file to the mode and checksum it was fetched with.

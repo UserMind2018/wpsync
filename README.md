@@ -1712,33 +1712,38 @@ fehlen in allen anderen Phasen; `name`, `done` und `total` bedeuten, was sie imm
 
 ```json
 {"event":"phase","name":"files","done":120,"total":17210,"bytes_done":16777216,"bytes_total":734003200}
-{"event":"phase","name":"db_download","done":11,"total":12,"table":"wp_postmeta","bytes_done":96468992,"bytes_total":2362232012}
-{"event":"phase","name":"db_download","done":12,"total":12,"table":"wp_postmeta","bytes_done":1610612736,"bytes_total":2362232012}
+{"event":"phase","name":"db_download","done":11,"total":12,"table":"wp_postmeta","bytes_done":1245708288,"bytes_total":2362232012}
+{"event":"phase","name":"db_download","done":12,"total":12,"table":"wp_postmeta","bytes_done":2362232012,"bytes_total":2362232012}
 ```
 
 | Feld | `files` | `db_download` |
 |---|---|---|
 | `bytes_total` | Summe der Dateigrössen aus dem Delta – nur die Dateien, die dieser Pull lädt | Summe der Tabellengrössen, wie die Site sie schätzt (Daten + Indizes laut `SHOW TABLE STATUS`), über die Tabellen, die dieser Pull lädt; eine Tabelle, die nur als Struktur kommt, zählt 0 |
-| `bytes_done` | Grössen der Dateien in den abgeschlossenen Bundles (auch einer übersprungenen Datei) – endet bei `bytes_total` | SQL-Bytes, die wirklich angekommen sind |
+| `bytes_done` | Grössen der Dateien in den abgeschlossenen Bundles (auch einer übersprungenen Datei) | dieselbe Schätzung: jede fertige Tabelle mit ihrer ganzen Grösse, die Tabelle in Arbeit mit ihrem Anteil |
 | `table` | – | die Tabelle, die gerade fertig wurde (`done` ist um eins gestiegen) oder, zwischen zwei Chunks, die in Arbeit ist (`done` unverändert) |
 
-- **`bytes_done` und `bytes_total` von `db_download` messen Verschiedenes** – empfangenes SQL
-  gegen die Schätzung der Site – und treffen sich nicht: Indizes werden nicht übertragen,
-  abgewählte Post-Typen fehlen, SQL-Text ist anders gross als die Zeilen auf der Platte.
-  `bytes_done` wird **nicht** auf `bytes_total` begrenzt und kann darüber liegen oder am Ende
-  darunter bleiben. Für eine Anzeige: `min(bytes_done / bytes_total, 1)` zeigt Bewegung
-  innerhalb einer Tabelle; fertig ist die Phase bei `done == total`. `bytes_total` kann 0 sein
-  (nur Struktur-Tabellen, oder keine Datei zu laden).
+In beiden Phasen gilt: `bytes_done` fällt nie, liegt nie über `bytes_total` und ist im letzten
+Ereignis der Phase gleich `bytes_total` – `bytes_done / bytes_total` taugt direkt als
+Fortschrittsbalken. `bytes_total` kann 0 sein (nur Struktur-Tabellen, oder keine Datei zu
+laden); die Felder kommen dann als `0`/`0`.
+
+- **`db_download` zählt geschätzte Bytes laut Site, nicht gemessene Übertragung.** Was über die
+  Leitung geht, ist anders gross (Indizes reisen nicht mit, abgewählte Post-Typen fehlen, SQL-Text
+  ist kein Speicherformat); die gemessene Menge steht am Ende in `data.bytes_in`.
 - **Grosse Tabellen** kommen in Chunks; jeder Chunk kann ein Ereignis auslösen, bei dem nur
-  `bytes_done` wächst. Höchstens etwa ein solches Zwischen-Ereignis pro Sekunde; das Ereignis zum
-  Abschluss einer Tabelle kommt immer, das letzte der Phase also auch. Kleine Tabellen reisen
-  gebündelt und melden sich nur beim Abschluss.
+  `bytes_done` wächst: um die Grösse der Tabelle mal den Anteil der empfangenen an den von der
+  Site geschätzten Zeilen (ohne Zeilenschätzung: empfangene Bytes gegen die Grösse). Der Anteil
+  ist **auf 99 % begrenzt** – auch die Zeilenzahl ist eine Schätzung, und die 100 % einer Tabelle
+  kommen erst mit ihrem Abschluss. Liefert die Site mehr Zeilen als geschätzt, bleibt die Anzeige
+  bis dahin bei 99 % der Tabelle stehen; liefert sie weniger, springt sie mit dem Abschluss.
+- Höchstens etwa ein solches Zwischen-Ereignis pro Sekunde; das Ereignis zum Abschluss einer
+  Tabelle kommt immer, das letzte der Phase also auch. Kleine Tabellen reisen gebündelt und
+  melden sich nur beim Abschluss.
 - **Fortsetzen nach einem Abbruch** (Exit 30): Tabellen, die der abgebrochene Lauf schon fertig
-  im Cache abgelegt hat, zählen in **beiden** Feldern – in `bytes_total` mit ihrer Schätzung, in
-  `bytes_done` mit der Grösse ihrer Datei – und melden sich gleich zu Beginn der Phase als
-  fertig. Eine halb geladene Tabelle beginnt neu, ihre Bytes zählen nicht. Tabellen und Dateien,
-  die ein Folge-Pull gar nicht neu lädt (unverändert), zählen in **keinem** der beiden Felder
-  und auch nicht in `total`; lädt er keine Tabelle, gibt es kein `db_download`-Ereignis.
+  im Cache abgelegt hat, zählen in **beiden** Feldern mit ihrer Schätzung und melden sich gleich
+  zu Beginn der Phase als fertig. Eine halb geladene Tabelle beginnt neu, bei 0. Tabellen und
+  Dateien, die ein Folge-Pull gar nicht neu lädt (unverändert), zählen in **keinem** der beiden
+  Felder und auch nicht in `total`; lädt er keine Tabelle, gibt es kein `db_download`-Ereignis.
 - Die Datei-Phase meldet sich wie bisher je Bundle (16 MB); innerhalb einer einzelnen grossen
   Datei gibt es kein Zwischen-Ereignis.
 

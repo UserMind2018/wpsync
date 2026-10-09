@@ -24,9 +24,9 @@ func TestRunReportsPhasesAndResult(t *testing.T) {
 	if err := Run(o); err != nil {
 		t.Fatal(err)
 	}
-	// W2: files and db_download carry bytes (10 = the file, 34 = the SQL received, 40 = the
-	// site's estimate of wp_options); the other phases stay as they were.
-	want := "delta 1/1,setup 1/1,files 0/1 bytes 0/10,files 1/1 bytes 10/10,db_download 1/1 bytes 34/40 wp_options,db_import 1/1,postsetup 1/1,mailguard 1/1"
+	// W2: files and db_download carry bytes (10 = the file, 40 = the site's estimate of
+	// wp_options, whatever its SQL weighs); the other phases stay as they were.
+	want := "delta 1/1,setup 1/1,files 0/1 bytes 0/10,files 1/1 bytes 10/10,db_download 1/1 bytes 40/40 wp_options,db_import 1/1,postsetup 1/1,mailguard 1/1"
 	if got := strings.Join(events, ","); got != want {
 		t.Errorf("events = %s\nwant     %s", got, want)
 	}

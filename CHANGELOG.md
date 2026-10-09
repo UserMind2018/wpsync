@@ -117,9 +117,12 @@ Agent ≥ 0.9.0 wie bisher.
 - Eine Tabelle, die in Chunks kommt, meldet sich je Chunk (höchstens etwa einmal pro Sekunde) mit
   wachsendem `bytes_done` bei gleichem `done` – die Anzeige steht nicht mehr, während die letzte
   grosse Tabelle lädt. Der Abschluss jeder Tabelle wird immer gemeldet
-- `bytes_total` von `db_download` ist die Schätzung der Site, `bytes_done` das empfangene SQL;
-  `bytes_done` wird nicht auf `bytes_total` begrenzt. Nach einem Abbruch zählen schon geladene
-  Tabellen in beiden Feldern, unveränderte Tabellen eines Folge-Pulls in keinem
+- Beide Felder von `db_download` zählen **geschätzte Bytes laut Site** (Daten + Indizes), nicht die
+  gemessene Übertragung: eine fertige Tabelle mit ihrer ganzen Grösse, die Tabelle in Arbeit mit
+  dem Anteil der empfangenen an den geschätzten Zeilen, bis zu ihrem Abschluss höchstens 99 %.
+  `bytes_done` fällt nie, liegt nie über `bytes_total` und ist am Ende der Phase gleich
+  `bytes_total`. Nach einem Abbruch zählen schon geladene Tabellen in beiden Feldern, unveränderte
+  Tabellen eines Folge-Pulls in keinem
 
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
