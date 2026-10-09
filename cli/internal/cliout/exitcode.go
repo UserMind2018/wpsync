@@ -77,9 +77,9 @@ type Failure struct {
 	// Reason names a case within Code for callers that must not parse Message ("site_locked",
 	// and the staging and push cases without an exit code of their own, see reason).
 	Reason string `json:"reason,omitempty"`
-	// Detail: with reason rescue_db_unavailable why rescue.php cannot take the content of the push
-	// back without WordPress – the agent's word (no_crypto, driver, no_image_key, probe_failed,
-	// write_failed) or agent_outdated (Spec Content-Push P3 §9).
+	// Detail: with reason rescue_db_unavailable why rescue.php cannot take the database part of the
+	// push back without WordPress – the agent's word (no_crypto, driver, no_image_key, probe_failed,
+	// write_failed) or agent_outdated (Spec Content-Push P3 §9, P4 A9).
 	Detail string `json:"detail,omitempty"`
 	// Path: with reason not_readable the file or folder, relative to the docroot.
 	Path string `json:"path,omitempty"`
@@ -91,6 +91,10 @@ type Failure struct {
 	// relative to wp-content/uploads/ it is about (Spec Content-Push §10). Never a value.
 	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
 	Paths []string              `json:"paths,omitempty"`
+	// Plugins: with a refusal of the plugin state of a push (reason plugins_invalid,
+	// plugins_requirements, plugins_not_allowed, plugins_unsupported, plugins_failed) the units it is
+	// about and why (Spec Content-Push P4 §4.5). Never a value of the option, never the target's list.
+	Plugins []agentapi.PluginRefusal `json:"plugins,omitempty"`
 	// Device and AdminURL: with exit 40 whose push window it is (as far as pair stored it) and
 	// where an administrator opens it (Spec Container-Push C8).
 	Device   string `json:"device,omitempty"`
@@ -162,6 +166,10 @@ func Classify(err error) Failure {
 	if f.Reason == "rescue_db_unavailable" && errors.As(err, &needDB) {
 		f.Detail = needDB.Reason
 	}
+	var switched *push.PluginsError
+	if errors.As(err, &switched) && f.Exit == ExitUnknown {
+		f.Plugins, f.Detail = switched.Plugins, switched.Detail
+	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
 		f.Device, f.AdminURL = window.Device, window.AdminURL
@@ -173,8 +181,8 @@ func Classify(err error) Failure {
 // staging job that stopped, a copy in a status that does not allow the call, a request that
 // reached the copy instead of the live site, an address of the agent outside the paired site,
 // the push cases of Spec Container-Push C11 and P-O3, what stops pull --content after the tables
-// are loaded (manifest, export of the working copy, canonical form), and a push that
-// --require-rescue-db stopped.
+// are loaded (manifest, export of the working copy, canonical form), a push that
+// --require-rescue-db stopped, and a refusal of the plugin state of a push.
 func reason(err error, exit int) string {
 	if errors.Is(err, pull.ErrPullRunning) {
 		return "site_locked"
@@ -186,6 +194,12 @@ func reason(err error, exit int) string {
 	code := ""
 	if errors.As(err, &apiErr) {
 		code = apiErr.Code
+	}
+	// The plugin state of a push: the reason is the agent's code, or rescue_db_unavailable when it
+	// refused for want of the rescue envelope (Spec Content-Push P4 §4.5).
+	var switched *push.PluginsError
+	if errors.As(err, &switched) {
+		return switched.Reason
 	}
 	// The content of a push: the reason is the agent's code (Spec Content-Push §7.2, §7.6).
 	var refused *push.ContentError
@@ -246,7 +260,8 @@ func classify(err error) int {
 	case errors.As(err, &usage), errors.Is(err, pull.ErrNeedsConfirmation), errors.Is(err, pull.ErrPlainNeedsConfirmation),
 		errors.Is(err, pull.ErrUploadsWithoutProxy), errors.Is(err, pull.ErrInvalidDocroot),
 		errors.Is(err, pull.ErrContentScope),
-		errors.Is(err, push.ErrNeedsYes), errors.Is(err, staging.ErrNeedsYes), errors.Is(err, push.ErrTarget):
+		errors.Is(err, push.ErrNeedsYes), errors.Is(err, staging.ErrNeedsYes), errors.Is(err, push.ErrTarget),
+		errors.Is(err, push.ErrPluginSwitch):
 		return ExitUsage
 	case errors.Is(err, agentapi.ErrInvalidEnv), errors.Is(err, pull.ErrInvalidTableName),
 		errors.Is(err, agentapi.ErrForeignURL):
@@ -256,7 +271,8 @@ func classify(err error) int {
 		return ExitUnknown
 	case errors.Is(err, syscall.ENOSPC):
 		return ExitDiskFull
-	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging), errors.Is(err, push.ErrAgentNoUploads), errors.Is(err, push.ErrAgentNoContent):
+	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging), errors.Is(err, push.ErrAgentNoUploads), errors.Is(err, push.ErrAgentNoContent),
+		errors.Is(err, push.ErrAgentNoPlugins):
 		return ExitAgentOutdated
 	case errors.As(err, &postSetup):
 		return ExitPostSetupFailed

@@ -850,7 +850,7 @@ func (a *app) pushOptions(name string, mode *pushMode) (push.Options, *sites.Sit
 }
 
 func (a *app) cmdPush(args []string) error {
-	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--activate plugins/<slug>]… [--deactivate plugins/<slug>]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
@@ -861,6 +861,9 @@ func (a *app) cmdPush(args []string) error {
 	contentFile := fs.String("content", "", "Inhalts-Paket (package.jsonl), gebaut gegen den letzten Pull mit --content")
 	noCode := fs.Bool("no-code", false, "keinen Code pushen: nur --uploads und --content")
 	requireRescueDB := fs.Bool("require-rescue-db", false, "mit --content: nur pushen, wenn rescue.php die Inhalte auch ohne WordPress zurücknehmen kann (Agent 0.8.0); sonst wird mit einer Warnung gepusht")
+	var activate, deactivate listFlag
+	fs.Var(&activate, "activate", "Plugin im selben Push aktivieren: plugins/<slug>, mehrfach oder mit Komma. Die Einheit geht immer mit, auch unverändert; braucht ein Push-Fenster, das ein Administrator geöffnet hat (Agent 0.9.0)")
+	fs.Var(&deactivate, "deactivate", "Plugin im selben Push deaktivieren: plugins/<slug>, mehrfach oder mit Komma; geht auch mit --no-code (Agent 0.9.0)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	mode := addPushMode(fs)
 	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
@@ -887,13 +890,15 @@ func (a *app) cmdPush(args []string) error {
 	if *noCode && len(positional) > 2 {
 		return cliout.Usage(errors.New("--no-code und genannte Einheiten schliessen sich aus"))
 	}
-	if *noCode && *uploads == "" && *contentFile == "" {
-		return cliout.Usage(errors.New("--no-code braucht --uploads oder --content"))
+	if *noCode && *uploads == "" && *contentFile == "" && len(switchUnits(deactivate)) == 0 {
+		return cliout.Usage(errors.New("--no-code braucht --uploads, --content oder --deactivate"))
 	}
 	opts.Ctx = a.ctx // SIGTERM stops the push before the swap (C12)
 	opts.Units = positional[2:]
 	opts.Content, opts.NoCode = *contentFile, *noCode
 	opts.RequireRescueDB = *requireRescueDB
+	// Which plugins a push may switch, push.Run checks before anything else (exit 2).
+	opts.Activate, opts.Deactivate = switchUnits(activate), switchUnits(deactivate)
 	if *uploads != "" {
 		list, err := push.ReadUploadList(*uploads)
 		if err != nil {
@@ -913,6 +918,20 @@ func (a *app) cmdPush(args []string) error {
 		a.data = res // also with an error: push_id and status say what happened on the site
 	}
 	return pushError(err, site)
+}
+
+// switchUnits flattens --activate / --deactivate: the flag may be repeated and may carry several
+// units separated by commas.
+func switchUnits(values listFlag) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
 }
 
 func (a *app) cmdPushes(args []string) error {
@@ -1038,6 +1057,25 @@ func rescueDBNext(reason string, site *sites.Site) string {
 	return ""
 }
 
+// pluginsNext adds the next step to a refusal of the plugin state of a push, by its reason.
+func pluginsNext(e *push.PluginsError, site *sites.Site) string {
+	switch e.Reason {
+	case "plugins_invalid":
+		return " – aktivieren lässt sich nur ein Plugin, dessen Einheit im selben Push liegt und das genau einer Hauptdatei mit dem Kopf „Plugin Name:“ direkt im Ordner hat; nichts wurde getauscht"
+	case "plugins_requirements":
+		return " – PHP-Version, WordPress-Version oder vorausgesetzte Plugins des Ziels passen nicht zum Satz; nichts wurde getauscht"
+	case "plugins_not_allowed":
+		return fmt.Sprintf(" – Plugins schaltet ein Push nur in einem Fenster, das ein Administrator mit dem Recht activate_plugins geöffnet hat: %s/wp-admin/tools.php?page=wpsync", site.URL)
+	case "plugins_unsupported":
+		return " – auf einer Multisite schaltet ein Push keine Plugins; nichts wurde getauscht"
+	case "plugins_failed":
+		return " – die Liste der aktiven Plugins des Ziels liess sich nicht lesen oder nicht schreiben; nichts wurde übernommen, Code und Uploads sind zurückgetauscht"
+	case "rescue_db_unavailable":
+		return rescueDBNext(e.Detail, site) + "; ein Push, der Plugins schaltet, geht ohne die Notfall-Rücknahme nicht raus – nichts wurde getauscht"
+	}
+	return ""
+}
+
 // rescueKeptWhy says in words why rescue.php left the content of a push on the site.
 func rescueKeptWhy(code string) string {
 	switch code {
@@ -1081,11 +1119,19 @@ func pushHint(err error, site *sites.Site) error {
 	var blocked *push.RescueBlockedError
 	var refused *push.ContentError
 	var needDB *push.RescueDBError
+	var switched *push.PluginsError
 	switch {
 	case err == nil:
 		return nil
 	case errors.As(err, &needDB):
 		return cliout.Hint(err, fmt.Sprintf("%v%s; nichts wurde getauscht", err, rescueDBNext(needDB.Reason, site)))
+	case errors.Is(err, push.ErrPluginSwitch):
+		return cliout.Usage(err)
+	case errors.Is(err, push.ErrAgentNoPlugins):
+		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentPlugins, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kann mit einem Push noch keine Plugins schalten – Agent %s installieren; nichts wurde übertragen", site.URL, agentapi.MinAgentPlugins))
+	case errors.As(err, &switched):
+		return cliout.Hint(err, fmt.Sprintf("%v%s", err, pluginsNext(switched, site)))
 	case errors.Is(err, push.ErrAgentNoContent):
 		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentContentPush, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch keine Inhalte pushen – Agent %s installieren", site.URL, agentapi.MinAgentContentPush))
@@ -1139,21 +1185,31 @@ func pushHint(err error, site *sites.Site) error {
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, push.ShowID(pending.PushID), site.Name, push.ShowID(pending.PushID)))
 	case errors.As(err, &rolled):
 		if slices.Contains(rolled.Warnings, push.WarningContentNotRolledBack) {
-			// Why the content stands: rescue.php names it (agent 0.8.0) – or it knew no database at all.
+			// Why the database part stands: rescue.php names it (agent 0.8.0) – or it knew no database at all.
 			why := "der Agent hat nicht geantwortet"
 			if rolled.ContentError != nil {
-				why += ", rescue.php liess die Inhalte stehen: " + rescueKeptWhy(rolled.ContentError.Code) + " (" + rolled.ContentError.Code + ")"
+				why += ", rescue.php liess den Datenbank-Anteil stehen: " + rescueKeptWhy(rolled.ContentError.Code) + " (" + rolled.ContentError.Code + ")"
 			}
-			return cliout.Hint(err, fmt.Sprintf("%v.\n  Code und Uploads sind zurück, die Inhalte des Pushs stehen noch auf der Site (%s).\n"+
-				"  Sobald WordPress wieder antwortet: wpsync rollback %s %s", err, why, site.Name, push.ShowID(rolled.PushID)))
+			what := "die Inhalte des Pushs stehen"
+			if slices.Contains(rolled.Warnings, push.WarningPluginsNotRestored) {
+				// A18: the list of active plugins still carries the push – a plugin it activated keeps loading.
+				what = "der Datenbank-Anteil des Pushs samt Plugin-Zustand steht"
+				why += "; was der Push aktiviert hat, ist noch aktiv, was er deaktiviert hat, noch aus"
+			}
+			return cliout.Hint(err, fmt.Sprintf("%v.\n  Code und Uploads sind zurück, %s noch auf der Site (%s).\n"+
+				"  Sobald WordPress wieder antwortet: wpsync rollback %s %s", err, what, why, site.Name, push.ShowID(rolled.PushID)))
 		}
 		if len(rolled.StillWorse) > 0 {
 			return cliout.Hint(err, fmt.Sprintf("%v.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; ")))
 		}
 		if rolled.Via == "rescue" && rolled.Content != "" {
-			// The whole set went back without WordPress (Spec Content-Push P3 §9).
-			return cliout.Hint(err, fmt.Sprintf("Push %s zurückgerollt (über rescue.php, Inhalte eingeschlossen): %s.\n"+
-				"  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", push.ShowID(rolled.PushID), strings.Join(rolled.Reasons, "; ")))
+			// The whole set went back without WordPress (Spec Content-Push P3 §9, P4 §8.4).
+			what := "Inhalte eingeschlossen"
+			if rolled.Plugins != nil {
+				what = "Datenbank-Anteil samt Plugin-Zustand eingeschlossen"
+			}
+			return cliout.Hint(err, fmt.Sprintf("Push %s zurückgerollt (über rescue.php, %s): %s.\n"+
+				"  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", push.ShowID(rolled.PushID), what, strings.Join(rolled.Reasons, "; ")))
 		}
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", err))
 	case errors.Is(err, push.ErrNeedsYes):
@@ -1170,7 +1226,7 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
-	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_") || strings.HasPrefix(apiErr.Code, "wpsync_content_")):
+	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_") || strings.HasPrefix(apiErr.Code, "wpsync_content_") || strings.HasPrefix(apiErr.Code, agentapi.PluginsCodePrefix)):
 		return cliout.Hint(err, agentText(apiErr.Message))
 	}
 	return explain(err, site)

@@ -740,3 +740,26 @@ func TestRunNeverGoesAroundARefusingAgentForAPluginState(t *testing.T) {
 		t.Errorf("the push still stands: %+v", report)
 	}
 }
+
+// Ergänzt: die Wörter am Draht von --json (Spec P4 §4.5, V18) – Warnungen und die Felder des Ergebnisses.
+func TestPluginWordsOfTheJSONResult(t *testing.T) {
+	words := []string{WarningDeactivationReview, WarningRequirementsUnchecked, WarningActivationHooksSkipped, WarningDeactivationHooksSkipped, WarningPluginsNotRestored}
+	if !reflect.DeepEqual(words, []string{"deactivation_review", "requirements_unchecked", "activation_hooks_skipped", "deactivation_hooks_skipped", "plugins_not_restored"}) {
+		t.Errorf("warnings = %v", words)
+	}
+	raw, _ := json.Marshal(Result{Units: []string{}, Status: "rolled_back", Via: "rescue", Warnings: []string{WarningContentNotRolledBack, WarningPluginsNotRestored},
+		PluginsBack:        &agentapi.RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{}},
+		PluginsNotRestored: &agentapi.PluginsKept{Added: []string{"kunde/kunde.php"}, Removed: []string{"alt/alt.php"}}})
+	for _, part := range []string{
+		`"warnings":["content_not_rolled_back","plugins_not_restored"]`,
+		`"plugins_back":{"deactivated":["kunde/kunde.php"],"reactivated":[]}`,
+		`"plugins_not_restored":{"added":["kunde/kunde.php"],"removed":["alt/alt.php"]}`,
+	} {
+		if !strings.Contains(string(raw), part) {
+			t.Errorf("json misses %s: %s", part, raw)
+		}
+	}
+	if raw, _ := json.Marshal(Result{Units: []string{}}); strings.Contains(string(raw), "plugins") {
+		t.Errorf("a result without a plugin state names none: %s", raw)
+	}
+}

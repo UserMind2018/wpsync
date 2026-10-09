@@ -47,6 +47,8 @@ type stagingFake struct {
 	list    string   // answer of /push/list; empty: one confirmed push to staging
 	confirm int      // HTTP status of /push/confirm
 	shut    bool     // /push/begin reports the push window closed
+	begin   string   // answer of /push/begin; empty: the plan of one unit plugins/x
+	rbBody  string   // answer of /push/rollback; empty: {"ok":true}
 
 	routes []string
 	begins []map[string]any
@@ -138,6 +140,10 @@ func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 	case "/wpsync/v1/push/begin":
 		var req agentapi.PushBeginRequest
 		json.Unmarshal(body, &req)
+		if f.begin != "" {
+			w.Write([]byte(f.begin))
+			return
+		}
 		fmt.Fprintf(w, `{"push_id":"","target":%q,"agent_version":%q,"health_urls":[],"window_open":%t,"pending":null,
 "units":[{"path":"plugins/x","exists":true,"version":"1.0","conflicts":[],"need":["x.php"],"writable":true}],"rescue":{"url":"","salt":""}}`, req.Target, f.version, !f.shut)
 	case "/wpsync/v1/push/list":
@@ -154,6 +160,10 @@ func (f *stagingFake) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Write([]byte(`{"ok":true}`))
 	case "/wpsync/v1/push/rollback":
+		if f.rbBody != "" {
+			w.Write([]byte(f.rbBody))
+			return
+		}
 		w.Write([]byte(`{"ok":true}`))
 	default:
 		http.Error(w, `{"code":"rest_no_route","message":"no route"}`, http.StatusNotFound)
