@@ -247,6 +247,22 @@ final class PushRescueTest extends TestCase
     }
 
     /**
+     * M1: der Wettlauf am Draht – confirm bestätigt den Push, nachdem rescue.php ihn als unbestätigt
+     * gelesen hat und bevor es die Sperre hält. Unter der Sperre ist er bestätigt: 409, nichts getauscht.
+     */
+    public function testRescueRefusesAPushThatWasConfirmedWhileItWaitedForTheLock(): void
+    {
+        PushRescue::$onLock = function (string $pushId): void {
+            PushRescue::$onLock = null;
+            PushRescue::setStatus($this->work, $pushId, PushRescue::CONFIRMED); // confirm, unter seiner Sperre, eben fertig
+        };
+        $this->assertSame([409, ['ok' => false, 'error' => 'confirmed']], $this->post(self::ID, $this->key));
+        $this->assertSame('new', file_get_contents($this->content . '/plugins/x/main.php'));
+        $this->assertSame(PushRescue::CONFIRMED, PushRescue::read($this->work, self::ID)['status']);
+        $this->assertFileDoesNotExist(PushRescue::pendingFile($this->work), 'kein Marker: es wurde nichts zurückgenommen');
+    }
+
+    /**
      * M1: supersede() ändert die Datensätze anderer Pushes – jeden nur unter dessen Sperre und so,
      * wie er dort gerade steht. Hält ein anderer Lauf (seine Rücknahme) die Sperre, bleibt der
      * Datensatz unberührt: der Lauf schreibt seinen Stand selbst.
