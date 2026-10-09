@@ -126,4 +126,22 @@ final class ContentOriginTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new ContentOrigin('kunde.de');
     }
+
+    /** @return list<array{0: string}> Security-Review M2: Längen und Anzahlen, die als int überlaufen */
+    public static function overflowing(): array
+    {
+        return [
+            ['s:9223372036854775807:"%s";'],
+            ['E:9223372036854775807:"%s";'],
+            ['a:9223372036854775807:{i:0;s:16:"%s";}'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('overflowing')]
+    public function testOverflowingLengthsAreUnnormalizableNotAnError(string $template): void
+    {
+        $o = new ContentOrigin('https://kunde.de');
+        $this->assertNull($o->normalize(sprintf($template, 'https://kunde.de')));
+        $this->assertNull($o->insert(sprintf($template, ContentOrigin::PLAIN)));
+    }
 }

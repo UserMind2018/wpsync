@@ -153,4 +153,24 @@ final class StagingReplaceTest extends TestCase
         $this->assertNull($r->stripValue('s:99:"https://example.com/wpsync-staging-0123456789ab/x";'));
         $this->assertSame('C:3:"Cfg":3:{abc}', $r->stripValue('C:3:"Cfg":3:{abc}'), 'ohne Staging-Pfad bleibt der Wert, wie er ist');
     }
+
+    /** @return list<array{0: string}> Security-Review M2: Längen und Anzahlen, die als int überlaufen */
+    public static function overflowing(): array
+    {
+        return [
+            ['s:9223372036854775807:"https://example.com/x";'],
+            ['E:9223372036854775807:"https://example.com/x";'],
+            ['a:9223372036854775807:{i:0;s:21:"https://example.com/x";}'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('overflowing')]
+    public function testOverflowingLengthsStayAndAreCounted(string $value): void
+    {
+        $r = $this->r();
+        $this->assertSame($value, $r->value($value));
+        $this->assertSame(1, $r->skipped());
+        $withTail = str_replace('example.com', 'example.com' . self::TAIL, $value);
+        $this->assertNull($r->stripValue($withTail));
+    }
 }

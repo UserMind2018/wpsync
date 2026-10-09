@@ -13,6 +13,9 @@ final class SerializedWalker
 {
     private const MAX_DEPTH = 64;
 
+    /** Ziffern einer Länge oder Anzahl: mehr passt in keinen Wert, und als int liefe die Zahl über. */
+    private const MAX_DIGITS = 10;
+
     public static function looksSerialized(string $value): bool
     {
         return preg_match('/^(N;|b:[01];|i:-?\d+;|d:[^;]+;|s:\d+:"|a:\d+:\{|O:\d+:"|C:\d+:"|E:\d+:")/', $value) === 1
@@ -75,42 +78,59 @@ final class SerializedWalker
                 $pos += strlen($m[0]);
                 return $m[0];
             case 's':
-                if (preg_match('/\Gs:(\d+):"/', $s, $m, 0, $pos) !== 1) {
+                if (preg_match('/\Gs:(\d{1,' . self::MAX_DIGITS . '}):"/', $s, $m, 0, $pos) !== 1) {
                     return null;
                 }
                 $start = $pos + strlen($m[0]);
                 $len   = (int) $m[1];
-                if (substr($s, $start + $len, 2) !== '";') {
+                if (!self::fits($s, $start, $len) || substr($s, $start + $len, 2) !== '";') {
                     return null;
                 }
                 $pos = $start + $len + 2;
                 $new = self::inner(substr($s, $start, $len), $text);
                 return 's:' . strlen($new) . ':"' . $new . '";';
             case 'E':
-                if (preg_match('/\GE:(\d+):"/', $s, $m, 0, $pos) !== 1) {
+                if (preg_match('/\GE:(\d{1,' . self::MAX_DIGITS . '}):"/', $s, $m, 0, $pos) !== 1) {
                     return null;
                 }
                 $start = $pos + strlen($m[0]);
-                if (substr($s, $start + (int) $m[1], 2) !== '";') {
+                $len   = (int) $m[1];
+                if (!self::fits($s, $start, $len) || substr($s, $start + $len, 2) !== '";') {
                     return null;
                 }
-                $out = substr($s, $pos, $start + (int) $m[1] + 2 - $pos);
-                $pos = $start + (int) $m[1] + 2;
+                $out = substr($s, $pos, $start + $len + 2 - $pos);
+                $pos = $start + $len + 2;
                 return $out;
             case 'a':
-                if (preg_match('/\Ga:(\d+):\{/', $s, $m, 0, $pos) !== 1) {
+                if (preg_match('/\Ga:(\d{1,' . self::MAX_DIGITS . '}):\{/', $s, $m, 0, $pos) !== 1) {
                     return null;
                 }
                 $pos += strlen($m[0]);
+                if (!self::fits($s, $pos, (int) $m[1])) {
+                    return null;
+                }
                 return self::members($s, $pos, $depth, 2 * (int) $m[1], $m[0], $text);
             case 'O':
-                if (preg_match('/\GO:(\d+):"([^"]*)":(\d+):\{/', $s, $m, 0, $pos) !== 1 || strlen($m[2]) !== (int) $m[1]) {
+                $digits = '(\d{1,' . self::MAX_DIGITS . '})';
+                if (preg_match('/\GO:' . $digits . ':"([^"]*)":' . $digits . ':\{/', $s, $m, 0, $pos) !== 1 || strlen($m[2]) !== (int) $m[1]) {
                     return null;
                 }
                 $pos += strlen($m[0]);
+                if (!self::fits($s, $pos, (int) $m[3])) {
+                    return null;
+                }
                 return self::members($s, $pos, $depth, 2 * (int) $m[3], $m[0], $text);
         }
         return null; // C: und Unbekanntes lassen sich ohne die Klasse nicht lesen
+    }
+
+    /**
+     * Passen ab $from noch $n Bytes bzw. Einträge in den Wert? Geprüft, bevor mit $n gerechnet wird –
+     * jeder Eintrag belegt mindestens ein Byte.
+     */
+    private static function fits(string $s, int $from, int $n): bool
+    {
+        return $n <= strlen($s) - $from;
     }
 
     private static function members(string $s, int &$pos, int $depth, int $count, string $head, callable $text): ?string

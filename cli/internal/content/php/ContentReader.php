@@ -215,7 +215,7 @@ final class ContentReader
         foreach ($names as $name) {
             $value = $row[$name] ?? null;
             if ($value !== null) {
-                $value = $this->origin->normalize((string) $value);
+                $value = $this->normal((string) $value);
                 if ($value === null) {
                     return self::without($table, $key, 'unnormalizable');
                 }
@@ -240,7 +240,7 @@ final class ContentReader
                 if ($value === null) {
                     continue;
                 }
-                $values[$i] = $this->origin->normalize((string) $value);
+                $values[$i] = $this->normal((string) $value);
                 if ($values[$i] === null) {
                     return self::without($table, $key, 'unnormalizable');
                 }
@@ -255,6 +255,19 @@ final class ContentReader
             $encoded = ['values' => array_map([self::class, 'encode'], $sorted)];
         }
         return self::record($table, $key, Canon::set($values), $encoded);
+    }
+
+    /**
+     * Normalisiert einen Wert. Scheitert das mit einem Fehler statt mit null, kostet es trotzdem nur
+     * den Abdruck dieser Zeile – nie die Seite. Was der Fehler war, bleibt hier.
+     */
+    private function normal(string $value): ?string
+    {
+        try {
+            return $this->origin->normalize($value);
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     /** @param string|null $value */

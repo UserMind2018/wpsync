@@ -282,4 +282,24 @@ final class ContentReaderTest extends TestCase
         $this->assertNull($records[0]['h']);
         $this->assertSame('key_encoding', $records[0]['why']);
     }
+
+    /** Security-Review M2: scheitert die Normalisierung einer Zeile, fehlt nur ihr Abdruck – die Seite bleibt */
+    public function testAValueThatBreaksTheNormalizerCostsOnlyItsRow(): void
+    {
+        $db = new FakeWpdb();
+        $db->answer('/FROM `wp_posts`/', [
+            $this->post('1', ['post_content' => 's:9223372036854775807:"https://kunde.de";']),
+            $this->post('2'),
+        ], []);
+        $db->answer('/SELECT DISTINCT m\.`post_id`/', ['7'], []);
+        $db->answer('/FROM `wp_postmeta` m WHERE m\.`post_id` > 0 AND/', [
+            ['o' => '7', 'k' => '_a', 'v' => 'a:9223372036854775807:{i:0;s:16:"https://kunde.de";}'],
+            ['o' => '7', 'k' => '_b', 'v' => 'ok'],
+        ]);
+        $records = $this->all($this->reader($db), true, ['posts', 'postmeta']);
+        $this->assertSame(['t' => 'posts', 'k' => '1', 'h' => null, 'why' => 'unnormalizable'], $records[0]);
+        $this->assertNotNull($records[1]['h']);
+        $this->assertSame(['t' => 'postmeta', 'k' => "7\0_a", 'h' => null, 'why' => 'unnormalizable'], $records[2]);
+        $this->assertNotNull($records[3]['h']);
+    }
 }
