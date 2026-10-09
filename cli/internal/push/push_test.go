@@ -99,7 +99,21 @@ type fakeSite struct {
 	upNeed      []string                                 // need of the unit uploads in the last begin
 	upUnit      map[string]int                           // rel → unit index of the upload request that carried it
 	rescueBody  string                                   // answer of rescue.php to a rollback; empty: {"ok":true,"status":"rolled_back"}
+	rbPlain     bool                                     // /push/rollback answers with a page that is not the agent's
+	confirmBody string                                   // answer of /push/confirm on 200; empty: {"ok":true}
 	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
+
+	// The content channel (agent 0.7.0, content_run_test.go).
+	staged         map[string][]byte           // sha256 → what /content/stage holds
+	noContent      bool                        // an agent without the channel: no route, no answer for content
+	contentFail    *agentapi.ContentFailure    // the check refuses the package: in the dry run's answer, as an error of the real begin
+	contentHealth  []string                    // published pages the package changes
+	unchecked      []agentapi.ContentUnchecked // what a dry run without a window leaves unchecked
+	uncheckedTotal int
+	commitCode     string                         // /push/commit refuses with this code and swaps nothing
+	noApply        bool                           // /push/commit answers without content
+	actions        []agentapi.PostAction          // post actions of the commit
+	tamper         func(*agentapi.ContentApplied) // changes what the commit answers about the content
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -200,6 +214,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(agentapi.StagingStatus{Exists: true, Status: "ready", URL: f.srv.URL + dir, Created: f.copyMade, CopiedAt: f.copyCopied, CodeCopiedAt: f.copyCode})
 		return
 	}
+	if route == "/wpsync/v1/content/stage" {
+		f.stage(w, r)
+		return
+	}
 	f.routes = append(f.routes, strings.TrimPrefix(route, "/wpsync/v1/push/"))
 	switch route {
 	case "/wpsync/v1/staging/login":
@@ -263,6 +281,15 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			res.Units = append(res.Units, plan)
 		}
+		if req.Content != nil && !f.noContent {
+			res.Content = f.contentPlan(req)
+			if !req.Dry && f.contentFail != nil {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]any{"code": "wpsync_content_" + f.contentFail.Code, "message": f.contentFail.Message,
+					"data": map[string]any{"status": 409, "keys": f.contentFail.Keys}})
+				return
+			}
+		}
 		if !req.Dry {
 			res.PushID, res.Rescue.Salt = testID, testSalt
 			if len(f.ids) > 0 {
@@ -302,6 +329,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		if f.onCommit != nil {
 			f.onCommit(r)
 		}
+		if f.commitCode != "" {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"code":"` + f.commitCode + `","message":"abgelehnt","data":{"status":409,"keys":[{"table":"posts","key":"219"}]}}`))
+			return
+		}
 		f.committed = true
 		stamps := map[string]map[string]agentapi.PushStamp{}
 		for _, u := range f.begins[len(f.begins)-1].Units {
@@ -324,8 +356,20 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				f.copyOld[unit], f.copy[unit] = f.copy[unit], files
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]any{"next": nil, "stamps": stamps})
+		answer := map[string]any{"next": nil, "stamps": stamps}
+		if ref := f.begins[len(f.begins)-1].Content; ref != nil && !f.noContent && !f.noApply {
+			applied := f.applied(ref.SHA256)
+			if f.tamper != nil {
+				f.tamper(applied)
+			}
+			answer["content"] = applied
+		}
+		json.NewEncoder(w).Encode(answer)
 	case "/wpsync/v1/push/confirm":
+		if f.confirm == 200 && f.confirmBody != "" {
+			w.Write([]byte(f.confirmBody))
+			return
+		}
 		f.status(w, f.confirm)
 	case "/wpsync/v1/push/rollback":
 		var rb struct {
@@ -340,6 +384,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				w.Write([]byte(f.rbBody))
 				return
 			}
+		}
+		if f.rbPlain {
+			w.WriteHeader(f.rollback)
+			w.Write([]byte("<html><body>Access denied</body></html>"))
+			return
 		}
 		if f.rbCode != "" {
 			w.WriteHeader(f.rollback)

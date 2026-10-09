@@ -37,6 +37,18 @@ final class ContentListsTest extends TestCase
         $this->assertFalse(ContentLists::metaKey('_edit_lock', ['post_types' => [], 'taxonomies' => [], 'meta_exceptions' => ['_edit_lock']]), 'feste Schlüssel lassen sich nicht ausnehmen');
     }
 
+    /** M3: was WordPress selbst an einen neuen Beitrag hängt, hindert dessen Rücknahme nicht – Wortlisten zählen dabei nicht. */
+    public function testSystemMeta(): void
+    {
+        foreach (array_merge(ContentLists::BLOCKED_META, ['_EDIT_LOCK', '_Elementor_CSS', '_wp_trash_meta_status', '_wp_trash_meta_time', '_elementor_screenshot_failed', '_yoast_indexnow_last_ping', '_oembed_0a1b2c', '_oembed_time_0a1b2c']) as $key) {
+            $this->assertTrue(ContentLists::systemMeta($key), $key);
+        }
+        foreach (['_elementor_data', '_thumbnail_id', 'mailchimp_api_key', 'client_secret', '_billing_email', 'farbe', '', '_wp_desired_post_slug', 'oembed_x'] as $key) {
+            $this->assertFalse(ContentLists::systemMeta($key), $key);
+        }
+        $this->assertTrue(ContentLists::metaKey('_oembed_0a1b2c'), 'oEmbed-Cache bleibt pushbar wie bisher');
+    }
+
     public function testOptions(): void
     {
         foreach (['page_on_front', 'page_for_posts', 'show_on_front', 'blogname', 'blogdescription', 'sticky_posts', 'site_icon', 'elementor_active_kit', 'elementor_pro_theme_builder_conditions', 'elementor_cpt_support', 'elementor_disable_color_schemes', 'elementor_disable_typography_schemes', 'elementor_experiment-container', 'options_footer_text', '_options_footer_text', 'wpseo_titles', 'wpseo_social', 'rank-math-options-titles', 'theme_mods_hello-child'] as $name) {
@@ -149,12 +161,12 @@ final class ContentListsTest extends TestCase
     {
         $out = [];
         foreach (['posts', 'terms', 'term_taxonomy'] as $table) {
-            foreach (['219abc', 'abc', '', '0', '0219', '-1', '+219', ' 219', "219\n", '2.19', '1e3', "219\0", "219\0_x", str_repeat('9', 21)] as $key) {
+            foreach (['219abc', 'abc', '', '0', '0219', '-1', '+219', ' 219', "219\n", '2.19', '1e3', "219\0", "219\0_x", str_repeat('9', 21), str_repeat('9', 19), '18446744073709551615'] as $key) {
                 $out[$table . ' ' . json_encode($key)] = [$table, $key];
             }
         }
         foreach (['postmeta', 'termmeta', 'term_relationships'] as $table) {
-            foreach (["219abc\0_x", "abc\0_x", "\0_x", "0\0_x", "0219\0_x", "-1\0_x", " 219\0_x", "219\n\0_x", "2.19\0_x", '219', '219abc', '', '_x', str_repeat('9', 21) . "\0_x"] as $key) {
+            foreach (["219abc\0_x", "abc\0_x", "\0_x", "0\0_x", "0219\0_x", "-1\0_x", " 219\0_x", "219\n\0_x", "2.19\0_x", '219', '219abc', '', '_x', str_repeat('9', 21) . "\0_x", str_repeat('9', 19) . "\0_x", "18446744073709551615\0_x"] as $key) {
                 $out[$table . ' ' . json_encode($key)] = [$table, $key];
             }
         }
@@ -173,7 +185,9 @@ final class ContentListsTest extends TestCase
     public function testCleanObjectIdsPass(): void
     {
         $ctx = ['post_type' => 'page', 'taxonomies' => ['nav_menu']];
-        foreach (['1', '219', '18446744073709551615', str_repeat('9', 20)] as $id) {
+        // Höchstens 18 Stellen: dieselbe Grenze wie im Paket (ContentPackage) – so viel passt in jedem PHP in eine Zahl.
+        $this->assertSame(1, preg_match(ContentLists::OBJECT_ID, str_repeat('9', 18)));
+        foreach (['1', '219', '999999999999999999', str_repeat('9', 18)] as $id) {
             $this->assertNull(ContentLists::blocked('posts', $id, $ctx), $id);
             $this->assertNull(ContentLists::blocked('terms', $id, $ctx), $id);
             $this->assertNull(ContentLists::blocked('term_taxonomy', $id, $ctx), $id);
@@ -182,5 +196,177 @@ final class ContentListsTest extends TestCase
             $this->assertNull(ContentLists::blocked('term_relationships', $id . "\0nav_menu", $ctx), $id);
         }
         $this->assertSame('option', ContentLists::blocked('options', '219abc', ['prefix' => 'wp_']), 'Optionen haben keinen Zahlenschlüssel');
+    }
+
+    /** Härtung S2: die Erweiterungen kommen aus dem Paket – gefährliche Beitragstypen gibt keine frei. */
+    public function testExtensionsNeverFreeDangerousPostTypes(): void
+    {
+        $never = array_merge(ContentLists::NEVER_POST_TYPES, ['shop_order', 'shop_order_refund', 'shop_order_placehold', 'flamingo_inbound', 'flamingo_contact', 'wpforms_log', 'wpcode_snippet']);
+        foreach ($never as $type) {
+            $this->assertNull(ContentLists::extensions(['post_types' => [$type]]), $type);
+            $this->assertTrue(ContentLists::neverPostType($type), $type);
+        }
+        $this->assertNotNull(ContentLists::extensions(['post_types' => ['referenz', 'team-mitglied'], 'taxonomies' => ['branche'], 'meta_exceptions' => ['design_token']]));
+        $this->assertFalse(ContentLists::neverPostType('referenz'));
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function neverPostTypes(): array
+    {
+        $types = [
+            // M4: feste Einträge
+            'wbcr-snippets', 'advanced_ads', 'custom-css-js', 'et_code_snippet', 'shortcoder', 'ct_template', 'oxy_user_library',
+            'bricks_template', 'fl-builder-template', 'fl-theme-layout', 'memberpressrule', 'memberpressproduct', 'memberpressgroup',
+            'wc_membership_plan', 'wc_user_membership', 'shop_webhook', 'download', 'edd_payment', 'edd_discount', 'edd_log',
+            'wc_booking', 'sfwd-courses', 'sfwd-lessons', 'sfwd-quiz', 'redirect_rule', 'wp_automatic', 'forminator_forms',
+            'forminator_polls', 'forminator_quizzes', 'frm_form_actions', 'frm_styles', 'mc4wp-form', 'amp_validated_url',
+            'jp_pay_order', 'jp_pay_product', 'fluentform', 'wpforms_log',
+            // M4: Präfixe
+            'shop_x', 'wc_x', 'edd_x', 'memberpressx', 'sfwd-x', 'llms_course', 'tutor_quiz', 'ld-exam', 'frm_x', 'forminator_x',
+            'wpforms-x', 'nf_x', 'jp_x', 'amp_x', 'flamingo_x',
+            // M4: Wörter an beliebiger Stelle
+            'my-snippet', 'php_code_x', 'x-redirect', 'my_webhook', 'x_payment_y', 'sales-order', 'subscription_plan',
+            'x-membership', 'coupon-x', 'SNIPPETS',
+        ];
+        return array_combine($types, array_map(static function (string $type): array {
+            return [$type];
+        }, $types));
+    }
+
+    /** M4: Code-Träger, Shop, Mitgliedschaft, Formulare, Weiterleitungen – als Liste und als Muster nie freizuschalten. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('neverPostTypes')]
+    public function testNoExtensionFreesThisPostType(string $type): void
+    {
+        $this->assertTrue(ContentLists::neverPostType($type), $type);
+        if (preg_match('/^[a-z0-9_-]{1,20}\z/', $type) === 1) {
+            $this->assertNull(ContentLists::extensions(['post_types' => ['referenz', $type]]), $type);
+        }
+        $this->assertFalse(ContentLists::postType($type), 'kein Typ der Whitelist');
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function neverTaxonomies(): array
+    {
+        $names = ['action-group', 'user-group', 'link_category', 'product_type', 'product_visibility', 'shop_order_status',
+            'user_tag', 'author-users', 'wp_role', 'roles', 'capability', 'my_caps', 'USER_x'];
+        return array_combine($names, array_map(static function (string $name): array {
+            return [$name];
+        }, $names));
+    }
+
+    /** M4: auch für Taxonomien gibt es eine feste Sperre – Benutzer-Taxonomien, Rollen, Interna des Shops. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('neverTaxonomies')]
+    public function testNoExtensionFreesThisTaxonomy(string $taxonomy): void
+    {
+        $this->assertTrue(ContentLists::neverTaxonomy($taxonomy), $taxonomy);
+        if (preg_match('/^[a-z0-9_-]{1,32}\z/', $taxonomy) === 1) {
+            $this->assertNull(ContentLists::extensions(['taxonomies' => ['branche', $taxonomy]]), $taxonomy);
+        }
+        $this->assertFalse(ContentLists::taxonomy($taxonomy), 'keine Taxonomie der Whitelist');
+    }
+
+    /** M4: die Muster treffen nichts von der Whitelist und nicht die üblichen Erweiterungen eines Projekts. */
+    public function testThePatternsLeaveTheWhitelistAndUsualExtensionsAlone(): void
+    {
+        foreach (ContentLists::POST_TYPES as $type) {
+            $this->assertFalse(ContentLists::neverPostType($type), $type);
+        }
+        foreach (ContentLists::TAXONOMIES as $taxonomy) {
+            $this->assertFalse(ContentLists::neverTaxonomy($taxonomy), $taxonomy);
+        }
+        $ext = ContentLists::extensions(['post_types' => ['referenz', 'team-mitglied', 'produkt', 'event'], 'taxonomies' => ['branche', 'pa_farbe', 'product_cat', 'language'], 'meta_exceptions' => ['design_token']]);
+        $this->assertSame(['referenz', 'team-mitglied', 'produkt', 'event'], $ext['post_types']);
+        $this->assertSame(['branche', 'pa_farbe', 'product_cat', 'language'], $ext['taxonomies'], 'Produktattribute und -kategorien nicht pauschal');
+        $this->assertSame(['design_token'], $ext['meta_exceptions']);
+        $this->assertSame(2, ContentLists::VERSION, 'unveröffentlicht: die Version bleibt');
+        $lists = ContentLists::export();
+        $this->assertSame(ContentLists::NEVER_POST_TYPE_WORDS, $lists['never_post_type_words']);
+        $this->assertSame(ContentLists::NEVER_TAXONOMIES, $lists['never_taxonomies']);
+        $this->assertSame(ContentLists::NEVER_TAXONOMY_WORDS, $lists['never_taxonomy_words']);
+        $this->assertContains('shop_', $lists['never_post_type_prefixes']);
+    }
+
+    /** M4: used() nennt die Erweiterungen eines Pakets nur, wenn es welche hat. */
+    public function testUsedExtensions(): void
+    {
+        $this->assertNull(ContentLists::used(['post_types' => [], 'taxonomies' => [], 'meta_exceptions' => []]));
+        $this->assertNull(ContentLists::used([]));
+        $this->assertSame(
+            ['post_types' => ['referenz'], 'taxonomies' => [], 'meta_exceptions' => ['design_token']],
+            ContentLists::used(['post_types' => ['referenz', 'referenz'], 'taxonomies' => [], 'meta_exceptions' => ['design_token'], 'fremd' => ['x']])
+        );
+    }
+
+    /** Härtung S4: mehr Sperrwörter – kurze nur als ganzes Namensglied, damit übliche Schlüssel pushbar bleiben. */
+    public function testWordListsBlockSecretsButNotUsualKeys(): void
+    {
+        foreach (['smtp_pass', 'ftp-pwd', '_auth_code', 'user.auth', 'stripe_sk', 'pw_salt', 'private_note', 'my_credentials', 'ApiKey', 'api-key-live', 'slack_webhook_url', 'oauth_state', 'db_passwd'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+            $this->assertSame('meta_word', ContentLists::blocked('postmeta', "5\0" . $key, ['post_type' => 'page']), $key);
+            $this->assertTrue(ContentLists::metaKey($key, ['meta_exceptions' => [$key]]), $key . ' lässt sich je Projekt ausnehmen');
+        }
+        $usual = [
+            '_elementor_data', '_elementor_page_settings', '_thumbnail_id', '_wp_page_template', '_wp_attached_file', '_wp_attachment_metadata',
+            '_wp_attachment_image_alt', '_menu_item_type', '_menu_item_object_id', '_menu_item_menu_item_parent', '_menu_item_classes',
+            '_menu_item_url', '_yoast_wpseo_title', '_yoast_wpseo_metadesc', 'rank_math_title', 'author', 'post_author_name', 'passage',
+            'compass', 'asked_by', 'skill', 'basalt', 'privates', '_wp_desired_post_slug', 'footnotes',
+        ];
+        foreach ($usual as $key) {
+            $this->assertTrue(ContentLists::metaKey($key), $key);
+        }
+        foreach (ContentLists::OPTIONS as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['theme_mods_hello-child', 'elementor_experiment-container', 'options_footer_text', '_options_footer_text'] as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['options_smtp_pass', 'options_auth', 'options_webhook', '_options_stripe_sk'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+    }
+
+    /** Härtung S4: die Datenbank unterscheidet Gross/klein nicht – gesperrt ist auch die andere Schreibweise. */
+    public function testListsAlsoApplyToTheLowercaseForm(): void
+    {
+        foreach (['_Edit_Lock', '_ELEMENTOR_CSS', '_WP_Trash_Meta_Status', '_Billing_Email', 'My_Token'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+        }
+        foreach (['SiteUrl', 'HOME', 'Active_Plugins', 'WP_user_roles', '_Transient_x', 'WPSYNC_schema', 'Elementor_x_Cache'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        $this->assertFalse(ContentLists::option('Blogname', 'wp_', 'hello-child'), 'die Whitelist gilt bytegenau');
+        $this->assertSame(2, ContentLists::VERSION);
+    }
+
+    /**
+     * Die kurzen Sperrwörter gelten als Namensglied auch an einer camelCase-Grenze und neben
+     * Ziffern (smtpPass, auth2, pass1) – übliche Schlüssel bleiben pushbar.
+     */
+    public function testSegmentsAlsoEndAtCamelCaseAndDigits(): void
+    {
+        foreach (['smtpPass', 'auth2', 'pass1', 'SMTPPass', 'userPwd', 'oAuth2Sk', 'db2pass', 'my_authKey', 'privateNote', 'pw1salt'] as $key) {
+            $this->assertFalse(ContentLists::metaKey($key), $key);
+            $this->assertSame('meta_word', ContentLists::blocked('postmeta', "5\0" . $key, ['post_type' => 'page']), $key);
+            $this->assertTrue(ContentLists::metaKey($key, ['meta_exceptions' => [$key]]), $key . ' lässt sich je Projekt ausnehmen');
+        }
+        foreach (['options_smtpPass', 'options_auth2', '_options_pass1'] as $name) {
+            $this->assertFalse(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        $usual = [
+            'author', 'passage', 'compass', 'skill', 'basalt', 'privates', 'authorName', 'postAuthor', 'passageText', 'skillLevel2',
+            '_menu_item_type', '_menu_item_object_id', '_menu_item_menu_item_parent', '_menu_item_classes', '_menu_item_url', '_menu_item_target',
+            '_elementor_data', '_elementor_page_settings', '_elementor_version', '_wp_page_template', '_thumbnail_id', '_yoast_wpseo_title',
+            '_yoast_wpseo_metadesc', 'rank_math_title', '_wp_attachment_metadata', '_wp_attached_file', '_wp_attachment_image_alt',
+            '_wp_desired_post_slug', 'footnotes', 'field_5f3a1b2c9d8e7', '_oembed_0123456789abcdef0123456789abcdef', 'h1Title', 'col2Width',
+        ];
+        foreach ($usual as $key) {
+            $this->assertTrue(ContentLists::metaKey($key), $key);
+        }
+        foreach (ContentLists::OPTIONS as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', 'hello-child'), $name);
+        }
+        foreach (['theme_mods_hello-child', 'theme_mods_twentytwentyfour', 'elementor_experiment-container', 'elementor_experiment-e_font_icon_svg', 'options_footer_text2', '_options_footer_text'] as $name) {
+            $this->assertTrue(ContentLists::option($name, 'wp_', $name === 'theme_mods_twentytwentyfour' ? 'twentytwentyfour' : 'hello-child'), $name);
+        }
     }
 }

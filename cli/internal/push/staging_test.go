@@ -2,12 +2,14 @@ package push
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -404,6 +406,34 @@ func pushList(entries ...string) string {
 
 func pushEntry(id, target string, created int) string {
 	return `{"push_id":"` + id + `","device":"mac","target":"` + target + `","status":"confirmed","units":[{"path":"plugins/x"}],"created":` + string(rune('0'+created)) + `}`
+}
+
+// M4: the project extensions of a content push stay visible in the log – as data and for people,
+// and only names that look like the agent's.
+func TestPushesNamesTheExtensionsOfAContentPush(t *testing.T) {
+	f := newFakeSite(t)
+	f.list = `{"pushes":[{"push_id":"` + testID + `","device":"mac","target":"live","status":"confirmed","created":1,"units":[
+{"path":"plugins/x"},{"path":"content","files":5,"uploaded":5,"extensions":{"post_types":["referenz","\u001b[2Jx"],"taxonomies":["branche"],"meta_exceptions":["design_token"]}}]}]}`
+	o, _, out := localSite(t, f)
+	records, err := List(o)
+	if err != nil || len(records) != 1 || len(records[0].Units) != 2 {
+		t.Fatalf("list = %+v, %v", records, err)
+	}
+	want := &agentapi.ContentExtensions{PostTypes: []string{"referenz"}, Taxonomies: []string{"branche"}, MetaExceptions: []string{"design_token"}}
+	if got := records[0].Units[1].Extensions; !reflect.DeepEqual(got, want) || records[0].Units[0].Extensions != nil {
+		t.Errorf("extensions = %+v", got)
+	}
+	raw, _ := json.Marshal(records[0].Units)
+	if !strings.Contains(string(raw), `"extensions":{"post_types":["referenz"],"taxonomies":["branche"],"meta_exceptions":["design_token"]}`) ||
+		strings.Count(string(raw), "extensions") != 1 {
+		t.Errorf("pushes --json: %s", raw)
+	}
+	if err := Pushes(o); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "plugins/x, content (Erweiterungen: referenz branche design_token)") || strings.Contains(out.String(), "\x1b") {
+		t.Errorf("log:\n%q", out.String())
+	}
 }
 
 // V10

@@ -39,6 +39,18 @@ final class AdminWindowTest extends TestCase
         $this->assertSame('UPDATE `wp_wpsync_pairings` SET {"push_until":0,"push_opened_by":null} WHERE {"key_id":"k1"}', $writes[1]);
     }
 
+    /** M4 (d): die Liste der Pushes nennt die Projekt-Erweiterungen, mit denen Inhalte gepusht wurden. */
+    public function testThePushListNamesTheExtensionsOfAContentPush(): void
+    {
+        $this->boot();
+        $unit = ['path' => 'content', 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => 5, 'uploaded' => 5];
+        $this->assertSame('content – 5 von 5 Dateien übertragen', Admin::unitLine($unit));
+        $line = Admin::unitLine($unit + ['extensions' => ['post_types' => ['referenz', 'team'], 'taxonomies' => ['branche'], 'meta_exceptions' => ['design_token']]]);
+        $this->assertSame('content – 5 von 5 Dateien übertragen – Projekt-Erweiterungen: Beitragstypen referenz, team; Taxonomien branche; Meta-Ausnahmen design_token', $line);
+        $this->assertSame('content – 5 von 5 Dateien übertragen – Projekt-Erweiterungen: Taxonomien branche', Admin::unitLine($unit + ['extensions' => ['taxonomies' => ['branche'], 'post_types' => 'kaputt']]));
+        $this->assertStringContainsString('esc_html(self::unitLine($unit))', (string) file_get_contents(__DIR__ . '/../src/Admin.php'));
+    }
+
     /** Die Seite gibt den angemeldeten Benutzer weiter und schreibt das Fenster nur über diese beiden Wege. */
     public function testRenderPassesTheCurrentUser(): void
     {

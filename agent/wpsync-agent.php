@@ -24,8 +24,8 @@ foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
     'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
-    'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'StagingConfig', 'StagingAccess', 'StagingHosts',
-    'StagingFiles', 'StagingDb', 'Staging', 'Rest', 'Admin',
+    'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'ContentException', 'ContentStore', 'ContentState', 'ContentPackage', 'ContentSql', 'ContentTarget', 'ContentRepair', 'ContentCheck', 'ContentImage', 'ContentApply', 'ContentRollback', 'ContentPostActions', 'StagingConfig', 'StagingAccess', 'StagingHosts',
+    'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }

@@ -37,6 +37,10 @@ type APIError struct {
 	Status  int
 	Code    string
 	Message string
+	// Keys and Paths: details of a refusal of the content channel (code wpsync_content_…), from
+	// the error data of the agent. Never values of rows.
+	Keys  []ContentKey
+	Paths []string
 }
 
 func (e *APIError) Error() string {
@@ -221,15 +225,35 @@ func readAPIError(resp *http.Response) error {
 			body = gz
 		}
 	}
-	data, _ := io.ReadAll(io.LimitReader(body, 4000))
+	// A refusal of the content channel names up to 200 keys; anything else stays short.
+	data, _ := io.ReadAll(io.LimitReader(body, 1<<20))
 	var wpErr struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		Data    struct {
+			Keys  []ContentKey `json:"keys"`
+			Paths []string     `json:"paths"`
+		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
-		return &APIError{Status: resp.StatusCode, Code: CleanText(wpErr.Code), Message: CleanText(wpErr.Message)}
+		e := &APIError{Status: resp.StatusCode, Code: CleanText(short(wpErr.Code)), Message: CleanText(short(wpErr.Message))}
+		if strings.HasPrefix(e.Code, ContentCodePrefix) {
+			e.Keys = CleanKeys(wpErr.Data.Keys)
+			if e.Paths = wpErr.Data.Paths; len(e.Paths) > maxContentKeys {
+				e.Paths = e.Paths[:maxContentKeys]
+			}
+		}
+		return e
 	}
-	return &APIError{Status: resp.StatusCode, Message: CleanText(strings.TrimSpace(string(data)))}
+	return &APIError{Status: resp.StatusCode, Message: CleanText(short(strings.TrimSpace(string(data))))}
+}
+
+// short cuts text from the site to what an error message carries.
+func short(s string) string {
+	if len(s) > 4000 {
+		return strings.ToValidUTF8(s[:4000], "")
+	}
+	return s
 }
 
 func isConnectionFailure(err error) bool {

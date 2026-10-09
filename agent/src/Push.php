@@ -90,6 +90,23 @@ final class Push
     }
 
     /**
+     * Nimmt ein Inhalts-Paket in Stücken entgegen (Spec Content-Push §7.5) – immer in den
+     * Arbeitsordner von Live, auch für einen späteren Push nach Staging. Braucht kein offenes
+     * Push-Fenster: der Probelauf soll das Paket prüfen können, und angewandt wird es erst im Commit.
+     *
+     * @param array<string, mixed> $params
+     * @return \WP_REST_Response|\WP_Error
+     */
+    public static function stage(array $params, string $keyId)
+    {
+        $live = self::content();
+        if ($live === '' || rtrim(wp_normalize_path((string) realpath(dirname(self::$pluginDir, 2))), '/') !== $live) {
+            return self::error('wpsync_layout', 'Push braucht das Standardlayout wp-content/plugins/wpsync-agent.', 400);
+        }
+        return PushContent::stage($params, $keyId, self::workDir($live), time());
+    }
+
+    /**
      * Prüft Einheiten, Konflikte, Rechte und Platz. Mit dry nur Auskunft; sonst legt es den Push
      * an und nimmt die Sperre. Ziel live oder staging (Spec 2b 5.8): der Client nennt nur das Wort,
      * das Verzeichnis kommt aus dem Staging-Datensatz.
@@ -111,7 +128,16 @@ final class Push
         if ($content instanceof \WP_Error) {
             return $content;
         }
-        $units = self::parseUnits($params['units'] ?? null);
+        // Inhalte (Spec Content-Push §7): kein Eintrag in units, sondern die sha256 eines Pakets, das
+        // vorher über /content/stage abgelegt wurde. Ein Satz nur aus Inhalten hat keine Einheit.
+        $contentSha = null;
+        if (array_key_exists('content', $params)) {
+            $contentSha = PushContent::sha256($params['content']);
+            if ($contentSha === null) {
+                return self::error('wpsync_push_content', 'content nennt keine gültige sha256 eines Pakets.', 400);
+            }
+        }
+        $units = self::parseUnits($params['units'] ?? null, $contentSha !== null);
         if ($units instanceof \WP_Error) {
             return $units;
         }
@@ -166,8 +192,22 @@ final class Push
                 $bytes += $file['size'];
             }
         }
+        $open = PushWindow::open(Store::pushUntil($keyId), $now);
+        // Das Paket wird im Probelauf wie im echten Begin vollständig geprüft (§7.2) – ohne zu schreiben.
+        $staged      = null;
+        $contentPlan = null;
+        if ($contentSha !== null) {
+            $uploadFiles = [];
+            foreach ($units as $unit) {
+                if ($unit['path'] === PushUploads::UNIT) {
+                    $uploadFiles = $unit['files'];
+                }
+            }
+            $staged      = PushContent::staged($live . '/' . Store::pushDirName(), $keyId, $contentSha, $now);
+            // Ohne offenes Fenster nur ein Teil der Prüfung: der Probelauf ist kein Weg, die Site auszufragen.
+            $contentPlan = PushContent::plan($staged, $target, $content, $uploadFiles, empty($params['dry']), Store::pushOpener($keyId), $open);
+        }
         $pending = self::pending();
-        $open    = PushWindow::open(Store::pushUntil($keyId), $now);
         $answer  = [
             'push_id'       => '',
             'target'        => $target,
@@ -185,6 +225,9 @@ final class Push
                 'hardening' => PushRescueStub::hardening(self::activePlugins()),
             ],
         ];
+        if ($contentPlan !== null) {
+            $answer['content'] = $contentPlan;
+        }
         if (!empty($params['dry'])) {
             return new \WP_REST_Response($answer);
         }
@@ -194,6 +237,10 @@ final class Push
         }
         if ($pending !== null) {
             return self::error('wpsync_push_pending', 'Push ' . $pending['push_id'] . ' ist getauscht, aber nicht bestätigt.', 409);
+        }
+        // Was der Probelauf als content.error nennt, lehnt der echte Begin ab – mit denselben Einzelheiten.
+        if ($contentPlan !== null && !$contentPlan['ok']) {
+            return ContentException::fromArray((array) $contentPlan['error'])->toError();
         }
         // Ein Push ersetzt nie eine Datei unter uploads – auch nicht mit force (Spec Content-Push §8.2, W3).
         if ($upConflicts !== []) {
@@ -256,7 +303,18 @@ final class Push
             'key_hash' => hash('sha256', PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt)),
             'units'    => $planned,
         ];
-        $stored = false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
+        // Das geprüfte Paket kommt in den Arbeitsordner des Pushs (bei Staging: in die Kopie) – der
+        // Commit wendet genau diese Datei an, auch wenn die Ablage inzwischen verfallen ist.
+        $taken = true;
+        if ($contentSha !== null) {
+            $rows            = (int) array_sum((array) $contentPlan['rows']);
+            // Projekt-Erweiterungen des Pakets bleiben im Datensatz des Pushs sichtbar (pushes, WP-Admin).
+            $extensions      = isset($contentPlan['extensions']) ? ['extensions' => $contentPlan['extensions']] : [];
+            $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows] + $extensions;
+            $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows] + $extensions;
+            $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
+        }
+        $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
             && Store::addPush([
                 'push_id' => $pushId,
                 'key_id'  => $keyId,
@@ -461,9 +519,17 @@ final class Push
                 return self::uploadFailure($e);
             }
         }
+        // Inhalte kommen zuletzt (Uploads → Code → DB, §7.3). Das geprüfte Paket muss noch genau das sein.
+        $contentSha = is_array($plan['content'] ?? null) ? (string) ($plan['content']['sha256'] ?? '') : null;
+        $package    = $contentSha === null ? null : PushContent::taken($base, $contentSha);
+        if ($contentSha !== null && $package === null) {
+            self::discard($pushId, self::FAILED);
+            return (new ContentException(ContentException::MISSING, 'Das Paket dieses Pushs fehlt oder wurde verändert – nichts getauscht.'))->toError();
+        }
         wp_mkdir_p($base . '/old');
         // Vor dem ersten rename: stirbt PHP mitten im Anlegen oder Tausch, kann rescue.php zurücknehmen.
-        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads);
+        // Der DB-Anteil steht hier schon als „pending“ – lange vor START TRANSACTION.
+        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha);
         if ($upIndex !== null) {
             $placed = [];
             try {
@@ -513,13 +579,67 @@ final class Push
                 'uploaded'    => count($unit['need']),
             ];
         }
+        if ($contentSha !== null) {
+            $rows      = (int) ($plan['content']['rows'] ?? 0);
+            $used      = ContentLists::used(is_array($plan['content']['extensions'] ?? null) ? $plan['content']['extensions'] : []);
+            $summary[] = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows]
+                + ($used === null ? [] : ['extensions' => $used]);
+        }
+        // Ab hier gilt der Push als getauscht – auch wenn PHP beim Anwenden der Inhalte stirbt: dann
+        // nimmt die Datenbank die Transaktion zurück, und wpsync rollback holt den Code nach.
         Store::updatePush($pushId, ['status' => PushRescue::COMMITTED, 'committed' => time(), 'units' => (string) wp_json_encode($summary)]);
+        $answer = ['next' => null, 'stamps' => (object) $stamps];
+        if ($package !== null) {
+            try {
+                $push    = Store::getPush($pushId);
+                $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by']);
+            } catch (ContentException $e) {
+                return self::contentFailed($e, $content, $work, $pushId);
+            } catch (\Throwable $e) {
+                // Kein vorgesehener Grund, dieselbe Folge: was die Transaktion angefangen hat, hat sie
+                // zurückgenommen (ContentStore::transaction). Was der Fehler war, bleibt hier.
+                return self::contentFailed(new ContentException(ContentException::FAILED, 'Die Inhalte liessen sich nicht anwenden – nichts wurde übernommen.'), $content, $work, $pushId);
+            }
+            PushRescue::setContent($work, $pushId, PushRescue::CONTENT_APPLIED);
+            $answer['content'] = [
+                'rows'         => $applied['rows'],
+                'after'        => $applied['after'],
+                'post_actions' => PushContent::postActions($target, $content, $applied['changes']), // §7.7: nie ein Fehler des Pushs
+                'seconds'      => $applied['seconds'],
+            ];
+        }
         if ($target === 'staging') {
             Staging::markUsed(); // ein Push zählt als Nutzung der Kopie (Spec 2b 5.9)
         }
         self::touchLock($pushId, time());
         self::touchStub(time());
-        return new \WP_REST_Response(['next' => null, 'stamps' => (object) $stamps]);
+        return new \WP_REST_Response($answer);
+    }
+
+    /**
+     * Die Inhalte liessen sich nicht anwenden – die Datenbank hat nichts davon behalten. Der Satz
+     * bleibt ganz (§7.3 Nr. 6): Code und Uploads werden zurückgetauscht, der Push ist gescheitert.
+     * Ausnahme unrestored: eine einzelne Zeile steht nicht mehr auf ihrem Stand davor – dann bleibt
+     * der Arbeitsordner samt Vorher-Abbild liegen.
+     */
+    private static function contentFailed(ContentException $e, string $content, string $work, string $pushId): \WP_Error
+    {
+        PushRescue::setContent($work, $pushId, PushRescue::CONTENT_DONE);
+        list($status) = PushRescue::rollback($content, $work, $pushId);
+        if ($status !== 200) {
+            // Der Push bleibt getauscht und unbestätigt: die CLI nennt den Ausweg (Exit 42).
+            return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen, und der Code liess sich nicht zurücktauschen – wpsync rollback ' . $pushId . '.', 409);
+        }
+        if (!empty($e->toArray()['unrestored'])) {
+            // Eine Zeile liess sich nicht zurücksetzen: das Vorher-Abbild ist der einzige Beleg für ihren
+            // Stand davor. Der Push ist gescheitert, sein Arbeitsordner bleibt liegen – prune() und
+            // pruneOrphans() fassen ihn nicht an, solange seine Zeile nicht als aufgeräumt gilt.
+            Store::updatePush($pushId, ['status' => self::FAILED, 'finished' => time()]);
+            self::release($pushId);
+            return $e->toError();
+        }
+        self::discard($pushId, self::FAILED);
+        return $e->toError();
     }
 
     /**
@@ -535,6 +655,29 @@ final class Push
         if ($push instanceof \WP_Error) {
             return $push;
         }
+        $kept = ['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::CONTENT_KEPT]];
+        if (self::contentKept($push)) {
+            return new \WP_REST_Response($kept); // schon so abgeschlossen: eine verlorene Antwort lässt sich wiederholen
+        }
+        // Hat rescue.php Code und Uploads schon zurückgenommen, wird der Push nie „bestätigt“. Offen ist
+        // dann nur noch sein DB-Anteil (sync() schliesst alle anderen ab): confirm nimmt die Inhalte an,
+        // wie sie stehen, und schliesst den Push als zurückgerollt ab – der Ausweg, wenn sie sich nicht
+        // zurücknehmen lassen (changed_since_push). Das Vorher-Abbild geht mit dem Arbeitsordner.
+        if ($push['status'] === PushRescue::COMMITTED && !$push['pruned']) { // einen bestätigten Push nimmt rescue.php nie zurück
+            $dirs   = self::dirs($push['target']);
+            $record = $dirs instanceof \WP_Error ? null : PushRescue::read($dirs[1], $push['push_id']);
+            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
+                $units = [];
+                foreach ((array) $push['units'] as $unit) {
+                    $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? $unit + ['kept' => true] : $unit;
+                }
+                Store::updatePush($push['push_id'], ['units' => (string) wp_json_encode($units)]);
+                self::finishRollback($push['push_id']);
+                self::touchStub(time());
+                self::scheduleTidy();
+                return new \WP_REST_Response($kept);
+            }
+        }
         if ($push['status'] !== PushRescue::CONFIRMED) {
             if ($push['status'] !== PushRescue::COMMITTED) {
                 return self::error('wpsync_push_state', 'Push ist im Status ' . $push['status'] . '.', 409);
@@ -545,6 +688,11 @@ final class Push
             }
             PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
+            // Das Paket ist auf Live: die Ablage braucht niemand mehr. Nach Staging bleibt sie für den Push nach Live.
+            $record = PushRescue::read($dirs[1], $push['push_id']);
+            if ($push['target'] === 'live' && is_string($record['content']['sha256'] ?? null)) {
+                PushContent::forget($dirs[1], $keyId, $record['content']['sha256']);
+            }
             self::release($push['push_id']);
             // Die 10 Minuten des Stubs ab jetzt: eine verlorene confirm-Antwort braucht rescue.php (R5).
             self::touchStub(time());
@@ -591,6 +739,9 @@ final class Push
         if ($push === null) {
             return self::error('wpsync_push_unknown', 'Unbekannter Push.', 404);
         }
+        if (self::contentKept($push)) {
+            return self::error('wpsync_push_state', 'Code und Uploads dieses Pushs sind zurück, seine Inhalte wurden mit confirm angenommen – ein Vorher-Abbild gibt es nicht mehr.', 409);
+        }
         if ($push['status'] !== PushRescue::ROLLED_BACK) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 return self::error('wpsync_push_state', 'Für diesen Push gibt es keinen Snapshot (Status ' . $push['status'] . ').', 409);
@@ -599,22 +750,74 @@ final class Push
             if ($dirs instanceof \WP_Error) {
                 return $dirs;
             }
+            // DB → Code → Uploads (§7.6). Hat sich eine Zeile seit dem Push geändert, wird nichts
+            // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
+            $actions = [];
+            $record  = PushRescue::read($dirs[1], $pushId);
+            if ($record !== null && PushRescue::contentOpen($record)) {
+                // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
+                // und der Code bliebe stehen.
+                if ($record['status'] !== PushRescue::ROLLED_BACK && $record['superseded_by'] !== null) {
+                    return self::error('wpsync_push_rollback', self::superseded((string) $record['superseded_by']), 409);
+                }
+                try {
+                    $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
+                } catch (ContentException $e) {
+                    return $e->toError();
+                }
+                // Ab hier steht in rescue.json, dass die Inhalte zurück sind: scheitert danach der Code,
+                // überspringt ein zweiter Lauf die Datenbank und holt nur Code und Uploads nach.
+                PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
+                $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
+            }
             list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
             if ($status !== 200) {
                 $why = ($body['error'] ?? '') === 'superseded'
-                    ? 'Zuerst den späteren Push ' . ($body['by'] ?? '') . ' zurückrollen.'
+                    ? self::superseded((string) ($body['by'] ?? ''))
                     : 'Rollback fehlgeschlagen: ' . ($body['error'] ?? 'unbekannt');
+                if ($record !== null && is_array($record['content'] ?? null)) {
+                    $why .= ' – Die Inhalte sind zurückgenommen, Code und Uploads noch nicht: die Rücknahme wiederholen.';
+                }
                 return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
             }
             self::finishRollback($pushId);
             self::touchStub(time()); // wie bei confirm (R5)
             self::scheduleTidy();
+            $answer = ['ok' => true, 'status' => PushRescue::ROLLED_BACK];
             // Seit dem Push geänderte Uploads bleiben liegen und werden genannt (Spec Content-Push §8.4).
             if (isset($body['warnings'])) {
-                return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []]);
+                $answer += ['warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []];
             }
+            if ($actions !== []) {
+                $answer['post_actions'] = $actions; // Nacharbeiten der Rücknahme (§7.7)
+            }
+            return new \WP_REST_Response($answer);
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
+    }
+
+    /**
+     * Wurde der Push mit confirm abgeschlossen, nachdem rescue.php Code und Uploads zurückgenommen
+     * hatte – die Inhalte stehen also bewusst noch?
+     *
+     * @param array<string, mixed> $push
+     */
+    private static function contentKept(array $push): bool
+    {
+        if ($push['status'] !== PushRescue::ROLLED_BACK) {
+            return false;
+        }
+        foreach ((array) $push['units'] as $unit) {
+            if (is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT && !empty($unit['kept'])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function superseded(string $by): string
+    {
+        return 'Zuerst den späteren Push ' . $by . ' zurückrollen.';
     }
 
     /** @return \WP_REST_Response */
@@ -647,7 +850,9 @@ final class Push
                 continue;
             }
             $record = PushRescue::read($content . '/' . $name, $push['push_id']);
-            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
+            // Hat rescue.php nur Code und Uploads zurückgenommen, stehen die Inhalte noch (§7.6): der
+            // Push bleibt offen, sein Vorher-Abbild liegen – wpsync rollback holt sie über den Agent nach.
+            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
                 self::finishRollback($push['push_id']);
             }
         }
@@ -675,6 +880,9 @@ final class Push
         }
         self::pruneOrphans($now);
         self::tidyStub($now);
+        if (self::content() !== '') {
+            PushContent::expire(self::content() . '/' . Store::pushDirName(), $now);
+        }
     }
 
     /**
@@ -713,6 +921,10 @@ final class Push
                 if (file_exists(PushRescue::file($work, $name))) {
                     $record = PushRescue::read($work, $name);
                     if ($record === null || !in_array($record['status'], [PushRescue::ROLLED_BACK, PushRescue::CONFIRMED], true)) {
+                        continue;
+                    }
+                    // Code zurück, Inhalte nicht: das Vorher-Abbild ist der einzige Weg zurück.
+                    if ($record['status'] === PushRescue::ROLLED_BACK && PushRescue::contentOpen($record)) {
                         continue;
                     }
                 }
@@ -876,10 +1088,14 @@ final class Push
 
     /**
      * @param mixed $raw
+     * @param bool  $allowEmpty der Satz hat Inhalte: er darf ohne Code und ohne Uploads kommen
      * @return list<array{path: string, files: array<string, array{size: int, sha256: string, mtime: int}>, base: array<string, mixed>}>|\WP_Error
      */
-    private static function parseUnits($raw)
+    private static function parseUnits($raw, bool $allowEmpty = false)
     {
+        if ($allowEmpty && ($raw === null || $raw === [])) {
+            return [];
+        }
         if (!is_array($raw) || $raw === [] || count($raw) > self::MAX_UNITS) {
             return self::error('wpsync_push_units', 'units fehlt oder enthält zu viele Einheiten.', 400);
         }

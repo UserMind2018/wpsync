@@ -51,6 +51,16 @@ type Journal struct {
 	// rollback forgets exactly these.
 	Uploads       []string                      `json:"uploads,omitempty"`
 	UploadsBefore map[string]baseline.FileStamp `json:"uploads_before,omitempty"`
+	// Content: the push carried a content package (Spec Content-Push §7); nil without.
+	Content *JournalContent `json:"content,omitempty"`
+}
+
+// JournalContent notes the package of a push. Applied: manifest and baseline of this site folder
+// carry the pushed state; the lines they had before lie next to the journal in <id>.content.json.
+type JournalContent struct {
+	SHA256  string `json:"sha256"`
+	Rows    int    `json:"rows"`
+	Applied bool   `json:"applied"`
 }
 
 // target is the target of the push, live for a journal that names none.

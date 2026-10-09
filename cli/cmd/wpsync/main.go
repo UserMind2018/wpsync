@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -849,7 +850,7 @@ func (a *app) pushOptions(name string, mode *pushMode) (push.Options, *sites.Sit
 }
 
 func (a *app) cmdPush(args []string) error {
-	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
@@ -857,6 +858,8 @@ func (a *app) cmdPush(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was gepusht würde")
 	to := fs.String("to", push.TargetLive, "Ziel: live oder staging")
 	uploads := fs.String("uploads", "", "Datei mit neuen Uploads: ein Pfad je Zeile relativ zu wp-content/uploads/ (# Kommentar)")
+	contentFile := fs.String("content", "", "Inhalts-Paket (package.jsonl), gebaut gegen den letzten Pull mit --content")
+	noCode := fs.Bool("no-code", false, "keinen Code pushen: nur --uploads und --content")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	mode := addPushMode(fs)
 	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
@@ -878,8 +881,17 @@ func (a *app) cmdPush(args []string) error {
 	if *rps > 0 {
 		opts.Site.RPS = *rps
 	}
+	// --no-code: a set of uploads and content alone. Naming units with it, or nothing to push at
+	// all, is a mistake of the caller – never a push of everything that changed.
+	if *noCode && len(positional) > 2 {
+		return cliout.Usage(errors.New("--no-code und genannte Einheiten schliessen sich aus"))
+	}
+	if *noCode && *uploads == "" && *contentFile == "" {
+		return cliout.Usage(errors.New("--no-code braucht --uploads oder --content"))
+	}
 	opts.Ctx = a.ctx // SIGTERM stops the push before the swap (C12)
 	opts.Units = positional[2:]
+	opts.Content, opts.NoCode = *contentFile, *noCode
 	if *uploads != "" {
 		list, err := push.ReadUploadList(*uploads)
 		if err != nil {
@@ -914,10 +926,16 @@ func (a *app) cmdPushes(args []string) error {
 		return err
 	}
 	if *confirmID != "" {
+		var report push.Result
+		opts.Report = &report
 		if err := push.ConfirmPending(opts, *confirmID); err != nil {
 			return pushError(err, site)
 		}
-		a.data = map[string]string{"push_id": *confirmID, "status": "confirmed"}
+		data := map[string]any{"push_id": *confirmID, "status": report.Status}
+		if len(report.Warnings) > 0 {
+			data["warnings"] = report.Warnings // content_kept: closed as rolled back, the content stays
+		}
+		a.data = data
 		return nil
 	}
 	if a.json {
@@ -976,6 +994,25 @@ func (a *app) cmdRollback(args []string) error {
 	return pushError(err, site)
 }
 
+// contentNext is the next step after a refusal of the content of a push, by its reason.
+func contentNext(reason string, site *sites.Site) string {
+	switch reason {
+	case "conflict", "id_taken", "baseline_outdated", "row_unfaithful":
+		return fmt.Sprintf(" – die Site hat sich seit dem Pull geändert oder das Paket ist älter als der Inhaltsstand: wpsync pull %s --content, Änderungen neu anlegen, Paket neu bauen; nichts wurde übertragen", site.Name)
+	case "author_unknown":
+		return fmt.Sprintf(" – das Push-Fenster im WP-Admin öffnen (%s/wp-admin/tools.php?page=wpsync), nicht per WP-CLI: der Benutzer, der es öffnet, wird Autor neuer Beiträge", site.URL)
+	case "changed_since_push":
+		return " – nichts wurde zurückgenommen, auch Code und Uploads nicht. Die genannten Zeilen auf der Site von Hand prüfen; stehen sie wieder auf dem gepushten Stand, geht die Rücknahme"
+	case "before_image_invalid":
+		return " – nichts wurde zurückgenommen, auch Code und Uploads nicht. Das Vorher-Abbild liegt geschützt im Arbeitsordner des Pushs: wurden WPSYNC_KEY oder die Salts in wp-config.php seit dem Push geändert, lässt es sich nicht mehr öffnen"
+	case "package_too_large":
+		return " – in mehreren Pushes übertragen"
+	case "upload_missing":
+		return " – die Dateien mit --uploads im selben Push mitschicken"
+	}
+	return " – nichts wurde übertragen"
+}
+
 // adminURL is the wpsync page in the WP admin, where an administrator opens the push window.
 func adminURL(site *sites.Site) string {
 	return strings.TrimRight(site.URL, "/") + "/wp-admin/tools.php?page=wpsync"
@@ -1000,9 +1037,20 @@ func pushHint(err error, site *sites.Site) error {
 	var skipped *push.SkippedNewError
 	var apiErr *agentapi.APIError
 	var blocked *push.RescueBlockedError
+	var refused *push.ContentError
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, push.ErrAgentNoContent):
+		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentContentPush, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kann noch keine Inhalte pushen – Agent %s installieren", site.URL, agentapi.MinAgentContentPush))
+	case errors.As(err, &refused):
+		if refused.Reason == "content_failed" && len(refused.Keys) > 0 {
+			// Only an unrestored row gives content_failed a key: the transaction lost its connection and
+			// one write could not be taken back.
+			return cliout.Hint(err, fmt.Sprintf("%v – die genannte Zeile auf der Site von Hand prüfen; das Vorher-Abbild des Pushs liegt dafür weiter im Arbeitsordner auf dem Server", err))
+		}
+		return cliout.Hint(err, fmt.Sprintf("%v%s", err, contentNext(refused.Reason, site)))
 	case errors.Is(err, push.ErrNoBaseline):
 		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("für %s gibt es noch keinen Pull – zuerst wpsync pull %s", site.Name, site.Name))
 	case errors.Is(err, push.ErrAgentNoUploads):
@@ -1045,6 +1093,10 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &pending):
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, push.ShowID(pending.PushID), site.Name, push.ShowID(pending.PushID)))
 	case errors.As(err, &rolled):
+		if slices.Contains(rolled.Warnings, push.WarningContentNotRolledBack) {
+			return cliout.Hint(err, fmt.Sprintf("%v.\n  Code und Uploads sind zurück, die Inhalte des Pushs stehen noch auf der Site (der Agent hat nicht geantwortet).\n"+
+				"  Sobald WordPress wieder antwortet: wpsync rollback %s %s", err, site.Name, push.ShowID(rolled.PushID)))
+		}
 		if len(rolled.StillWorse) > 0 {
 			return cliout.Hint(err, fmt.Sprintf("%v.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; ")))
 		}
@@ -1063,7 +1115,7 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
-	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_")):
+	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_") || strings.HasPrefix(apiErr.Code, "wpsync_content_")):
 		return cliout.Hint(err, agentText(apiErr.Message))
 	}
 	return explain(err, site)
