@@ -24,6 +24,8 @@ final class ContentMemory implements ContentStore
     public $log = [];
     /** @var array<string, list<string>> object_id → term_taxonomy_ids verwaister Zuordnungen (ohne term_taxonomy-Zeile) */
     public $orphans = [];
+    /** @var array<string, int> Zähler-Tabelle → AUTO_INCREMENT − 1; fehlt sie, zählt nur die höchste ID */
+    public $counters = [];
     /** @var int|null der wievielte write() scheitert (1 = der erste) */
     public $failWrite = null;
     /** @var bool jedes read() scheitert */
@@ -61,6 +63,18 @@ final class ContentMemory implements ContentStore
             $out[$table] = $this->engines[$table] ?? 'InnoDB';
         }
         return $out;
+    }
+
+    public function idMax(string $table): int
+    {
+        if (!isset(ContentState::PK[$table])) {
+            throw new \InvalidArgumentException('no counter on ' . $table);
+        }
+        if ($this->failRead) {
+            throw new ContentException(ContentException::FAILED, 'read failed');
+        }
+        $ids = array_map('intval', array_keys($this->data[$table] ?? []));
+        return max($ids === [] ? 0 : max($ids), $this->counters[$table] ?? 0);
     }
 
     public function read(string $table, array $keys, bool $lock): array

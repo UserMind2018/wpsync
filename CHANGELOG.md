@@ -105,6 +105,13 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   (Tiefe insgesamt höchstens 64, verschachtelte serialisierte Strings zählen mit)
 - Agent: Eine URL-Ersetzung macht aus einem ungültigen serialisierten Wert nie einen gültigen –
   weder mit Leerraum an den Rändern noch eine Ebene tiefer
+- Agent: Neue IDs eines Inhalts-Pakets (`posts`, `terms`, `term_taxonomy`) prüft der Agent nicht
+  mehr nur gegen den Korridor aus dem Paket, sondern gegen das Ziel: höchstens
+  `limits.id_headroom` (1.000.000) über `max(MAX(id), AUTO_INCREMENT − 1)` der Tabelle – auf
+  Staging der Kopie – und nie über 2^53 − 1, sonst `id_outside_corridor` mit `error.keys`. Ein
+  `insert` mit einer ID wie 999999999999999999 verschob sonst den `AUTO_INCREMENT` von Live
+  dauerhaft (auch eine Rücknahme setzt ihn nicht zurück). `limits` nennt die Grenze als
+  `id_headroom`, auch im `plan`-Ereignis der CLI
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

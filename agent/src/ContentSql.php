@@ -64,6 +64,60 @@ final class ContentSql implements ContentStore
         return $out;
     }
 
+    public function idMax(string $table): int
+    {
+        if (!isset(ContentState::PK[$table])) {
+            throw new \InvalidArgumentException('no counter on content table ' . $table);
+        }
+        try {
+            return self::counter($this->db, $this->name($table), ContentState::PK[$table], self::status($this->db, $this->name($table)));
+        } catch (ContentException $e) {
+            throw $e;
+        } catch (\RuntimeException $e) {
+            throw new ContentException(ContentException::FAILED, 'Die Datenbank liess sich nicht lesen.');
+        }
+    }
+
+    /**
+     * SHOW TABLE STATUS einer Tabelle – auch für den Manifest-Kopf (ContentManifest::head()).
+     *
+     * @param object $db    $wpdb
+     * @param string $table voller Name
+     * @return array<string, mixed> leer, wenn es die Tabelle nicht gibt
+     * @throws \RuntimeException wenn sich der Status nicht lesen lässt
+     */
+    public static function status($db, string $table): array
+    {
+        $rows = (array) $db->get_results($db->prepare('SHOW TABLE STATUS LIKE %s', $db->esc_like($table)), 'ARRAY_A');
+        if ((string) $db->last_error !== '') {
+            throw new \RuntimeException('content read failed');
+        }
+        return is_array($rows[0] ?? null) ? $rows[0] : [];
+    }
+
+    /**
+     * Höchste vergebene ID einer Zähler-Tabelle: max(MAX(id), AUTO_INCREMENT − 1). Eine Rechnung
+     * für id_max im Manifest-Kopf und für die Grenze neuer IDs (ContentCheck::ID_HEADROOM) – ein
+     * Wert aus einer gescheiterten Abfrage läge unter dem, was das Ziel schon vergeben hat (B8).
+     *
+     * @param object               $db     $wpdb
+     * @param string               $table  voller Name, ein Bezeichner
+     * @param string               $column Primärschlüssel
+     * @param array<string, mixed> $status aus status()
+     * @throws \RuntimeException wenn sich die Tabelle nicht lesen lässt
+     */
+    public static function counter($db, string $table, string $column, array $status): int
+    {
+        if (preg_match(self::NAME, $table) !== 1 || preg_match(self::NAME, $column) !== 1) {
+            throw new \InvalidArgumentException('invalid content table ' . $table);
+        }
+        $max = (int) $db->get_var('SELECT MAX(`' . $column . '`) FROM `' . $table . '`');
+        if ((string) $db->last_error !== '') {
+            throw new \RuntimeException('content read failed');
+        }
+        return max($max, (int) ($status['Auto_increment'] ?? 0) - 1);
+    }
+
     public function read(string $table, array $keys, bool $lock): array
     {
         $keys = array_values(array_unique(array_map('strval', $keys)));

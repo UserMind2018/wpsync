@@ -34,6 +34,9 @@ type ContentLimits struct {
 	MaxRows       int   `json:"max_rows"`
 	MaxBytes      int64 `json:"max_bytes"`
 	BudgetSeconds int   `json:"budget_seconds"`
+	// IDHeadroom is how far above the highest id of the target a new post, term or term_taxonomy
+	// may lie (id_outside_corridor); 0 from an agent that does not name it.
+	IDHeadroom int64 `json:"id_headroom,omitempty"`
 }
 
 // ContentFailure is a refusal of the content channel, in the dry run inside the answer.

@@ -134,6 +134,7 @@ final class ContentPackageTest extends TestCase
         $this->assertSame(ContentPackage::MAX_ROWS, $e->toArray()['limits']['max_rows']);
         $this->assertSame(ContentPackage::MAX_BYTES, $e->toArray()['limits']['max_bytes']);
         $this->assertGreaterThanOrEqual(2, $e->toArray()['limits']['budget_seconds']);
+        $this->assertSame(\WpSync\ContentCheck::ID_HEADROOM, $e->toArray()['limits']['id_headroom'], 'M1: so weit über der höchsten ID des Ziels dürfen neue Objekte liegen');
         $this->assertSame(413, $e->status());
 
         $big = ContentFixtures::row('update', 'options', 'blogname', str_repeat('d', 64), ['option_value' => str_repeat('x', 6400000)]);

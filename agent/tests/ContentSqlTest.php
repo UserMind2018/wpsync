@@ -454,6 +454,34 @@ final class ContentSqlTest extends TestCase
         ], $this->db->queries);
     }
 
+    /** M1: höchste vergebene ID einer Zähler-Tabelle – dieselbe Rechnung wie id_max im Manifest-Kopf. */
+    public function testIdMaxIsTheHigherOfMaxAndAutoIncrement(): void
+    {
+        $this->db->answer('/^SHOW TABLE STATUS LIKE \'stg\\\\\\\\_posts\'/', [['Engine' => 'InnoDB', 'Auto_increment' => '1205']]);
+        $this->db->answer('/^SHOW TABLE STATUS/', [['Engine' => 'InnoDB', 'Auto_increment' => '47']]);
+        $this->db->answer('/^SELECT MAX\(`ID`\) FROM `stg_posts`/', '900');
+        $this->db->answer('/^SELECT MAX\(`term_id`\) FROM `stg_terms`/', '50');
+        $this->db->answer('/^SELECT MAX\(`term_taxonomy_id`\) FROM `stg_term_taxonomy`/', null);
+        $sql = $this->sql('stg_');
+        $this->assertSame(1204, $sql->idMax('posts'), 'AUTO_INCREMENT − 1 gewinnt');
+        $this->assertSame(50, $sql->idMax('terms'), 'MAX(id) gewinnt');
+        $this->assertSame(46, $sql->idMax('term_taxonomy'), 'leere Tabelle');
+        foreach ($this->db->queries as $query) {
+            $this->assertStringNotContainsString('wp_', $query, 'nur die Tabellen des Ziels');
+        }
+        try {
+            $sql->idMax('options');
+            $this->fail('accepted a table without a counter');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('options', $e->getMessage());
+        }
+
+        $this->db = new FakeWpdb();
+        $this->db->fail('/^SELECT MAX/', 'Table is marked as crashed');
+        $this->expectException(ContentException::class);
+        $this->sql()->idMax('posts');
+    }
+
     public function testReadsTheRawRelationshipsOfAnObject(): void
     {
         $this->db->answer('/FROM `wp_term_relationships`/', [['o' => '219', 'tt' => '3'], ['o' => '219', 'tt' => '77'], ['o' => '220', 'tt' => '3']]);

@@ -61,6 +61,7 @@ final class ContentApplyTest extends ContentApplyCase
     private function applyAuthor(): string
     {
         $store         = new ContentMemory(['options' => ['stylesheet' => ContentFixtures::option('stylesheet', 'x')]]);
+        $store->counters = ['posts' => 5]; // M1: neue IDs höchstens ID_HEADROOM über der höchsten des Ziels
         $this->files[] = $file = ContentFixtures::file([ContentFixtures::row('insert', 'posts', '1000005', 'absent', ContentFixtures::postRow('1000005'))]);
         ContentApply::run(ContentPackage::read($file), ContentFixtures::live($store), $this->dir . '-author', 42, self::NOW, '2026-10-09 14:13:20');
         exec('rm -rf ' . escapeshellarg($this->dir . '-author'));

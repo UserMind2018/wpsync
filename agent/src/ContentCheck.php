@@ -10,6 +10,15 @@ defined('ABSPATH') || exit;
  */
 final class ContentCheck
 {
+    /**
+     * So weit über der höchsten vergebenen ID des Ziels darf ein neues Objekt liegen. Der Korridor
+     * kommt aus dem Paket und begrenzt allein nichts: ein Insert weit darüber verschöbe den
+     * AUTO_INCREMENT der Tabelle auf Dauer – auch eine Rücknahme setzt ihn nicht zurück.
+     */
+    public const ID_HEADROOM = 1000000;
+    /** Darüber ist eine ID in JSON und JavaScript keine genaue Zahl mehr (2^53 − 1). */
+    public const MAX_ID = 9007199254740991;
+
     /** Optionen, deren Wert die ID eines Beitrags ist (Studio §5.1, W7). */
     private const POST_OPTIONS = ['page_on_front', 'page_for_posts', 'site_icon', 'elementor_active_kit'];
 
@@ -27,6 +36,8 @@ final class ContentCheck
     private $inserted = [];
     /** @var list<array{table: string, key: string}> Zeilen ohne Objekt auf dem Ziel oder im Paket */
     private $dangling = [];
+    /** @var array<string, int> Zähler-Tabelle → höchste ID, die ein neues Objekt auf diesem Ziel haben darf */
+    private $ceilings = [];
 
     public function __construct(ContentPackage $package, ContentTarget $target)
     {
@@ -50,6 +61,7 @@ final class ContentCheck
     {
         $this->dangling = [];
         $this->inserted = [];
+        $this->ceilings = [];
         $this->head();
         $this->engines();
         $this->load($lock);
@@ -372,7 +384,7 @@ final class ContentCheck
         }
     }
 
-    /** Nr. 7: neue Schlüssel im Korridor und frei, bestehende unverändert seit dem Pull. */
+    /** Nr. 7: neue Schlüssel im Korridor, nah an der höchsten ID des Ziels (M1) und frei, bestehende unverändert seit dem Pull. */
     private function ids(): void
     {
         $corridor   = $this->package->head()['corridor'];
@@ -387,7 +399,7 @@ final class ContentCheck
             $entry = ContentException::key($table, $key);
             if ($row['op'] === 'insert') {
                 $counter = isset(ContentState::PK[$table]);
-                if ($counter && ((int) $key < $corridor[$table][0] || (int) $key > $corridor[$table][1])) {
+                if ($counter && ((int) $key < $corridor[$table][0] || (int) $key > $corridor[$table][1] || (int) $key > $this->ceiling($table))) {
                     $outside[] = $entry;
                 } elseif ($raw !== null) {
                     if ($counter) {
@@ -408,7 +420,7 @@ final class ContentCheck
             }
         }
         if ($outside !== []) {
-            throw new ContentException(ContentException::CORRIDOR, 'Neue Objekte liegen ausserhalb des ID-Korridors.', $outside);
+            throw new ContentException(ContentException::CORRIDOR, 'Neue Objekte liegen ausserhalb des ID-Korridors oder mehr als ' . self::ID_HEADROOM . ' über der höchsten ID des Ziels.', $outside);
         }
         if ($taken !== []) {
             throw new ContentException(ContentException::ID_TAKEN, 'Auf dem Ziel sind IDs neuer Objekte schon belegt – erneut ziehen.', $taken);
@@ -419,6 +431,18 @@ final class ContentCheck
         if ($conflict !== []) {
             throw new ContentException(ContentException::CONFLICT, 'Auf dem Ziel seit dem Pull geändert: ' . count($conflict) . ' Zeile(n) – erneut ziehen.', $conflict);
         }
+    }
+
+    /**
+     * Höchste ID eines neuen Objekts auf diesem Ziel: ID_HEADROOM über dem, was die Tabelle schon
+     * vergeben hat (auf Staging die der Kopie), und nie über MAX_ID.
+     */
+    private function ceiling(string $table): int
+    {
+        if (!isset($this->ceilings[$table])) {
+            $this->ceilings[$table] = min(self::MAX_ID, $this->target->store->idMax($table) + self::ID_HEADROOM);
+        }
+        return $this->ceilings[$table];
     }
 
     /**

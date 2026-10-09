@@ -23,6 +23,15 @@ interface ContentStore
     public function engines(array $tables): array;
 
     /**
+     * Höchste ID, die eine Zähler-Tabelle (posts, terms, term_taxonomy) des Ziels schon vergeben
+     * hat: max(MAX(id), AUTO_INCREMENT − 1) – wie id_max im Manifest-Kopf.
+     *
+     * @throws ContentException
+     * @throws \InvalidArgumentException wenn die Tabelle keinen Zähler hat
+     */
+    public function idMax(string $table): int;
+
+    /**
      * @param list<string> $keys
      * @param bool         $lock SELECT … FOR UPDATE – nur innerhalb von transaction()
      * @return array<string, array<string, mixed>|null> Schlüssel → Rohzustand, null wenn es ihn nicht gibt

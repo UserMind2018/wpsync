@@ -622,6 +622,17 @@ Kopie. Die Werte eines Meta-Paars schreibt der Agent in der Reihenfolge des Pake
 zählen sie als sortierte Menge, eine reine Umsortierung ist deshalb weder Änderung noch Konflikt.
 Optionen werden nie gelöscht. `home` ist `live.home` aus `map.json`.
 
+**Neue IDs:** Der Korridor im Kopf kommt aus dem Paket und begrenzt allein nichts. Der Agent
+prüft deshalb jede neue ID in `posts`, `terms` und `term_taxonomy` zusätzlich gegen das Ziel: sie
+darf höchstens `limits.id_headroom` (1.000.000) über der höchsten ID liegen, die die Tabelle dort
+schon vergeben hat – `max(MAX(id), AUTO_INCREMENT − 1)`, dieselbe Rechnung wie `id_max` im
+Manifest-Kopf; auf der Staging-Kopie zählen deren Tabellen – und nie über 2^53 − 1. Sonst
+`id_outside_corridor` mit `error.keys`. Der Grund: ein Insert mit hoher ID verschiebt den
+`AUTO_INCREMENT` der Tabelle dauerhaft; **auch eine Rücknahme setzt den Zähler nicht zurück**
+(InnoDB senkt ihn nicht, wenn die Zeile wieder verschwindet). Ein erster Push in eine Tabelle
+mit sehr niedrigem Zählerstand kann deshalb nur so viele neue Objekte tragen, wie die Regel
+zulässt; nach dem Push liegt die höchste ID im Korridor und der Spielraum ist wieder voll.
+
 **Papierkorb und Datum:** WordPress gibt einem nie veröffentlichten Entwurf (`post_date_gmt` =
 `0000-00-00 00:00:00`) beim Weg in den Papierkorb das Datum des Verschiebens. Weichen
 `post_date` oder `post_date_gmt` des lokal verschobenen Beitrags von der Baseline ab, trägt die
@@ -660,7 +671,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `local_origin_in_package` | im Wert steckt noch der Host der Arbeitskopie (`local_host`), auch URL-kodiert |
 | `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
 | `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |
-| `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors bzw. seine ID ist auf dem Ziel belegt |
+| `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors des Pakets, mehr als `limits.id_headroom` (1.000.000) über der höchsten ID, die das Ziel in dieser Tabelle schon vergeben hat, oder über 2^53 − 1 – bzw. seine ID ist auf dem Ziel belegt |
 | `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
 | `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
 | `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
