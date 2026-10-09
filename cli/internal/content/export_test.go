@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/usermind/wpsync/internal/agentapi"
 )
 
 type fakeRunner struct {
@@ -109,5 +111,39 @@ func TestExportKeepsTheRating(t *testing.T) {
 	var out strings.Builder
 	if rows, err := Export(r, "http://x.test", nil, &out); err != nil || rows != 1 || out.String() != line+"\n" {
 		t.Fatalf("rows=%d err=%v out=%q", rows, err, out.String())
+	}
+}
+
+// The local URL is an argument of `wp eval-file`: what is no plain http(s) URL never reaches a runner.
+func TestExportRefusesALocalURLThatIsNoURL(t *testing.T) {
+	for _, local := range []string{"--exec=system('id');", "", "https://kunde.ddev.site --exec=x", "-x", "kunde.ddev.site"} {
+		r := &fakeRunner{out: `{"end":true,"rows":0}` + "\n"}
+		rows, err := Export(r, local, nil, io.Discard)
+		if !errors.Is(err, ErrMap) || rows != 0 {
+			t.Errorf("%q: rows=%d err=%v", local, rows, err)
+		}
+		if r.args != nil {
+			t.Errorf("%q: the runner was called with %v", local, r.args)
+		}
+	}
+}
+
+func TestExportRefusesAnOverlongLine(t *testing.T) {
+	defer func(old int) { maxRecordLine = old }(maxRecordLine)
+	maxRecordLine = 128
+	fits := `{"t":"postmeta","k":"1","h":"aa","row":{"values":["` + strings.Repeat("A", 40) + `"]}}` + "\n"
+	r := &fakeRunner{out: fits + `{"end":true,"rows":1}` + "\n"}
+	if rows, err := Export(r, "http://x.test", nil, io.Discard); err != nil || rows != 1 {
+		t.Fatalf("within the limit: rows=%d err=%v", rows, err)
+	}
+	long := `{"t":"postmeta","k":"2","h":"bb","row":{"values":["` + strings.Repeat("A", 128) + `"]}}` + "\n"
+	r = &fakeRunner{out: fits + long + `{"end":true,"rows":2}` + "\n"}
+	var out strings.Builder
+	rows, err := Export(r, "http://x.test", nil, &out)
+	if !errors.Is(err, ErrExport) || !errors.Is(err, agentapi.ErrLineTooLong) {
+		t.Fatalf("overlong line: rows=%d err=%v", rows, err)
+	}
+	if out.String() != fits {
+		t.Fatalf("output: %q", out.String())
 	}
 }

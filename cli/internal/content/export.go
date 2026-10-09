@@ -22,11 +22,15 @@ var (
 
 // Export runs the export script in the local site and writes one line per record to w:
 // {t, k, h[, row], p[, why]} in normalized form (Spec Content-Push §4.4). tables narrows it to content tables
-// without prefix; nil means all seven. It returns the number of records.
+// without prefix; nil means all seven. It returns the number of records. localURL becomes an
+// argument of WP-CLI: what is no plain http(s) URL is ErrMap, and nothing runs.
 func Export(r localenv.Runner, localURL string, tables []string, w io.Writer) (int, error) {
 	s, ok := r.(localenv.Streamer)
 	if !ok {
 		return 0, ErrNoStream
+	}
+	if err := checkLocalURL(localURL); err != nil {
+		return 0, err
 	}
 	which := "all"
 	if len(tables) > 0 {
@@ -62,7 +66,10 @@ func copyRecords(r io.Reader, w io.Writer) (rows, end int, noise string, err err
 	var other []string
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
-		line, readErr := br.ReadBytes('\n')
+		line, readErr := agentapi.ReadLine(br, maxRecordLine)
+		if errors.Is(readErr, agentapi.ErrLineTooLong) {
+			return rows, end, "", fmt.Errorf("%w: %w (mehr als %d Bytes)", ErrExport, readErr, maxRecordLine)
+		}
 		line = bytes.TrimRight(line, "\r\n")
 		switch {
 		case bytes.HasPrefix(line, []byte(`{"t":`)):

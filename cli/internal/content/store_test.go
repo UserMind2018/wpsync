@@ -453,3 +453,44 @@ func TestInvalidateNeverFollowsASymlink(t *testing.T) {
 		t.Fatalf("removed the target of the symlink: %v", err)
 	}
 }
+
+// map.json lies in the site folder; its local URL becomes an argument of `wp eval-file`. Anything
+// but a plain http(s) URL is refused before a runner sees it, and named without control characters.
+func TestReadMapRefusesALocalURLThatIsNoURL(t *testing.T) {
+	for _, local := range []string{"--exec=system('id');", "-https://kunde.ddev.site", "", "kunde.ddev.site", "ftp://kunde.ddev.site",
+		"https://kunde.ddev.site --exec=x", " https://kunde.ddev.site", "https://kunde.ddev.site\n", "https://\x1b[31mkunde.ddev.site", "https://"} {
+		dir := t.TempDir()
+		data, _ := json.Marshal(Map{CanonVersion: 1, Local: local})
+		write(t, Paths(dir).Map, string(data))
+		_, _, err := ReadMap(dir)
+		if !errors.Is(err, ErrMap) {
+			t.Errorf("%q: err = %v", local, err)
+			continue
+		}
+		if strings.ContainsAny(err.Error(), "\x1b\n") || !strings.Contains(err.Error(), "map.json") {
+			t.Errorf("%q: message %q", local, err.Error())
+		}
+	}
+}
+
+func TestLinesRefusesAnOverlongLine(t *testing.T) {
+	defer func(old int) { maxRecordLine = old }(maxRecordLine)
+	maxRecordLine = 64
+	dir := t.TempDir()
+	f := Paths(dir)
+	write(t, f.Manifest, `{"head":{}}`+"\n"+`{"t":"posts","k":"1","h":"aa"}`+"\n")
+	write(t, f.Baseline, `{"t":"posts","k":"1","h":"aa","row":{}}`+"\n")
+	if _, _, err := Compare(dir); err != nil {
+		t.Fatalf("lines within the limit: %v", err)
+	}
+	long := `{"t":"posts","k":"1","h":"aa","row":{"post_content":"` + strings.Repeat("A", 64) + `"}}` + "\n"
+	write(t, f.Baseline, long)
+	if _, _, err := Compare(dir); !errors.Is(err, agentapi.ErrLineTooLong) || !strings.Contains(err.Error(), "baseline.jsonl") {
+		t.Fatalf("overlong baseline line: %v", err)
+	}
+	write(t, f.Baseline, `{"t":"posts","k":"1","h":"aa","row":{}}`+"\n")
+	write(t, f.Manifest, `{"head":{"x":"`+strings.Repeat("A", 64)+`"}}`+"\n")
+	if _, _, err := Compare(dir); !errors.Is(err, agentapi.ErrLineTooLong) || !strings.Contains(err.Error(), "manifest.jsonl") {
+		t.Fatalf("overlong manifest line: %v", err)
+	}
+}

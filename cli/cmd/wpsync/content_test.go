@@ -272,6 +272,34 @@ func TestContentExportRefusesAnUnusableEnv(t *testing.T) {
 	}
 }
 
+// map.json lies in the site folder like env.json: a local URL that is no plain http(s) URL must
+// not become an argument of `wp eval-file`, and nothing runs.
+func TestContentExportRefusesAnUnusableMap(t *testing.T) {
+	env(t)
+	offlineSite(t)
+	docroot, dockerLog := containerSite(t)
+	t.Setenv("FAKE_EXPORT", exportOutput)
+	siteDir := filepath.Dir(docroot)
+	for _, local := range []string{"--exec=system('id');", "https://map.dev.example --exec=x", "\x1b[31mhttps://map.dev.example", ""} {
+		contentState(t, siteDir, local)
+		r := run(t, context.Background(), secrets, exportArgs(docroot)...)
+		if r.code != cliout.ExitLocalEnv || r.stdout != "" {
+			t.Errorf("%q: exit %d, stdout %q", local, r.code, r.stdout)
+		}
+		for _, want := range []string{"map.json", "wpsync pull vorlage --content --full"} {
+			if !strings.Contains(r.stderr, want) {
+				t.Errorf("%q: stderr lacks %q:\n%s", local, want, r.stderr)
+			}
+		}
+		if strings.Contains(r.stderr, "\x1b") {
+			t.Errorf("%q: stderr carries the control character:\n%q", local, r.stderr)
+		}
+	}
+	if calls, _ := os.ReadFile(dockerLog); len(calls) != 0 {
+		t.Errorf("docker ran:\n%s", calls)
+	}
+}
+
 // fakeDDEV logs argv per call; `ddev wp eval-file -` prints $FAKE_EXPORT on stdout and a line on
 // stderr, `ddev describe` would name another URL than map.json.
 const fakeDDEV = `#!/bin/sh

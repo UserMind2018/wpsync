@@ -163,7 +163,26 @@ func writeMap(root *os.Root, m Map) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// ReadMap returns map.json and its ID.
+// ErrMap: the local URL of map.json is not a plain http(s) URL. It becomes an argument of
+// `wp eval-file`, and the file lies in the site folder like env.json.
+var ErrMap = errors.New("unzulässige lokale URL")
+
+// checkLocalURL applies the rule of a site URL (agentapi.ValidSiteURL: http or https, a host, no
+// whitespace, no control character) – such a value cannot start with a dash either.
+func checkLocalURL(local string) error {
+	if !agentapi.ValidSiteURL(local) {
+		return fmt.Errorf("%w: %s", ErrMap, agentapi.Printable(local))
+	}
+	return nil
+}
+
+// maxRecordLine bounds one line of manifest.jsonl, baseline.jsonl and of the export. Generous: a
+// row carries its values in base64, and a single value may be many megabytes. A variable for the
+// tests.
+var maxRecordLine = 256 << 20
+
+// ReadMap returns map.json and its ID. The local URL is checked before anyone hands it to
+// WP-CLI: ErrMap.
 func ReadMap(siteDir string) (Map, string, error) {
 	var m Map
 	root, err := open(siteDir, false)
@@ -177,6 +196,9 @@ func ReadMap(siteDir string) (Map, string, error) {
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
 		return m, "", fmt.Errorf("map.json: %w", err)
+	}
+	if err := checkLocalURL(m.Local); err != nil {
+		return Map{}, "", fmt.Errorf("map.json: %w", err)
 	}
 	sum := sha256.Sum256(data)
 	return m, hex.EncodeToString(sum[:]), nil
@@ -304,7 +326,10 @@ func lines(root *os.Root, name string, fn func(recordLine) error) error {
 	defer f.Close()
 	br := bufio.NewReaderSize(f, 1<<20)
 	for {
-		data, readErr := br.ReadBytes('\n')
+		data, readErr := agentapi.ReadLine(br, maxRecordLine)
+		if errors.Is(readErr, agentapi.ErrLineTooLong) {
+			return fmt.Errorf("%s: %w (mehr als %d Bytes)", name, readErr, maxRecordLine)
+		}
 		if bytes.HasPrefix(data, []byte(`{"t":`)) {
 			var rec recordLine
 			if err := json.Unmarshal(data, &rec); err != nil {

@@ -552,7 +552,9 @@ eingebettet und läuft per `wp eval-file -` in der lokalen Umgebung (DDEV oder C
 ohne Plugins und Themes zu laden.
 
 - **Offline:** Der Export sendet keinen Request an die Site, fasst auf dem Mac die Keychain nicht
-  an und ändert weder die Site noch `.wpsync/content/`. Die lokale URL nimmt er aus `map.json`.
+  an und ändert weder die Site noch `.wpsync/content/`. Die lokale URL nimmt er aus `map.json` –
+  geprüft, bevor sie WP-CLI erreicht: Ist sie keine http(s)-URL ohne Leerraum und Steuerzeichen,
+  endet der Export mit Exit 20; neu bauen mit `wpsync pull <site> --content --full`.
 - **stdout gehört den Daten:** Jede Meldung geht auf stderr, auch ohne `--json`. Mit `--json`
   folgt als letzte Zeile das übliche Ergebnisobjekt (`command: "content export"`,
   `data: {rows, canon_version}`); ein Aufrufer liest Zeilen, die mit `{"t":` beginnen, als Daten.
@@ -567,8 +569,8 @@ ohne Plugins und Themes zu laden.
   bauen mit `wpsync pull <site> --content --full`.
 - **Site-Sperre:** Der Export hält die Sperre der Site; läuft gerade ein Pull, Push oder
   Rollback, endet er mit Exit 20 (`error.reason: "site_locked"`).
-- Bricht das Skript ab oder fehlt seine Schlusszeile, ist die Ausgabe unvollständig: Exit 1,
-  `error.reason: "content_export_failed"`.
+- Bricht das Skript ab, fehlt seine Schlusszeile oder ist eine Zeile länger als 256 MiB, ist die
+  Ausgabe unvollständig: Exit 1, `error.reason: "content_export_failed"`.
 
 **Doppelt escapte URLs.** Unabhängig von `--content` ersetzt **jeder** Pull ab dieser Version
 auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON) – bisher blieben sie auf die

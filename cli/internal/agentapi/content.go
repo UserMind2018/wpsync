@@ -39,6 +39,13 @@ type ContentHead struct {
 // ErrManifest: the agent's manifest is incomplete or not in the expected form.
 var ErrManifest = errors.New("das Inhalts-Manifest des Agents ist unvollständig")
 
+// Longest line of a manifest page. The head carries the lists of the agent and may be large; every
+// other line is a table, a key and a fingerprint, or a cursor. Variables for the tests.
+var (
+	maxManifestHead = 1 << 20
+	maxManifestLine = 64 << 10
+)
+
 // ContentManifest fetches the row manifest of the content tables within scope, page by page, and
 // writes it to w as delivered: the head line, then one line {t, k, h} per row. It returns the head
 // and the number of rows.
@@ -77,7 +84,14 @@ func readManifestPage(r io.Reader, w io.Writer, first bool) (head *ContentHead, 
 	br := bufio.NewReaderSize(r, 1<<16)
 	ended := false
 	for line := 0; ; line++ {
-		data, readErr := br.ReadBytes('\n')
+		limit := maxManifestLine
+		if first && line == 0 {
+			limit = maxManifestHead
+		}
+		data, readErr := ReadLine(br, limit)
+		if errors.Is(readErr, ErrLineTooLong) {
+			return nil, rows, nil, fmt.Errorf("%w: %w (mehr als %d Bytes)", ErrManifest, ErrLineTooLong, limit)
+		}
 		data = bytes.TrimRight(data, "\r\n")
 		switch {
 		case len(data) == 0:

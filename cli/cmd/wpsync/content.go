@@ -70,6 +70,11 @@ func (a *app) cmdContent(args []string) error {
 	// The local URL is the one the pull replaced the live origin with – from map.json, not from
 	// the driver: fingerprints must be normalized with exactly that value.
 	m, _, err := content.ReadMap(dir)
+	if errors.Is(err, content.ErrMap) {
+		// Like an unusable env.json: the file is there, its value must not reach WP-CLI.
+		return cliout.Hint(localenv.Wrap("map.json", err), fmt.Sprintf("%s ist nicht verwendbar (%v) – neu bauen mit: wpsync pull %s --content --full",
+			content.Paths(dir).Map, err, site.Name))
+	}
 	if err != nil {
 		return stale
 	}

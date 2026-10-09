@@ -46,6 +46,13 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   der ganze Wert unverändert und zählt in `skipped_values` (bisher wurde er als Text ersetzt)
 
 ### Sicherheit
+- CLI: Die lokale URL aus `map.json` wird geprüft, bevor sie als Argument an `wp eval-file`
+  geht (http(s)-URL ohne Leerraum und Steuerzeichen, sonst Exit 20), und in Meldungen nur
+  bereinigt genannt
+- CLI: Zeilen des Manifests (Kopf 1 MiB, sonst 64 KiB), von `manifest.jsonl`/`baseline.jsonl`
+  und des Exports (256 MiB) sind in der Länge begrenzt – eine Site oder ein Skript kann die CLI
+  nicht mehr mit einer endlosen Zeile den Speicher füllen lassen (`manifest_incomplete` bzw.
+  `content_export_failed`)
 - Agent: `/content/manifest` liefert für Zeilen, die der Pull pseudonymisiert (Bestellungen,
   pseudonymisierte Meta-Schlüssel, `admin_email`/`new_admin_email`), keinen Fingerabdruck des
   echten Werts – ein ungesalzener Abdruck von IP, Postleitzahl, Telefon oder E-Mail liesse sich
