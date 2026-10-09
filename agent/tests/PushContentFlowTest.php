@@ -322,4 +322,160 @@ final class PushContentFlowTest extends TestCase
         $this->assertTrue($with->data['content']['ok']);
         $this->assertSame(['2026/10/bild.png'], $with->data['units'][0]['need']);
     }
+
+    /**
+     * Begin, Upload der Einheiten, Commit; liefert ID und Antwort des Commits.
+     *
+     * @param array<string, string> $uploads
+     * @return array{0: string, 1: \WP_REST_Response|\WP_Error}
+     */
+    private function push(?string $sha, ?string $code = null, array $uploads = [], string $target = 'live'): array
+    {
+        $begin = $this->begin($sha, ['target' => $target], $code, $uploads);
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
+        $id = (string) $begin->data['push_id'];
+        $u  = 0;
+        if ($code !== null) {
+            $this->assertInstanceOf(\WP_REST_Response::class, Push::upload(['push_id' => $id, 'unit' => $u++, 'files' => [['path' => 'main.php', 'data' => base64_encode($code), 'offset' => 0]]], self::KEY));
+        }
+        $chunks = [];
+        foreach ($uploads === [] ? [] : $begin->data['units'][$u]['need'] as $rel) {
+            $chunks[] = ['path' => $rel, 'data' => base64_encode($uploads[$rel]), 'offset' => 0];
+        }
+        if ($chunks !== []) {
+            $up = Push::upload(['push_id' => $id, 'unit' => $u, 'files' => $chunks], self::KEY);
+            $this->assertInstanceOf(\WP_REST_Response::class, $up, $up instanceof \WP_Error ? $up->code : '');
+        }
+        return [$id, Push::commit(['push_id' => $id], self::KEY)];
+    }
+
+    /** @return array<string, mixed> rescue.json des Pushs */
+    private function rescue(string $content, string $id): array
+    {
+        return (array) json_decode((string) file_get_contents($this->work($content) . '/' . $id . '/rescue.json'), true);
+    }
+
+    /** §7.3, AC-150: Uploads → Code → DB in einem Commit; die Antwort nennt die Abdrücke danach und die Nacharbeiten. */
+    public function testCommitAppliesTheContentLast(): void
+    {
+        $png   = (string) base64_decode(self::PNG);
+        $seen  = null;
+        $this->liveDb->beforeLock = function () use (&$seen): void {
+            $seen = [file_get_contents($this->live . '/plugins/x/main.php'), file_exists($this->live . '/uploads/2026/10/neu.png')];
+        };
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => $png]);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->assertSame(['new', true], $seen, 'als die Transaktion begann, lagen Code und Uploads schon');
+
+        $this->assertSame('Neu', $this->liveDb->data['posts']['219']['post_title']);
+        $this->assertSame('Link: https://kunde.de/neu', $this->liveDb->data['posts']['219']['post_content']);
+        $this->assertSame('trash', $this->liveDb->data['posts']['220']['post_status']);
+        $this->assertSame('7', $this->liveDb->data['posts']['1000001']['post_author'], 'Autor ist der Öffner des Fensters');
+        $this->assertSame('Kunde GmbH', $this->liveDb->data['options']['blogname']['option_value']);
+
+        $content = $commit->data['content'];
+        $this->assertSame(5, $content['rows']);
+        $this->assertCount(7, $content['after'], '5 Zeilen und die beiden Papierkorb-Meta');
+        $this->assertSame(['t' => 'posts', 'k' => '219', 'h' => ContentFixtures::hash('posts', '219', $this->liveDb->data['posts']['219'])], $content['after'][0]);
+        $this->assertSame(['object_cache', 'rewrite_rules', 'revisions'], array_column($content['post_actions'], 'step'));
+        $this->assertContains('clean_post_cache [219]', $GLOBALS['wpsync_post_actions']);
+        $this->assertContains('wp_save_post_revision [219]', $GLOBALS['wpsync_post_actions']);
+        $this->assertIsFloat($content['seconds']);
+        $this->assertSame(['plugins/x', 'uploads'], array_keys((array) $commit->data['stamps']));
+
+        $push = Store::getPush($id);
+        $this->assertSame('committed', $push['status']);
+        $this->assertSame(['plugins/x', 'uploads', 'content'], array_column($push['units'], 'path'));
+        $rescue = $this->rescue($this->live, $id);
+        $this->assertSame(['state' => 'applied', 'sha256' => hash_file('sha256', $this->work($this->live) . '/' . $id . '/content/package.jsonl')], $rescue['content']);
+        $this->assertFileExists($this->work($this->live) . '/' . $id . '/content/before.json');
+        $this->assertFileExists($this->work($this->live) . '/' . $id . '/content/after.json');
+    }
+
+    /** Ein Satz nur aus Inhalten (--no-code): kein Tausch, keine Stempel, die Datenbank hat den Stand. */
+    public function testCommitOfContentOnly(): void
+    {
+        list($id, $commit) = $this->push($this->stage($this->rows()));
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->assertSame([], (array) $commit->data['stamps']);
+        $this->assertSame('Neu', $this->liveDb->data['posts']['219']['post_title']);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame([], $this->rescue($this->live, $id)['pairs']);
+        $this->assertSame('committed', Store::getPush($id)['status']);
+    }
+
+    /** AC-150: scheitert das Anwenden, bleibt keine Zeile, und Code und Uploads sind zurückgetauscht. */
+    public function testAFailingContentTakesCodeAndUploadsBack(): void
+    {
+        $old                     = $this->liveDb->data;
+        $this->liveDb->failWrite = 3;
+        list($id, $commit)       = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        $error                   = $this->assertRefused('wpsync_content_content_failed', 500, $commit);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->live . '/uploads/2026/10/neu.png');
+        $push = Store::getPush($id);
+        $this->assertSame(['failed', true], [$push['status'], $push['pruned']]);
+        $this->assertNull(Store::getState('push_lock'));
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id);
+        $this->assertSame([], $GLOBALS['wpsync_post_actions'], 'ohne Änderung keine Nacharbeiten');
+        $this->assertArrayNotHasKey('keys', $error->data);
+    }
+
+    /** AC-151: ändert sich eine Zeile zwischen Begin und Commit, fällt das unter Sperre auf – nichts bleibt getauscht. */
+    public function testConflictUnderLockAtCommit(): void
+    {
+        $sha   = $this->stage($this->rows());
+        $begin = $this->begin($sha, [], 'new');
+        $id    = (string) $begin->data['push_id'];
+        Push::upload(['push_id' => $id, 'unit' => 0, 'files' => [['path' => 'main.php', 'data' => base64_encode('new'), 'offset' => 0]]], self::KEY);
+        $this->liveDb->data['posts']['219']['post_title'] = 'zwischen Begin und Commit geändert';
+        $changed = $this->liveDb->data;
+
+        $error = $this->assertRefused('wpsync_content_conflict', 409, Push::commit(['push_id' => $id], self::KEY));
+        $this->assertSame([['table' => 'posts', 'key' => '219']], $error->data['keys']);
+        $this->assertSame($changed, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame('failed', Store::getPush($id)['status']);
+    }
+
+    /** Der Commit wendet nur das Paket an, das der Begin geprüft hat. */
+    public function testCommitRefusesAChangedPackage(): void
+    {
+        $sha   = $this->stage($this->rows());
+        $begin = $this->begin($sha, [], 'new');
+        $id    = (string) $begin->data['push_id'];
+        Push::upload(['push_id' => $id, 'unit' => 0, 'files' => [['path' => 'main.php', 'data' => base64_encode('new'), 'offset' => 0]]], self::KEY);
+        $evil = ContentFixtures::text([ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => 'untergeschoben'])]);
+        file_put_contents($this->work($this->live) . '/' . $id . '/content/package.jsonl', $evil);
+
+        $this->assertRefused('wpsync_content_package_missing', 409, Push::commit(['push_id' => $id], self::KEY));
+        $this->assertSame('Kunde', $this->liveDb->data['options']['blogname']['option_value']);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'), 'nichts getauscht');
+        $this->assertSame('failed', Store::getPush($id)['status']);
+    }
+
+    /** §7.8: der Push nach Staging schreibt nur in die Tabellen der Kopie – mit den Adressen der Kopie. */
+    public function testCommitIntoTheStagingCopy(): void
+    {
+        $live              = $this->liveDb->data;
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', [], 'staging');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $path = '/' . ContentFixtures::STAGING_DIR;
+        $this->assertSame('Link: https://kunde.de' . $path . '/neu', $this->stagingDb->data['posts']['219']['post_content']);
+        $this->assertSame(['[{"url":"https:\/\/kunde.de\\' . $path . '\/neu"}]'], $this->stagingDb->data['postmeta']["219\0_elementor_data"]['values']);
+        $this->assertSame($live, $this->liveDb->data, 'Live bleibt unberührt');
+        $this->assertSame([], $this->liveDb->log);
+        $this->assertSame('new', file_get_contents($this->staging . '/plugins/x/main.php'));
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileExists($this->work($this->staging) . '/' . $id . '/content/before.json');
+        $this->assertSame([], $GLOBALS['wpsync_post_actions'], 'keine WordPress-Funktion von Live für die Kopie');
+        $this->assertSame(['rewrite_rules'], array_column($commit->data['content']['post_actions'], 'step'));
+        $this->assertSame(1, Staging::$used);
+        // Dieselben Abdrücke wie später auf Live (AC-147)
+        $this->assertSame(
+            \WpSync\ContentState::desired('posts', '219', ContentFixtures::postRow('219', ['post_title' => 'Neu', 'post_content' => 'Link: ' . ContentOrigin::PLAIN . '/neu'])),
+            $commit->data['content']['after'][0]['h']
+        );
+    }
 }

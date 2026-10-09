@@ -516,9 +516,17 @@ final class Push
                 return self::uploadFailure($e);
             }
         }
+        // Inhalte kommen zuletzt (Uploads → Code → DB, §7.3). Das geprüfte Paket muss noch genau das sein.
+        $contentSha = is_array($plan['content'] ?? null) ? (string) ($plan['content']['sha256'] ?? '') : null;
+        $package    = $contentSha === null ? null : PushContent::taken($base, $contentSha);
+        if ($contentSha !== null && $package === null) {
+            self::discard($pushId, self::FAILED);
+            return (new ContentException(ContentException::MISSING, 'Das Paket dieses Pushs fehlt oder wurde verändert – nichts getauscht.'))->toError();
+        }
         wp_mkdir_p($base . '/old');
         // Vor dem ersten rename: stirbt PHP mitten im Anlegen oder Tausch, kann rescue.php zurücknehmen.
-        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads);
+        // Der DB-Anteil steht hier schon als „pending“ – lange vor START TRANSACTION.
+        PushRescue::write($work, $pushId, (string) $plan['key_hash'], $pairs, PushRescue::COMMITTED, $uploads, $contentSha);
         if ($upIndex !== null) {
             $placed = [];
             try {
@@ -568,13 +576,51 @@ final class Push
                 'uploaded'    => count($unit['need']),
             ];
         }
+        if ($contentSha !== null) {
+            $rows      = (int) ($plan['content']['rows'] ?? 0);
+            $summary[] = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows];
+        }
+        // Ab hier gilt der Push als getauscht – auch wenn PHP beim Anwenden der Inhalte stirbt: dann
+        // nimmt die Datenbank die Transaktion zurück, und wpsync rollback holt den Code nach.
         Store::updatePush($pushId, ['status' => PushRescue::COMMITTED, 'committed' => time(), 'units' => (string) wp_json_encode($summary)]);
+        $answer = ['next' => null, 'stamps' => (object) $stamps];
+        if ($package !== null) {
+            try {
+                $push    = Store::getPush($pushId);
+                $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by']);
+            } catch (ContentException $e) {
+                return self::contentFailed($e, $content, $work, $pushId);
+            }
+            PushRescue::setContent($work, $pushId, PushRescue::CONTENT_APPLIED);
+            $answer['content'] = [
+                'rows'         => $applied['rows'],
+                'after'        => $applied['after'],
+                'post_actions' => PushContent::postActions($target, $content, $applied['changes']), // §7.7: nie ein Fehler des Pushs
+                'seconds'      => $applied['seconds'],
+            ];
+        }
         if ($target === 'staging') {
             Staging::markUsed(); // ein Push zählt als Nutzung der Kopie (Spec 2b 5.9)
         }
         self::touchLock($pushId, time());
         self::touchStub(time());
-        return new \WP_REST_Response(['next' => null, 'stamps' => (object) $stamps]);
+        return new \WP_REST_Response($answer);
+    }
+
+    /**
+     * Die Inhalte liessen sich nicht anwenden – die Datenbank hat nichts davon behalten. Der Satz
+     * bleibt ganz (§7.3 Nr. 6): Code und Uploads werden zurückgetauscht, der Push ist gescheitert.
+     */
+    private static function contentFailed(ContentException $e, string $content, string $work, string $pushId): \WP_Error
+    {
+        PushRescue::setContent($work, $pushId, PushRescue::CONTENT_DONE);
+        list($status) = PushRescue::rollback($content, $work, $pushId);
+        if ($status !== 200) {
+            // Der Push bleibt getauscht und unbestätigt: die CLI nennt den Ausweg (Exit 42).
+            return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen, und der Code liess sich nicht zurücktauschen – wpsync rollback ' . $pushId . '.', 409);
+        }
+        self::discard($pushId, self::FAILED);
+        return $e->toError();
     }
 
     /**
