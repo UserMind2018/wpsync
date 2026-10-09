@@ -1,0 +1,92 @@
+<?php
+namespace WpSync;
+
+defined('ABSPATH') || exit;
+
+/**
+ * Lesen und Schreiben der sieben Inhaltstabellen eines Ziels (Spec Content-Push §7.3) mit einem
+ * einheitlichen Rohzustand je Schlüssel – Schlüssel wie in Manifest und Paket:
+ *   posts, terms, term_taxonomy, options   die ganze Zeile, Spalte → Wert, wie die Datenbank sie liefert
+ *   postmeta, termmeta                     ['values' => [alle meta_value des Paars, nach meta_id]]
+ *   term_relationships                     ['values' => ['<term_taxonomy_id>:<term_order>', …]] dieser Taxonomie
+ * null heisst: den Schlüssel gibt es nicht. Das Vorher-Abbild eines Pushs ist genau dieser
+ * Rohzustand; die Rücknahme schreibt ihn zurück. ContentSql spricht mit $wpdb, die Unit-Tests
+ * mit einer Attrappe im Speicher.
+ */
+interface ContentStore
+{
+    /**
+     * @param list<string> $tables Inhaltstabellen ohne Präfix
+     * @return array<string, string> Tabelle → Engine ('' wenn unbekannt)
+     * @throws ContentException
+     */
+    public function engines(array $tables): array;
+
+    /**
+     * @param list<string> $keys
+     * @param bool         $lock SELECT … FOR UPDATE – nur innerhalb von transaction()
+     * @return array<string, array<string, mixed>|null> Schlüssel → Rohzustand, null wenn es ihn nicht gibt
+     * @throws ContentException
+     */
+    public function read(string $table, array $keys, bool $lock): array;
+
+    /**
+     * Setzt den Rohzustand eines Schlüssels; null löscht ihn. Eine Zeile wird angelegt oder mit
+     * allen genannten Spalten überschrieben, ein Paar bzw. die Zuordnungen einer Taxonomie werden
+     * als ganze Menge ersetzt.
+     *
+     * @param array<string, mixed>|null $state
+     * @throws ContentException
+     */
+    public function write(string $table, string $key, ?array $state): void;
+
+    /**
+     * @param list<string> $termIds
+     * @return array<string, list<string>> term_id → Taxonomien des Terms
+     * @throws ContentException
+     */
+    public function taxonomies(array $termIds): array;
+
+    /**
+     * Schlüssel, zu denen es auf dem Ziel einen Zwilling gibt: für die Datenbank gleich (Kollation,
+     * etwa Gross/klein), in den Bytes verschieden. Über so einen Alias träfe ein Paket eine Zeile,
+     * die die bytegenauen Listen nie gesehen haben. Nur postmeta, termmeta und options kennen das.
+     *
+     * @param list<string> $keys
+     * @return list<string> die betroffenen Schlüssel
+     * @throws ContentException
+     */
+    public function aliases(string $table, array $keys): array;
+
+    /**
+     * Was an einem eingefügten Objekt hängt, wenn es wieder verschwindet: posts → alle Meta und
+     * Zuordnungen des Beitrags, terms → alle Meta des Terms, term_taxonomy → alle Zuordnungen.
+     *
+     * @throws ContentException
+     */
+    public function purge(string $table, string $key): void;
+
+    /**
+     * Setzt count der genannten term_taxonomy-Zeilen auf die Zahl ihrer Zuordnungen.
+     *
+     * @param list<string> $termTaxonomyIds
+     * @throws ContentException
+     */
+    public function recount(array $termTaxonomyIds): void;
+
+    /**
+     * Löscht jede postmeta-Zeile mit diesem Schlüssel (Cache-Meta von Elementor in der Kopie).
+     *
+     * @throws ContentException
+     */
+    public function dropMeta(string $metaKey): void;
+
+    /**
+     * Führt $do in einer Transaktion aus: COMMIT, wenn es zurückkehrt, ROLLBACK, wenn es wirft.
+     *
+     * @param callable(): mixed $do
+     * @return mixed was $do liefert
+     * @throws ContentException
+     */
+    public function transaction(callable $do);
+}
