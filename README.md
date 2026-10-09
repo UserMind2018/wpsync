@@ -384,8 +384,10 @@ Ausgabe nennt sie (`--json`: `warnings: ["upload_changed_since_push"]`).
 
 - Er aktiviert nichts: Ein neues Plugin liegt danach inaktiv auf der Site.
 - Er löscht nichts: Ein lokal entferntes Plugin bleibt auf der Site bestehen.
-- Er schreibt keine Datenbank. Unter `wp-content/uploads/` legt er nur neue Dateien aus
-  `--uploads` an – er ersetzt oder löscht dort nie eine fremde Datei.
+- In der Datenbank schreibt er nur mit `--content`, und dann nur die geprüften Zeilen des Pakets in
+  den sieben Inhaltstabellen ([Inhalte pushen](#inhalte-pushen)) – ohne `--content` keine Zeile.
+  Unter `wp-content/uploads/` legt er nur neue Dateien aus `--uploads` an – er ersetzt oder löscht
+  dort nie eine fremde Datei.
 - Er überträgt nie den Agent selbst, den lokalen Mail-Riegel (`00-local-mailguard.php`), den
   Staging-Riegel (`00-wpsync-staging.php`), Dateien in `mu-plugins`, die mit `wpsync` beginnen, `.git`, `*.log`, `.env*`, `.DS_Store`
   und Symlinks. Was davon auf der Site liegt, bleibt beim Tausch unverändert stehen.
@@ -682,7 +684,7 @@ sondern steht in einer eigenen Liste – getrennt von `content.conflicts` und ei
 
 Jede Zeile steht höchstens einmal in der Liste (`reference` vor `attachment_files`), in der
 Reihenfolge des Pakets; höchstens 200 Einträge, `unchecked_total` nennt alle – wie `error.keys`
-und `error.total`. `blocked_row` bleibt auch ohne Fenster, was sich allein aus der Zeile oder dem
+und `total` in der Antwort des Agents. `blocked_row` bleibt auch ohne Fenster, was sich allein aus der Zeile oder dem
 Paket ergibt (gesperrter Meta-Schlüssel, gesperrte Option, Typ eines im Paket eingefügten
 Objekts, Erweiterungen, Form des Schlüssels); `conflict` bleibt, wobei eine Zeile an einem
 gesperrten Objekt wie eine an einem gelöschten erscheint. Ungeprüftes allein lässt den Probelauf
@@ -698,8 +700,8 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `package_invalid` | Form, Prüfsumme, Zeilenende, doppelter Schlüssel, Platzhalter in unbekannter Form, Sprung in den Papierkorb ohne `op: trash`, `row` eines `trash` mit anderem als `post_date` und `post_date_gmt`, eine Zeile für `_wp_trash_meta_status`, `_wp_trash_meta_time` oder `_wp_desired_post_slug` an einem Beitrag mit `op: trash` |
 | `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
 | `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
-| `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB), oder die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen grösser als `limits.max_state_bytes` (64 MB; `error.state_bytes` nennt die Summe) – in mehreren Pushes übertragen |
-| `engine_unsupported` | eine der sieben Inhaltstabellen des Ziels ist nicht InnoDB (`error.tables`; geprüft werden immer alle, auch vor einer Rücknahme), oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
+| `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB), oder die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen grösser als `limits.max_state_bytes` (64 MB; die Antwort des Agents nennt die Summe in `state_bytes`) – in mehreren Pushes übertragen |
+| `engine_unsupported` | eine der sieben Inhaltstabellen des Ziels ist nicht InnoDB (`tables` in der Antwort des Agents; geprüft werden immer alle, auch vor einer Rücknahme), oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
 | `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
 | `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
 | `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt), beginnt wie eines (auch mit Text dahinter, den `unserialize()` hinnähme) oder sieht serialisiert aus und lässt sich nicht lesen |
@@ -1636,7 +1638,7 @@ nichts davon im Docroot:
     ├── baseline.json       Stand des letzten Pulls bzw. bestätigten Live-Pushs
     ├── pushes/<id>.json    Journal je Push (0600): Baseline vorher, Rescue-URL, Salt
     ├── staging-base.json   Stempel der Pushes nach Staging (versiegelt)
-    ├── lock                Site-Sperre für pull, push, rollback
+    ├── lock                Site-Sperre für pull, push, rollback, content export
     ├── content/            nur nach pull --content: Manifest, map.json, Baseline,
     │                       unfaithful.jsonl, env.json, summary.json
     ├── db/                 DB-Zwischenablage (Tabellen-Dumps des Pulls)
@@ -1670,7 +1672,9 @@ printf '%s\n%s\n' "$SECRET" "$DB_PASSWORD" | wpsync pull vorlage --json --yes --
 
 Ab CLI 0.5.0, Agent ≥ 0.4.0 (nach Staging ≥ 0.5.0). Es gelten Push-Fenster, Konfliktprüfung,
 Snapshot, Health-Check und `rescue.php` wie auf dem Mac; neu ist nur, wo die CLI ihre Dateien
-findet und woher das Secret kommt.
+findet und woher das Secret kommt. `--uploads` (Agent ≥ 0.6.0) prüft `scripts/e2e-container-push.sh`
+mit; `--content` und `--require-rescue-db` (Agent ≥ 0.7.0) laufen im Container-Modus durch
+denselben Code, sind dort aber von keinem E2E-Lauf abgedeckt.
 
     printf '%s\n' "$SECRET" | wpsync push kunde code themes/kunde-child \
         --driver container --docroot /srv/ws/dev/kunde/docroot --secret-stdin --to staging --json --yes
@@ -1749,6 +1753,11 @@ scripts/e2e-content.sh
 # Inhalts-Push: push --content nach Staging und Live, Rücknahme, Ablehnungen – gegen eine echte
 # MariaDB (eigene DDEV-Projekte wpsync-e2e-cdb und -cdb-target, braucht jq; rund 6 Minuten)
 scripts/e2e-content-push.sh
+
+# Rücknahme der Inhalte ohne WordPress: rescue.php mit versiegeltem Umschlag, Sperre, Object-Cache,
+# Reste – gegen MySQL 8.0 (eigene DDEV-Projekte wpsync-e2e-rdb und -rdb-target, braucht jq; rund
+# 15 Minuten)
+scripts/e2e-rescue-db.sh
 
 # Container-Modus: push, pushes und rollback als Linux-Binary in Wegwerf-Containern
 # (eigenes DDEV-Projekt wpsync-e2e-cpush, braucht jq; rund 15 Minuten)
