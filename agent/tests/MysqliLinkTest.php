@@ -57,6 +57,31 @@ final class MysqliLinkTest extends TestCase
         $this->assertNull(error_get_last());
     }
 
+    /**
+     * Security-Review P3, N2: LOAD DATA LOCAL INFILE ist auf dieser Verbindung aus, bevor sie steht –
+     * ein fremder oder übernommener Datenbankserver liest über sie keine Datei des Webservers.
+     */
+    public function testLocalInfileIsOffBeforeTheConnectionIsMade(): void
+    {
+        $options = MysqliLink::options();
+        $this->assertSame(0, $options[MYSQLI_OPT_LOCAL_INFILE] ?? null);
+        $this->assertSame(MysqliLink::CONNECT_SECONDS, $options[MYSQLI_OPT_CONNECT_TIMEOUT] ?? null);
+        // Dieselbe Liste geht an mysqli_options(), vor mysqli_real_connect() – und ohne sie keine Verbindung.
+        $source  = (string) file_get_contents(dirname(__DIR__) . '/src/MysqliLink.php');
+        $set     = strpos($source, 'foreach (self::options() as $option => $value)');
+        $connect = strpos($source, 'mysqli_real_connect($handle');
+        $this->assertIsInt($set);
+        $this->assertIsInt($connect);
+        $this->assertLessThan($connect, $set);
+        $this->assertSame(1, substr_count($source, 'mysqli_real_connect($handle'));
+        $this->assertSame(1, preg_match('/if \(!mysqli_options\(\$handle, \$option, \$value\) && \$option === MYSQLI_OPT_LOCAL_INFILE\) \{\s+return null;/', $source));
+        // Am echten Handle: die Optionen lassen sich setzen.
+        $handle = mysqli_init();
+        foreach ($options as $option => $value) {
+            $this->assertTrue(mysqli_options($handle, $option, $value), 'option ' . $option);
+        }
+    }
+
     public function testAFailedConnectionIsSilentAndNamesNothing(): void
     {
         error_clear_last();

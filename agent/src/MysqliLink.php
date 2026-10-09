@@ -24,6 +24,23 @@ final class MysqliLink implements RescueLink
     }
 
     /**
+     * Was vor dem Verbindungsaufbau gesetzt wird: kurze Wartezeiten – und LOAD DATA LOCAL INFILE aus.
+     * Über diese Verbindung liest kein Datenbankserver eine Datei des Webservers, auch kein fremder,
+     * auf den ein veränderter DNS-Eintrag oder ein übernommener Host zeigt; rescue.php schickt nie
+     * eine solche Anweisung.
+     *
+     * @return array<int, int> Option von mysqli_options() → Wert
+     */
+    public static function options(): array
+    {
+        $options = [MYSQLI_OPT_LOCAL_INFILE => 0, MYSQLI_OPT_CONNECT_TIMEOUT => self::CONNECT_SECONDS];
+        if (defined('MYSQLI_OPT_READ_TIMEOUT')) {
+            $options[(int) constant('MYSQLI_OPT_READ_TIMEOUT')] = self::READ_SECONDS;
+        }
+        return $options;
+    }
+
+    /**
      * @param array<string, mixed> $db host, port, socket, user, password, flags – geprüft von RescueContent::check()
      */
     public static function open(array $db): ?self
@@ -37,9 +54,11 @@ final class MysqliLink implements RescueLink
             if (!$handle instanceof \mysqli) {
                 return null;
             }
-            mysqli_options($handle, MYSQLI_OPT_CONNECT_TIMEOUT, self::CONNECT_SECONDS);
-            if (defined('MYSQLI_OPT_READ_TIMEOUT')) {
-                mysqli_options($handle, (int) constant('MYSQLI_OPT_READ_TIMEOUT'), self::READ_SECONDS);
+            foreach (self::options() as $option => $value) {
+                // Ohne das Verbot von LOCAL INFILE keine Verbindung; eine Wartezeit, die der Treiber nicht kennt, hält nicht auf.
+                if (!mysqli_options($handle, $option, $value) && $option === MYSQLI_OPT_LOCAL_INFILE) {
+                    return null;
+                }
             }
             $port   = isset($db['port']) && is_int($db['port']) ? $db['port'] : null;
             $socket = isset($db['socket']) && is_string($db['socket']) ? $db['socket'] : null;
