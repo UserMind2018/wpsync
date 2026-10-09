@@ -5,11 +5,33 @@ Agent-Version steht pro Release dabei.
 
 ## [Unreleased]
 
-**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` braucht Agent ≥ 0.7.0; ohne
-`--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter „Geändert“. Vorstufe
-des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
+**Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` und `push --content` brauchen
+Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter
+„Geändert“.
 
 ### Neu
+- `wpsync push <site> code … --content <package.jsonl>`: Inhalte als dritter Kanal eines Pushs –
+  ein Paket aus Zeilen der sieben Inhaltstabellen (`update`, `insert` mit fester ID, `trash`),
+  transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
+  Vorher-Abbild, Nacharbeiten (`data.post_actions`) und Health-Check der geänderten Seiten.
+  `--dry-run` prüft das ganze Paket ohne Push-Fenster; das `plan`-Ereignis nennt
+  `content: {rows, conflicts, limits}`. Auch nach `--to staging`
+- `--no-code`: ein Satz nur aus `--uploads` und `--content`
+- `wpsync rollback` nimmt den ganzen Satz zurück (Inhalte → Code → Uploads) – oder nichts, wenn
+  sich Zeilen seit dem Push geändert haben (`changed_since_push`). Antwortet WordPress nicht,
+  nimmt `rescue.php` Code und Uploads zurück und das Ergebnis nennt
+  `warnings: ["content_not_rolled_back"]`; ein späterer `rollback` holt die Inhalte nach
+- Nach einem bestätigten Inhalts-Push nach Live zieht die CLI `manifest.jsonl` und
+  `baseline.jsonl` nach; `rollback` nimmt das zurück
+- Agent: Endpunkt `/content/stage` (Paket in Stücken, je Kopplung, 24 h), Prüfungen eines Pakets
+  gegen die Listen des Agents, Sperre von serialisierten Objekten (`unsafe_value`), von Resten
+  der lokalen Adresse und von Pseudonymen; `rescue.json` kennt den DB-Anteil eines Pushs
+- `error.reason` bei Exit 1 für Inhalte: `package_invalid`, `baseline_outdated`,
+  `origin_mismatch`, `package_too_large`, `engine_unsupported`, `blocked_row`,
+  `list_version_mismatch`, `unsafe_value`, `local_origin_in_package`, `pseudonym_in_package`,
+  `write_mismatch`, `id_outside_corridor`, `id_taken`, `conflict`, `row_unfaithful`,
+  `dangling_reference`, `upload_missing`, `author_unknown`, `package_missing`,
+  `content_failed`, `changed_since_push` – dazu `error.keys` und `error.paths`
 - `wpsync pull <site> --content`: Manifest der sieben Inhaltstabellen (Fingerabdruck je Zeile,
   Meta-Paar und Zuordnung, keine Werte; für Zeilen, die der Pull pseudonymisiert, auch kein
   Fingerabdruck – `h: null`, `why: "pseudonymized"`), `map.json`, Baseline, `unfaithful.jsonl`
@@ -35,6 +57,11 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
 - `error.reason` bei Exit 1: `manifest_incomplete`, `content_export_failed`, `canon_version`
 
 ### Geändert
+- Listen des Agents für Inhalte in Version 2 (`list_version`): mehr Sperrwörter für
+  Meta-Schlüssel und Optionen (`passwd`, `credential`, `apikey`, `api-key`, `webhook`, `oauth`;
+  als ganzes Namensglied `pass`, `pwd`, `auth`, `salt`, `sk`, `private`), Prüfung auch in
+  Kleinschreibung, feste Liste von Beitragstypen, die keine Projekt-Erweiterung freigibt. `p` und
+  `why` in `content export` folgen den neuen Listen
 - Jeder Pull ersetzt auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON); `staging create`
   und `staging refresh` schreiben sie jetzt ebenfalls um (bisher blieben sie auf Live gerichtet)
 - Ein Pull ohne `--content`, der eine der sieben Inhaltstabellen neu lädt, verwirft einen

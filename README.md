@@ -137,7 +137,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
-| `wpsync push <site> code [einheit…] [--uploads <liste>] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
+| `wpsync push <site> code [einheit…] [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0), mit `--content` ein Paket aus Inhaltszeilen (ab Agent 0.7.0, [Inhalte pushen](#inhalte-pushen)); `--no-code` lässt den Code weg. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
 | `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
 | `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
@@ -419,12 +419,11 @@ Ausgabe nennt sie (`--json`: `warnings: ["upload_changed_since_push"]`).
 
 ## Inhalte: Manifest, Baseline, Export
 
-Vorstufe des Inhalts-Pushs, ab Agent 0.7.0. **Einen Inhalts-Push gibt es in diesem Stand noch
-nicht** – `wpsync push` überträgt weiter nur Code und neue Uploads und schreibt keine Datenbank.
-Was es gibt: Der Pull hält fest, welche Inhalte auf der Site liegen und wie sie lokal angekommen
-sind, und `content export` rechnet dieselben Fingerabdrücke für die Arbeitskopie. Ein Aufrufer
-(etwa das Website Studio) sieht daran, was sich lokal geändert hat. Nichts davon schreibt auf
-die Site, und nichts davon braucht ein Push-Fenster.
+Grundlage des Inhalts-Pushs ([Inhalte pushen](#inhalte-pushen)), ab Agent 0.7.0: Der Pull hält
+fest, welche Inhalte auf der Site liegen und wie sie lokal angekommen sind, und `content export`
+rechnet dieselben Fingerabdrücke für die Arbeitskopie. Ein Aufrufer (etwa das Website Studio)
+sieht daran, was sich lokal geändert hat, und baut daraus das Paket. Nichts in diesem Abschnitt
+schreibt auf die Site, und nichts davon braucht ein Push-Fenster.
 
 **`wpsync pull <site> --content`** holt zusätzlich zum normalen Pull ein **Manifest** der sieben
 Inhaltstabellen (`posts`, `postmeta`, `terms`, `term_taxonomy`, `term_relationships`, `termmeta`,
@@ -541,7 +540,7 @@ Zeilen.
 | `post_type` | der Beitragstyp steht nicht auf der Liste (auch für Meta und Zuordnungen des Beitrags) |
 | `taxonomy` | die Taxonomie steht nicht auf der Liste |
 | `meta_key` | Meta-Schlüssel fest gesperrt |
-| `meta_word` | Meta-Schlüssel nur über die Teilstring-Liste gesperrt – per Projekt-Erweiterung ausnehmbar |
+| `meta_word` | Meta-Schlüssel nur über die Wortlisten gesperrt (Teilstring wie `token`, oder ein ganzes Namensglied wie `auth` in `_auth_code`) – per Projekt-Erweiterung ausnehmbar |
 | `option` | die Option ist gesperrt oder steht nicht auf der Liste |
 | `no_object` | der Beitrag bzw. Term zur Zeile fehlt lokal (verwaiste Meta-Zeile oder Zuordnung) |
 | `unnormalizable` | der Wert liess sich nicht normalisieren; `h` ist `null` |
@@ -576,6 +575,130 @@ ohne Plugins und Themes zu laden.
 auch doppelt escapte URLs (`https:\\\/\\\/…`, JSON in JSON) – bisher blieben sie auf die
 Live-Domain gerichtet. `staging create` und `staging refresh` schreiben sie mit Agent ≥ 0.7.0
 ebenfalls um.
+
+## Inhalte pushen
+
+Ab Agent 0.7.0 trägt ein Push einen **Satz aus drei Kanälen**: Code-Einheiten, neue Uploads und
+**Inhalte** – ein Paket aus Datenbankzeilen der sieben Inhaltstabellen. Eine Push-ID, ein
+Push-Fenster, ein Health-Check, eine Rücknahme für den ganzen Satz.
+
+```sh
+wpsync pull kunde --content                                    # Manifest und Baseline
+wpsync content export kunde > export.jsonl                     # Arbeitsstand; Diff und Paket baut der Aufrufer
+wpsync push kunde code --no-code --content package.jsonl --dry-run   # prüft das ganze Paket, ohne Push-Fenster
+wpsync push kunde code --no-code --content package.jsonl --to staging
+wpsync push kunde code themes/x --uploads liste.txt --content package.jsonl
+wpsync rollback kunde <push-id>                                # nimmt den ganzen Satz zurück
+```
+
+Das Paket baut nicht wpsync, sondern der Aufrufer (das Website Studio) – aus dem Vergleich von
+`content export` mit `baseline.jsonl`; die erwarteten Abdrücke kommen aus `manifest.jsonl`.
+`--no-code` pusht keinen Code: der Satz besteht dann nur aus `--uploads` und `--content`.
+
+**Der Inhaltskanal ist ein Administrator-Kanal.** Was er schreibt, ist ungefiltertes HTML, CSS
+und JavaScript der Site (`_elementor_data`, `wp_template`, `custom_css`, Menüs). Er hat deshalb
+genau die Autorisierung des Code-Pushs – signierter Request **und** offenes Push-Fenster dieses
+Geräts, ohne schwächeren Weg – und dieselbe Sorgfalt verdient, wer ein Paket baut.
+
+### Format `package.jsonl`
+
+JSON-Lines, Zeilenende fest `\n`, JSON kompakt. Erste Zeile der Kopf:
+
+```json
+{"head":{"list_version":2,"extensions":{"post_types":[],"taxonomies":[],"meta_exceptions":[]},"corridor":{"offset":1000000,"posts":[1000001,1999999],"terms":[1000001,1999999],"term_taxonomy":[1000001,1999999]},"canon_version":1,"variants":["plain","esc1","esc2"],"home":"https://kunde.de","map_id":"<sha256 von map.json>","local_host":"kunde.ddev.site","rows":3,"sha256":"<sha256 aller Bytes nach der Kopfzeile>"}}
+```
+
+Danach je Zeile `{"op","table","key","expected","row"}`:
+
+| `op` | `expected` | `row` |
+|---|---|---|
+| `update` | Abdruck der Zeile aus dem Manifest | die Spalten des Abdrucks wie im Export (base64), bei einem Paar `{"values":[…]}`; eine **leere Menge** löscht das Meta-Paar bzw. die Zuordnungen dieser Taxonomie |
+| `insert` | `"absent"` | wie `update`. Neue Zeilen in `posts`, `terms`, `term_taxonomy` brauchen eine ID im Korridor; Meta, Zuordnungen und Optionen an bestehenden Objekten nicht |
+| `trash` | Abdruck aus dem Manifest | – (nur `posts`, nie Attachments); `_wp_trash_meta_status` und `_wp_trash_meta_time` schreibt der Agent selbst |
+
+Werte sind **normalisiert** – sie tragen die Platzhalter `⟦wpsync:origin⟧`, `:esc1`, `:esc2`
+statt einer Domain; der Agent setzt die Adresse des Ziels ein, auf der Staging-Kopie die der
+Kopie. Die Werte eines Meta-Paars schreibt der Agent in der Reihenfolge des Pakets; im Abdruck
+zählen sie als sortierte Menge, eine reine Umsortierung ist deshalb weder Änderung noch Konflikt.
+Optionen werden nie gelöscht. `home` ist `live.home` aus `map.json`.
+
+### Was der Agent prüft
+
+Im Probelauf (`--dry-run`, ohne Push-Fenster) und beim Anwenden dasselbe, beim Anwenden unter
+Sperre noch einmal. Die CLI legt das Paket dafür vor dem Begin auf der Site ab (`/content/stage`,
+in Stücken, je Kopplung getrennt im geschützten Push-Arbeitsordner, adressiert über die sha256
+der Datei; es verfällt nach dem bestätigten Push nach Live, spätestens nach 24 Stunden). Jede
+Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffenen Zeilen als
+`{table, key}`, nie einen Wert:
+
+| `error.reason` | Bedeutung |
+|---|---|
+| `package_invalid` | Form, Prüfsumme, Zeilenende, doppelter Schlüssel, Platzhalter in unbekannter Form, Sprung in den Papierkorb ohne `op: trash` |
+| `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
+| `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
+| `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB) – in mehreren Pushes übertragen |
+| `engine_unsupported` | eine betroffene Tabelle ist nicht InnoDB |
+| `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
+| `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
+| `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt) oder sieht serialisiert aus und lässt sich nicht lesen |
+| `local_origin_in_package` | im Wert steckt noch der Host der Arbeitskopie (`local_host`), auch URL-kodiert |
+| `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
+| `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |
+| `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors bzw. seine ID ist auf dem Ziel belegt |
+| `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
+| `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
+| `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
+| `upload_missing` | eine Datei eines Attachments (`_wp_attached_file`, aus `_wp_attachment_metadata` `file`, `sizes.*.file`, `original_image`) liegt weder auf dem Ziel noch in `--uploads`; `error.paths` nennt sie |
+| `author_unknown` | das Paket legt Beiträge an, das Push-Fenster wurde aber nicht im WP-Admin geöffnet – der Benutzer, der es öffnet, wird ihr Autor. Erst beim echten Push, nicht im Probelauf |
+| `package_missing` | das Paket liegt nicht (mehr) auf der Site |
+| `content_failed` | Datenbank oder Dateisystem haben versagt; nichts wurde übernommen |
+| `changed_since_push` | nur bei `rollback`: siehe unten |
+
+Die **Listen** gehören dem Agent (`ContentLists`, Version im Manifest-Kopf unter `list_version`
+und `lists`); die Angaben im Paket sind nur ein Abgleich. **Projekt-Erweiterungen**
+(`extensions`) kommen aus dem Paket selbst und sind deshalb eng begrenzt: Beitragstypen,
+Taxonomien und einzelne Ausnahmen von den Wortlisten für Meta-Schlüssel (`meta_word`) – nie Optionen,
+nie Tabellen, und nie ein Beitragstyp der festen Liste (`never_post_types`: Revisionen,
+Code-Snippets, Shop, Formulareinträge, geplante Aktionen …). Erwartete Abdrücke nimmt der Agent
+nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
+
+### Anwenden, Health-Check, Rücknahme
+
+- **Reihenfolge:** Uploads → Code → Inhalte, in einem Commit. Die Inhalte kommen in **einer
+  Transaktion**; vorher schreibt der Agent das Vorher-Abbild der betroffenen Zeilen in den
+  Arbeitsordner des Pushs (`content/before.json`), danach die neuen Abdrücke
+  (`content/after.json`). Scheitert etwas, bleibt keine Zeile, und Code und Uploads werden
+  zurückgetauscht.
+- **Was der Agent selbst setzt:** `post_modified` (Zeit des Pushs), bei neuen Beiträgen
+  `post_author` (wer das Push-Fenster geöffnet hat) und `guid`, bei neuen Optionen `autoload`.
+  `post_author` und `guid` bestehender Beiträge bleiben.
+- **Nacharbeiten** (`data.post_actions: [{"step","ok"}]`): Object-Cache der betroffenen Objekte,
+  Elementor-CSS, Yoast-Indexables, bekannte Cache-Plugins (WP Rocket, W3 Total Cache, LiteSpeed,
+  SG Optimizer, Breeze), Rewrite-Regeln bei Bedarf, Term-Zähler, eine Revision je geänderter
+  Seite – jeder Schritt nur, wenn das Plugin da ist. Ein Fehlschlag (`ok: false`) ist kein
+  Fehler des Pushs.
+- **Health-Check:** zusätzlich die veröffentlichten Seiten, die das Paket ändert (höchstens 10).
+  Wird die Site schlechter, geht die Rücknahme **zuerst über den Agent** – nur er nimmt Inhalte
+  zurück (Inhalte → Code → Uploads). Antwortet er nicht, nimmt `rescue.php` Code und Uploads
+  zurück, und das Ergebnis sagt es: Exit 43 mit `warnings: ["content_not_rolled_back"]`. Der Push
+  bleibt dann offen (weitere Pushes: Exit 42); `wpsync rollback <site> <push-id>` holt die
+  Inhalte nach, sobald WordPress wieder antwortet.
+- **`rollback`:** stellt das Vorher-Abbild her, löscht eingefügte Objekte samt Meta und
+  Zuordnungen und holt Beiträge aus dem Papierkorb – aber nur, wenn jede betroffene Zeile noch
+  den Abdruck trägt, den der Push hinterlassen hat. Sonst `error.reason: "changed_since_push"`
+  mit `error.keys`: **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über
+  `rescue.php`.
+- **Manifest und Baseline:** Nach einem bestätigten Push nach Live schreibt die CLI die neuen
+  Abdrücke nach `manifest.jsonl` und die Zeilen des Pakets nach `baseline.jsonl` – das Gepushte
+  ist danach keine lokale Änderung mehr. `rollback` nimmt das zurück. Bei `--to staging` bleiben
+  beide unverändert: sie beschreiben Live, und dasselbe Paket geht danach nach Live.
+- **Staging:** dieselben Abdrücke gelten auf der Kopie; der Agent schreibt nur in ihre Tabellen
+  und setzt ihre Adressen ein. Nacharbeiten gibt es dort nur, soweit sie sich mit SQL und Dateien
+  sagen lassen. `staging refresh` und `staging delete` verwerfen ein dort angewandtes Paket.
+- **Grenzen:** Kein Multisite, nur InnoDB. Benutzer, Kommentare und Plugin-Tabellen pusht der
+  Kanal nie. Eine Rücknahme der Inhalte ohne WordPress gibt es noch nicht (kommt mit 0.8.0).
+  Steht die Adresse der Live-Site wörtlich in einem lokalen Wert, lehnt der Agent ihn ab
+  (`write_mismatch`).
 
 ## Staging auf dem Server
 
@@ -778,6 +901,17 @@ abbilden lässt, sofern das Profil sie kopiert.
   WordPress' `sanitize_file_name()` entschärfen würde (`bild.shtml.jpg`). Pfade bleiben
   unter `wp-content/uploads/` ohne Symlink auf dem Weg, nie in Staging- oder Push-Arbeitsordnern.
   Vorhandene Dateien ersetzt ein Push nie.
+- **Inhalts-Push:** schreibt nur in die sieben Inhaltstabellen des Ziels – auf Staging nur in
+  Tabellen, deren Namen der Staging-Guard geprüft hat – und nur Zeilen, die die Listen des
+  **Agents** erlauben; jedes SQL geht durch `$wpdb->prepare`, Schlüssel werden bytegenau
+  verglichen. Er ist ein Administrator-Kanal (ungefiltertes HTML und JavaScript) mit der
+  Autorisierung des Code-Pushs: ohne offenes Push-Fenster weder Begin noch Commit. Serialisierte
+  Objekte in Werten lehnt der Agent ab (`unsafe_value`), ebenso Pseudonyme und Reste der lokalen
+  Adresse. Das Ablegen eines Pakets (`/content/stage`) braucht kein Fenster, schreibt aber nur
+  in den geschützten Push-Arbeitsordner: höchstens fünf Dateien je Kopplung, je höchstens 16 MB,
+  24 Stunden. Dort liegt auch das Vorher-Abbild eines Pushs (`before.json`, Inhalte der Site im
+  Klartext) – es wird mit dem Snapshot aufgeräumt. Fehlerantworten nennen Tabelle und
+  Schlüssel, nie einen Wert.
 - **Inhalts-Manifest:** `/content/manifest` ist signiert wie jeder Request, liest nur und
   braucht kein Push-Fenster. Die Inhalte verlassen den Server dort nur als Fingerabdruck, ohne
   Werte, im Umfang des Pull-Profils (abgewählte Tabellen und Beitragstypen fehlen) und ohne
@@ -1113,6 +1247,7 @@ gegen einen Agent unter 0.6.0 und `pull --content` gegen einen Agent unter 0.7.0
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
 | `upload_exists` | `push --uploads`: auf der Site liegt am selben Pfad eine andere Datei – nichts übertragen, nichts getauscht, auch mit `--force` |
 | `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, aktive Typen wie SVG/HTML, von WordPress nicht erlaubt), der Dateiname ist nicht WordPress-konform (Leerzeichen, Sonderzeichen, mittlere Endungen) oder der Inhalt passt nicht zur Endung |
+| `conflict`, `blocked_row`, `id_taken`, … | `push --content` und `rollback`: der Agent oder die CLI lehnt die Inhalte ab – alle Gründe stehen unter [Inhalte pushen](#was-der-agent-prüft). Dazu `error.keys` (`[{"table","key"}]`, bei `pseudonym_in_package` mit `pattern`) und bei `upload_missing` `error.paths` |
 | `manifest_incomplete` | `pull --content`: das Inhalts-Manifest des Agents ist unvollständig oder nicht in der erwarteten Form (Kopf fehlt, Seite bricht ab, Cursor rückt nicht vor) |
 | `content_export_failed` | `pull --content`, `content export`: das Export-Skript in der lokalen Site lief nicht zu Ende (Abbruch, Schlusszeile fehlt, Zeilenzahl passt nicht), oder die lokale Umgebung kann kein Skript über stdin ausführen |
 | `canon_version` | `pull --content`: der Agent rechnet Fingerabdrücke in einer anderen Form als diese CLI – CLI oder Agent aktualisieren |
