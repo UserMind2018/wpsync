@@ -189,4 +189,18 @@ final class PushContentStageTest extends TestCase
             }
         }
     }
+
+    /**
+     * Wo die Dateien der Attachments liegen: auf Live dort, wo WordPress sie ablegt (UPLOADS,
+     * upload_path), in der Kopie unter ihrem wp-content – wie PushUploads::layout() es sieht.
+     */
+    public function testUploadsDirIsWhereWordPressKeepsThem(): void
+    {
+        mkdir($this->work . '/medien');
+        $GLOBALS['wpsync_test_upload_basedir'] = $this->work . '/medien/';
+        $this->assertSame($this->work . '/medien', PushContent::uploadsDir('live', $this->work . '/wp-content'));
+        $this->assertSame($this->work . '/kopie/wp-content/uploads', PushContent::uploadsDir('staging', $this->work . '/kopie/wp-content'));
+        $GLOBALS['wpsync_test_upload_basedir'] = '';
+        $this->assertSame($this->work . '/wp-content/uploads', PushContent::uploadsDir('live', $this->work . '/wp-content'));
+    }
 }

@@ -203,7 +203,7 @@ final class PushContent
                     $siteurl,
                     $copy['url'],
                     $copy['prefix'],
-                    $content . '/uploads',
+                    self::uploadsDir('staging', $content),
                     $copy['url'] . '/wp-content/uploads',
                     $autoload
                 );
@@ -222,7 +222,7 @@ final class PushContent
                 $siteurl,
                 $home,
                 (string) $wpdb->prefix,
-                $content . '/uploads',
+                self::uploadsDir('live', $content),
                 rtrim((string) (wp_upload_dir(null, false)['baseurl'] ?? ''), '/'),
                 $autoload
             );
@@ -235,6 +235,23 @@ final class PushContent
         } catch (\InvalidArgumentException $e) {
             throw new ContentException(ContentException::ORIGIN, 'Die Adresse oder die Tabellen dieser Site lassen sich nicht bestimmen.');
         }
+    }
+
+    /**
+     * Ordner der Uploads des Ziels: auf Live der, den WordPress benutzt (basedir – auch mit UPLOADS
+     * oder upload_path), in der Kopie wp-content/uploads wie bei der Einheit uploads (PushUploads::layout()).
+     *
+     * @param string $content wp-content des Ziels
+     */
+    public static function uploadsDir(string $name, string $content): string
+    {
+        if ($name === 'live') {
+            $base = (string) (wp_upload_dir(null, false)['basedir'] ?? '');
+            if ($base !== '') {
+                return rtrim(wp_normalize_path(is_dir($base) ? (string) realpath($base) : $base), '/');
+            }
+        }
+        return $content . '/' . PushUploads::UNIT;
     }
 
     /**
