@@ -34,12 +34,18 @@ final class ContentRollback
      * @param bool   $leave nur für rescue.php (R15): Fremdes an eingefügten Objekten stehen lassen und in left
      *                      nennen, statt abzulehnen. Gelöscht und überschrieben wird dann nur, was der Push
      *                      selbst geschrieben hat – purge() läuft nicht. Unter WordPress immer false (D31)
+     * @param bool   $landed steht fest, dass der COMMIT des Pushs ankam (content.state = applied in rescue.json)?
+     *                       Nur dann gilt für active_plugins das Delta. Sonst – der Agent starb, bevor er es
+     *                       vermerken konnte, oder die Transaktion kam nie an – zählt wie bei jeder Zeile der
+     *                       Abdruck: die Liste geht nur zurück, wenn ihr Wert bytegleich der ist, den der Push
+     *                       geschrieben hat. Ein Administrator, der dasselbe Plugin inzwischen selbst eingeschaltet
+     *                       hat, verlöre es sonst durch die Rücknahme eines Pushs, der nie angewandt wurde
      * @return array{state: string, changes: array<string, mixed>|null, left?: list<array{table: string, key: string}>, plugins?: array{deactivated: list<string>, reactivated: list<string>}}
      *         changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war. left nur mit $leave.
      *         plugins nur, wenn der Push einen Plugin-Zustand hatte: was diese Rücknahme an der Liste geändert hat
      * @throws ContentException changed_since_push, before_image_invalid, engine_unsupported oder content_failed
      */
-    public static function run(ContentTarget $target, string $dir, bool $leave = false): array
+    public static function run(ContentTarget $target, string $dir, bool $leave = false, bool $landed = true): array
     {
         $none = ['state' => self::NOTHING, 'changes' => null] + ($leave ? ['left' => []] : []);
         // Beide Abbilder müssen unverändert die sein, die der Push abgelegt hat (ContentImage) – und
@@ -69,6 +75,12 @@ final class ContentRollback
             }
         }
         $changes = $pushed['changes'] ?? null;
+        // Abdruck des Werts, den der Push in active_plugins geschrieben hat (after.json, changes.plugins.h).
+        $print = null;
+        if (is_array($changes) && is_array($changes['plugins'] ?? null) && is_string($changes['plugins']['h'] ?? null)
+            && preg_match('/^[a-f0-9]{64}\z/', $changes['plugins']['h']) === 1) {
+            $print = $changes['plugins']['h'];
+        }
         unset($image, $pushed);
         $undo = ['deactivated' => [], 'reactivated' => []]; // was diese Rücknahme an der Liste ändert
         if ($switched) {
@@ -80,7 +92,7 @@ final class ContentRollback
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         $left  = [];   // mit $leave: was an eingefügten Objekten stehen bleibt
         try {
-            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, $leave, $delta, $switched, $none, &$lost, &$left, &$undo): array {
+            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, $leave, $delta, $switched, $landed, $print, $none, &$lost, &$left, &$undo): array {
                 $byTable = array_fill_keys(ContentState::ORDER, []);
                 foreach ($before as $entry) {
                     $byTable[$entry['t']][] = $entry['k'];
@@ -121,6 +133,17 @@ final class ContentRollback
                     }
                     $list = $have;
                     $undo = ContentPlugins::undo($list, $delta);
+                    // Ob der COMMIT des Pushs ankam, steht nirgends: dann zählt für die Liste der Abdruck (D10) –
+                    // sie muss bytegleich der Wert sein, den der Push geschrieben hat. Ohne Nachher-Abbild gibt es
+                    // keinen Abdruck, und was dann vom Vorher-Zustand abweicht, lässt sich nicht dem Push zuschreiben.
+                    if (!$landed && ($undo['deactivated'] !== [] || $undo['reactivated'] !== [])
+                        && ($print === null || !hash_equals($print, hash('sha256', (string) $option['option_value'])))) {
+                        throw new ContentException(
+                            ContentException::CHANGED,
+                            'Die Liste der aktiven Plugins wurde geändert, und es steht nicht fest, dass der Push sie geschrieben hat – nichts wird zurückgenommen, auch Code und Uploads nicht.',
+                            [ContentException::key('options', ContentPlugins::OPTION)]
+                        );
+                    }
                 }
                 // Was unter Sperre gelesen wurde, gilt nur auf der Verbindung der Transaktion.
                 if (!$store->alive()) {
@@ -226,7 +249,9 @@ final class ContentRollback
                 $print    = self::fingerprint($target, $entry['t'], $entry['k'], $entry['state']);
                 $prints[] = ['t' => $entry['t'], 'k' => $entry['k'], 'h' => $print === 'absent' ? null : $print];
             }
-            if (ContentRepair::settled($target, $prints)) {
+            // Bei einem Satz ohne offene Paketzeilen sagt das allein die Liste: was zurückkommen sollte, steht
+            // darin, und was gehen sollte, nicht mehr.
+            if (ContentRepair::settled($target, $prints) && ContentPlugins::landed($store, $undo['reactivated'], $undo['deactivated'])) {
                 return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null]
                     + ($leave ? ['left' => $left] : []) + ($switched ? ['plugins' => $undo] : []);
             }
