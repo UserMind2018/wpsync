@@ -13,6 +13,8 @@
  * cache ist ein getrennter zweiter Schritt (R8): er lädt WordPress mit SHORTINIT – ohne Plugins,
  * Themes und mu-plugins – und leert den Object-Cache, der sonst den gepushten Stand weiter
  * auslieferte. Ein Fehler darin gefährdet die Rücknahme nie; sie ist dann schon abgeschlossen.
+ * Vorher verschwindet der Schlüssel aus $_POST und $_REQUEST, und ein Location-Header, den
+ * WordPress oder ein Drop-in setzt, verlässt den Server nicht.
  */
 define('WPSYNC_RESCUE', true);
 
@@ -39,6 +41,9 @@ try {
     // sie könnte Pfade oder, bei der Datenbank, Zugangsdaten nennen.
     list($wpsync_status, $wpsync_body) = [500, ['ok' => false, 'error' => 'rescue failed']];
 }
+// Der Schlüssel hat ausgedient: was ab hier geladen wird (WordPress im Cache-Schritt, mit
+// wp-config.php und Drop-ins), findet ihn nicht mehr in den Request-Variablen.
+unset($_POST['key'], $_REQUEST['key']);
 
 // action=cache: der Schlüssel stimmt, der Push ist ganz zurück, und der Object-Cache trägt noch den
 // gepushten Stand. WordPress wird hier geladen, im globalen Geltungsbereich – wie in index.php:
@@ -59,6 +64,7 @@ if ($wpsync_status === \WpSync\PushRescue::FLUSH) {
             @ob_end_clean();
         }
         if (!headers_sent()) {
+            header_remove('Location'); // keine Umleitung, der ein Client samt Schlüssel im Body folgen könnte
             http_response_code(500);
             header('Content-Type: application/json');
             header('Cache-Control: no-store');
@@ -83,6 +89,9 @@ if ($wpsync_status === \WpSync\PushRescue::FLUSH) {
     $wpsync_done = true;
     ini_set('display_errors', '0'); // WordPress stellt es mit WP_DEBUG_DISPLAY um
     if (!headers_sent()) {
+        // Was WordPress oder ein Drop-in an Umleitung gesetzt hat, geht nicht mit: die Antwort ist JSON
+        // mit dem Status von unten, nie ein 3xx mit Ziel.
+        header_remove('Location');
         header('Content-Type: application/json');
         header('Cache-Control: no-store');
         header('X-Robots-Tag: noindex');

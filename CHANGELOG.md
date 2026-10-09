@@ -86,6 +86,9 @@ sich wie bisher (`content_not_rolled_back`).
 - Der Cache-Schritt von `rescue.php` (`cache: "flushed"`) und der Agent beim Wiederanlauf
   (`post_actions`) schreiben ihren Vermerk nur noch unter der Sperre des Pushs in `rescue.json`;
   ist der Push gerade gesperrt, holt der Agent die Nacharbeiten beim nächsten Seitenaufruf nach
+- Cache-Schritt von `rescue.php`: bevor WordPress geladen wird, verschwindet der Schlüssel aus
+  `$_POST` und `$_REQUEST`; ein `Location`-Header, den `wp-config.php` oder ein Drop-in setzt,
+  verlässt den Server nicht
 - Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
   (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
 
