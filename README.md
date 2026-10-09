@@ -134,7 +134,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
-| `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. |
+| `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ] [--table <tabelle>=structure\|skip]…` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. Nur mit `--preset`: `--uploads-since`, `--exclude-plugin <slug>`, `--exclude-post-type <typ>` und `--table` (alle drei mehrfach), siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage). |
 | `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
@@ -177,6 +177,43 @@ Werte darin pseudonymisiert, siehe [Anonymisierung](#anonymisierung).
 - Ein abgewähltes, aber auf der Site aktives Plugin wird lokal **deaktiviert**.
 - Tauchen neue Tabellen, Plugins oder Post-Typen auf, fragen `scan` und `pull` nach
   (`--yes` übernimmt die Preset-Regel).
+
+### Scan ohne Rückfrage
+
+`wpsync scan <site> --preset <p>` baut das Profil **neu** aus dem Preset – Abweichungen eines
+früher gespeicherten Profils (auch `tables.overrides`) gelten danach nicht mehr. Wer vor jedem
+Pull so scannt, gibt die Abweichungen deshalb jedes Mal mit:
+
+| Schalter | Wirkung |
+|---|---|
+| `--exclude-plugin <slug>` | Plugin nicht ziehen (`plugins.exclude`); seine Tabellen bleiben, wie das Preset sie einstuft |
+| `--exclude-post-type <typ>` | Post-Typ nicht ziehen (`post_types.exclude`) |
+| `--uploads-since <JJJJ>\|alle` | Uploads ab diesem Jahr bzw. alle Jahre |
+| `--table <tabelle>=structure\|skip` | Tabelle nur als Struktur (`structure`) oder gar nicht (`skip`) ziehen (`tables.overrides`) |
+
+Alle bis auf `--uploads-since` sind mehrfach möglich; ohne `--preset` sind sie ein Aufruffehler
+(Exit 2).
+
+`--table` erwartet den vollen Tabellennamen mit Präfix, wie ihn der Scan nennt – z. B.
+`--table wp_wffilemods=skip` für die Datei-Protokolle von Wordfence, die das Preset
+`vollstaendig` sonst mit Daten zieht. `full` gibt es hier nicht: der Schalter stuft nur herab.
+
+- Exit 2, nichts gespeichert: kein `=`, leerer Name, ein anderer Modus als `structure`/`skip`,
+  dieselbe Tabelle mit zwei verschiedenen Modi (zweimal derselbe Modus ist in Ordnung) oder eine
+  **Kern-Tabelle** (`essential` im Infosheet: `posts`, `postmeta`, `options`, `users` …).
+- Eine Tabelle, die das Infosheet nicht nennt (Tippfehler, oder neuer als der letzte Scan), ist
+  kein Fehler: Der Override wird gespeichert und wirkt, sobald das Infosheet die Tabelle führt
+  (`wpsync scan <site> --refresh`). Der Scan meldet sie auf stderr; mit `--json` trägt `data`
+  dann `warnings: ["table_unknown"]` und `unknown_tables: ["<name>", …]` (beide Felder fehlen
+  sonst).
+- `--exclude-plugin` und `--table` wirken unabhängig: Das eine lässt die Dateien eines Plugins
+  weg und deaktiviert es lokal, das andere stuft eine Tabelle herab. Ein ausgeschlossenes Plugin
+  nimmt seine Tabellen nicht mit heraus – wer sie nicht will, nennt sie mit `--table`.
+
+Die Ablehnung gilt für den Schalter. Ein Override, der von Hand in der Profil-Datei steht
+(`tables.overrides`, siehe [Format](#format)), gilt weiter – auch für eine Kern-Tabelle; `pull
+--content` lehnt ein Profil, dem eine der sieben Inhaltstabellen mit Daten fehlt, dann mit
+Exit 2 ab.
 
 ### Format
 
@@ -1671,6 +1708,51 @@ auch im Container.
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`, mit
 `--content` zusätzlich `content`.
+
+`files` und `db_download` tragen zusätzlich Bytes, `db_download` auch die Tabelle. Die drei Felder
+fehlen in allen anderen Phasen; `name`, `done` und `total` bedeuten, was sie immer bedeutet haben:
+
+```json
+{"event":"phase","name":"files","done":120,"total":17210,"bytes_done":16777216,"bytes_total":734003200}
+{"event":"phase","name":"db_download","done":11,"total":12,"table":"wp_postmeta","bytes_done":1245708288,"bytes_total":2362232012}
+{"event":"phase","name":"db_download","done":12,"total":12,"table":"wp_postmeta","bytes_done":2362232012,"bytes_total":2362232012}
+```
+
+| Feld | `files` | `db_download` |
+|---|---|---|
+| `bytes_total` | Summe der Dateigrössen aus dem Delta – nur die Dateien, die dieser Pull lädt | Summe der Tabellengrössen, wie die Site sie schätzt (Daten + Indizes laut `SHOW TABLE STATUS`), über die Tabellen, die dieser Pull lädt; eine Tabelle, die nur als Struktur kommt, zählt 0 |
+| `bytes_done` | Grössen der Dateien in den abgeschlossenen Bundles (auch einer übersprungenen Datei) | dieselbe Schätzung: jede fertige Tabelle mit ihrer ganzen Grösse, die Tabelle in Arbeit mit ihrem Anteil |
+| `table` | – | die Tabelle, die gerade fertig wurde (`done` ist um eins gestiegen) oder, zwischen zwei Chunks, die in Arbeit ist (`done` unverändert) |
+
+In beiden Phasen gilt: `bytes_done` fällt nie, liegt nie über `bytes_total` und ist im letzten
+Ereignis der Phase gleich `bytes_total` – `bytes_done / bytes_total` taugt direkt als
+Fortschrittsbalken. `bytes_total` kann 0 sein (nur Struktur-Tabellen, oder keine Datei zu
+laden); die Felder kommen dann als `0`/`0`.
+
+- **`db_download` zählt geschätzte Bytes laut Site, nicht gemessene Übertragung.** Was über die
+  Leitung geht, ist anders gross (Indizes reisen nicht mit, abgewählte Post-Typen fehlen, SQL-Text
+  ist kein Speicherformat); die gemessene Menge steht am Ende in `data.bytes_in`.
+- **Grosse Tabellen** kommen in Chunks; jeder Chunk kann ein Ereignis auslösen, bei dem nur
+  `bytes_done` wächst: um die Grösse der Tabelle mal den Anteil der empfangenen an den von der
+  Site geschätzten Zeilen (ohne Zeilenschätzung: empfangene Bytes gegen die Grösse). Der Anteil
+  ist **auf 99 % begrenzt** – auch die Zeilenzahl ist eine Schätzung, und die 100 % einer Tabelle
+  kommen erst mit ihrem Abschluss. Liefert die Site mehr Zeilen als geschätzt, bleibt die Anzeige
+  bis dahin bei 99 % der Tabelle stehen; liefert sie weniger, springt sie mit dem Abschluss.
+- Höchstens etwa ein solches Zwischen-Ereignis pro Sekunde; das Ereignis zum Abschluss einer
+  Tabelle kommt immer, das letzte der Phase also auch. Kleine Tabellen reisen gebündelt und
+  melden sich nur beim Abschluss.
+- **Fortsetzen nach einem Abbruch** (Exit 30): Tabellen, die der abgebrochene Lauf schon fertig
+  im Cache abgelegt hat, zählen in **beiden** Feldern mit ihrer Schätzung und melden sich gleich
+  zu Beginn der Phase als fertig. Eine halb geladene Tabelle beginnt neu, bei 0. Tabellen und
+  Dateien, die ein Folge-Pull gar nicht neu lädt (unverändert), zählen in **keinem** der beiden
+  Felder und auch nicht in `total`; lädt er keine Tabelle, gibt es kein `db_download`-Ereignis.
+- Die Datei-Phase meldet sich wie bisher je Bundle (16 MB); innerhalb einer einzelnen grossen
+  Datei gibt es kein Zwischen-Ereignis.
+
+Das Ergebnis von `scan --json` (`data`) enthält `site`, `agent_version`,
+`required_agent_version`, `agent_ok`, `infosheet`, `profile` und `requests`; dazu `warnings` und
+`unknown_tables`, wenn `--table` eine Tabelle nennt, die das Infosheet nicht führt
+(`table_unknown`, siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage)).
 
 Das Ergebnis von `pull --json` (`data`) enthält `warnings`, sobald etwas ohne Abbruch scheiterte;
 fehlt das Feld, gab es keine. Werte:

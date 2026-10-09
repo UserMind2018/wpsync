@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -18,6 +20,66 @@ type Adjust struct {
 	UploadsSince     string
 	// AllUploads pulls every upload year (--uploads-since alle); needed without uploads proxy.
 	AllUploads bool
+	// Tables are overrides of single tables (--table <name>=structure|skip), see ParseTables.
+	Tables map[string]string
+}
+
+// ErrEssentialTable: --table names a table that is always pulled with data.
+var ErrEssentialTable = errors.New("--table: Kern-Tabelle kommt immer mit Daten und lässt sich nicht herabstufen")
+
+// ParseTables reads the values of --table: <name>=structure|skip, the full table name with its
+// prefix. Naming a table twice is fine as long as the mode is the same. nil without values.
+func ParseTables(specs []string) (map[string]string, error) {
+	var out map[string]string
+	for _, spec := range specs {
+		name, mode, ok := strings.Cut(spec, "=")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--table erwartet <tabelle>=structure|skip, nicht %q", spec)
+		}
+		if mode != profile.ModeStructure && mode != profile.ModeSkip {
+			return nil, fmt.Errorf("--table %s: Modus %q unbekannt – structure oder skip", name, mode)
+		}
+		if prev, seen := out[name]; seen && prev != mode {
+			return nil, fmt.Errorf("--table %s zweimal mit verschiedenen Modi (%s, %s)", name, prev, mode)
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = mode
+	}
+	return out, nil
+}
+
+// check refuses an override of an essential table (the sheet says which ones are).
+func (a Adjust) check(sheet *agentapi.Infosheet) error {
+	var essential []string
+	for _, t := range sheet.Tables {
+		if _, ok := a.Tables[t.Name]; ok && t.Essential {
+			essential = append(essential, t.Name)
+		}
+	}
+	if len(essential) == 0 {
+		return nil
+	}
+	sort.Strings(essential)
+	return fmt.Errorf("%w: %s", ErrEssentialTable, strings.Join(essential, ", "))
+}
+
+// UnknownTables lists the tables of --table the sheet does not have (sorted). Their override is
+// stored all the same and takes effect once the infosheet lists the table.
+func (a Adjust) UnknownTables(sheet *agentapi.Infosheet) []string {
+	known := make(map[string]bool, len(sheet.Tables))
+	for _, t := range sheet.Tables {
+		known[t.Name] = true
+	}
+	var out []string
+	for name := range a.Tables {
+		if !known[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a Adjust) apply(p *profile.Profile) {
@@ -28,6 +90,12 @@ func (a Adjust) apply(p *profile.Profile) {
 	}
 	if a.AllUploads {
 		p.Uploads.Since = ""
+	}
+	for name, mode := range a.Tables {
+		if p.Tables.Overrides == nil {
+			p.Tables.Overrides = map[string]string{}
+		}
+		p.Tables.Overrides[name] = mode
 	}
 }
 
@@ -83,6 +151,9 @@ func Run(o Options) (*profile.Profile, error) {
 	var next *profile.Profile
 	switch {
 	case o.Preset != "":
+		if err = o.Adjust.check(sheet); err != nil {
+			return nil, err
+		}
 		if next, err = profile.New(sheet, o.Preset); err != nil {
 			return nil, err
 		}

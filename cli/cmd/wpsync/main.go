@@ -593,23 +593,35 @@ type scanResult struct {
 	Infosheet            *agentapi.Infosheet `json:"infosheet"`
 	Profile              *profile.Profile    `json:"profile"`
 	Requests             int                 `json:"requests"`
+	// Warnings name what the scan stored although it looks wrong; omitted when empty.
+	Warnings []string `json:"warnings,omitempty"`
+	// UnknownTables are the tables of --table the infosheet does not list (warning table_unknown).
+	UnknownTables []string `json:"unknown_tables,omitempty"`
 }
+
+// warningTableUnknown: --table names a table the infosheet does not list; the override is stored.
+const warningTableUnknown = "table_unknown"
 
 func (a *app) cmdScan(args []string) error {
 	fs := a.flags("scan")
 	refresh := fs.Bool("refresh", false, "Infosheet auf der Site neu erstellen")
 	preset := fs.String("preset", "", "ohne Rückfrage: ohne-transaktionen | nur-content | vollstaendig")
 	since := fs.String("uploads-since", "", "Uploads ab diesem Jahr ziehen, ältere per Proxy; alle = jedes Jahr ziehen (nur mit --preset)")
-	var plugins, postTypes listFlag
+	var plugins, postTypes, tableSpecs listFlag
 	fs.Var(&plugins, "exclude-plugin", "Plugin nicht ziehen, mehrfach möglich (nur mit --preset)")
 	fs.Var(&postTypes, "exclude-post-type", "Post-Typ nicht ziehen, mehrfach möglich (nur mit --preset)")
+	fs.Var(&tableSpecs, "table", "<tabelle>=structure|skip: Tabelle ohne Daten bzw. gar nicht ziehen, mehrfach möglich (nur mit --preset)")
 	secretStdin := secretStdinFlag(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync scan <site> [--refresh] [--preset p] [--json] [--secret-stdin]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync scan <site> [--refresh] [--preset p [--table t=structure|skip]] [--json] [--secret-stdin]")
 	if err != nil {
 		return err
 	}
-	if *preset == "" && (len(plugins) > 0 || len(postTypes) > 0 || *since != "") {
-		return cliout.Usage(errors.New("--exclude-plugin, --exclude-post-type und --uploads-since nur zusammen mit --preset"))
+	if *preset == "" && (len(plugins) > 0 || len(postTypes) > 0 || len(tableSpecs) > 0 || *since != "") {
+		return cliout.Usage(errors.New("--exclude-plugin, --exclude-post-type, --table und --uploads-since nur zusammen mit --preset"))
+	}
+	tables, err := scan.ParseTables(tableSpecs)
+	if err != nil {
+		return cliout.Usage(err)
 	}
 	allUploads := *since == "alle"
 	if allUploads {
@@ -631,15 +643,15 @@ func (a *app) cmdScan(args []string) error {
 		Now:     time.Now(),
 		Refresh: *refresh,
 		Preset:  *preset,
-		Adjust:  scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since, AllUploads: allUploads},
 		OnSheet: func(s *agentapi.Infosheet) { res.Infosheet = s },
 	}
+	opts.Adjust = scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since, AllUploads: allUploads, Tables: tables}
 	if *preset == "" && a.interactive() {
 		opts.Select = scan.Interactive
 	}
 	p, err := scan.Run(opts)
 	if err != nil {
-		if errors.Is(err, scan.ErrNeedsPreset) {
+		if errors.Is(err, scan.ErrNeedsPreset) || errors.Is(err, scan.ErrEssentialTable) {
 			return cliout.Usage(err)
 		}
 		return explain(err, site)
@@ -650,6 +662,11 @@ func (a *app) cmdScan(args []string) error {
 	}
 	if res.Infosheet != nil {
 		res.AgentVersion = res.Infosheet.Env.AgentVersion
+		if res.UnknownTables = opts.Adjust.UnknownTables(res.Infosheet); len(res.UnknownTables) > 0 {
+			res.Warnings = append(res.Warnings, warningTableUnknown)
+			fmt.Fprintf(a.stderr, "! --table: nicht im Infosheet der Site – Override gespeichert, wirkt erst, wenn der Scan die Tabelle nennt: %s\n",
+				strings.Join(res.UnknownTables, ", "))
+		}
 	}
 	res.AgentOK = agentapi.VersionAtLeast(res.AgentVersion, agentapi.MinAgentVersion)
 	res.Profile, res.Requests = p, client.Stats.Requests
@@ -714,7 +731,13 @@ func (a *app) cmdPull(args []string) error {
 		opts.Confirm = a.confirm
 	}
 	if a.json {
-		opts.Progress = a.jw.Phase
+		opts.Progress = func(p pull.Progress) {
+			if p.Bytes {
+				a.jw.PhaseBytes(p.Phase, p.Done, p.Total, p.Table, p.BytesDone, p.BytesTotal)
+				return
+			}
+			a.jw.Phase(p.Phase, p.Done, p.Total)
+		}
 	}
 	if *dryRun {
 		return a.status(opts, site, true)

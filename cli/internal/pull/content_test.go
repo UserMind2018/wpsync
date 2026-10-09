@@ -213,8 +213,8 @@ func TestRunContentBuildsReusesAndProtectsTheBaseline(t *testing.T) {
 	o := pullOptions(t, srv.URL, &contentDriver{fakeDriver: fake, runner: runner})
 	o.Content = true
 	var phases []string
-	o.Progress = func(phase string, done, total int) {
-		phases = append(phases, fmt.Sprintf("%s %d/%d", phase, done, total))
+	o.Progress = func(p Progress) {
+		phases = append(phases, fmt.Sprintf("%s %d/%d", p.Phase, p.Done, p.Total))
 	}
 	var res Result
 	o.Report = &res

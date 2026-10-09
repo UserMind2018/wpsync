@@ -17,22 +17,54 @@ func TestRunReportsPhasesAndResult(t *testing.T) {
 	defer srv.Close()
 	o := pullOptions(t, srv.URL, newFakeDriver(false))
 	var events []string
-	o.Progress = func(phase string, done, total int) {
-		events = append(events, fmt.Sprintf("%s %d/%d", phase, done, total))
-	}
+	o.Progress = func(p Progress) { events = append(events, progressLine(p)) }
 	var res Result
 	o.Report = &res
 
 	if err := Run(o); err != nil {
 		t.Fatal(err)
 	}
-	want := "delta 1/1,setup 1/1,files 0/1,files 1/1,db_download 1/1,db_import 1/1,postsetup 1/1,mailguard 1/1"
+	// W2: files and db_download carry bytes (10 = the file, 40 = the site's estimate of
+	// wp_options, whatever its SQL weighs); the other phases stay as they were.
+	want := "delta 1/1,setup 1/1,files 0/1 bytes 0/10,files 1/1 bytes 10/10,db_download 1/1 bytes 40/40 wp_options,db_import 1/1,postsetup 1/1,mailguard 1/1"
 	if got := strings.Join(events, ","); got != want {
 		t.Errorf("events = %s\nwant     %s", got, want)
 	}
 	if !res.FirstPull || res.FilesChanged != 1 || res.TablesLoaded != 1 || res.TablesTotal != 1 ||
 		res.LocalURL != "http://kunde.local" || res.AgentVersion != "0.3.1" || res.LocalAdminUser != LocalAdminUser || res.Requests == 0 {
 		t.Errorf("result = %+v", res)
+	}
+}
+
+// progressLine renders a phase event for comparisons: "<phase> <done>/<total>[ bytes <done>/<total>][ <table>]".
+func progressLine(p Progress) string {
+	line := fmt.Sprintf("%s %d/%d", p.Phase, p.Done, p.Total)
+	if p.Bytes {
+		line += fmt.Sprintf(" bytes %d/%d", p.BytesDone, p.BytesTotal)
+	}
+	if p.Table != "" {
+		line += " " + p.Table
+	}
+	return line
+}
+
+// W2: ein Folge-Pull ohne Änderung lädt nichts – die Datei-Phase meldet 0 von 0 Bytes, eine
+// db_download-Phase gibt es nicht (unveränderte Tabellen zählen in keinem der beiden Felder).
+func TestRunFollowUpPullReportsNoBytes(t *testing.T) {
+	srv := agentServer(t, nil)
+	defer srv.Close()
+	o := pullOptions(t, srv.URL, newFakeDriver(true))
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	o.Progress = func(p Progress) { events = append(events, progressLine(p)) }
+	if err := Run(o); err != nil {
+		t.Fatal(err)
+	}
+	want := "delta 1/1,setup 1/1,files 0/0 bytes 0/0,mailguard 1/1"
+	if got := strings.Join(events, ","); got != want {
+		t.Errorf("events = %s\nwant     %s", got, want)
 	}
 }
 

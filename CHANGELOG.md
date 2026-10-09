@@ -87,6 +87,42 @@ Agent ≥ 0.9.0 wie bisher.
 - Stirbt `rescue.php` zwischen dem COMMIT seiner Rücknahme und dem Vermerk, kann ein persistenter
   Object-Cache `active_plugins` im gepushten Stand behalten
 
+### Tabellen-Overrides beim Scan
+
+**Nur die CLI ändert sich**, der Agent bleibt, wie er ist.
+
+**Neu**
+- `wpsync scan <site> --preset <p> --table <tabelle>=structure|skip` (mehrfach): stuft einzelne
+  Tabellen herab, ohne die Profil-Datei von Hand zu bearbeiten – `scan --preset` baut das Profil
+  jedes Mal neu und verwarf gespeicherte `tables.overrides`. Voller Tabellenname mit Präfix; nur
+  zusammen mit `--preset`
+- Exit 2, nichts gespeichert: kein `=`, leerer Name, anderer Modus als `structure`/`skip`, dieselbe
+  Tabelle mit zwei verschiedenen Modi, eine Kern-Tabelle
+- Eine Tabelle, die das Infosheet nicht nennt, wird gespeichert und gemeldet: Zeile auf stderr, mit
+  `--json` `data.warnings: ["table_unknown"]` und `data.unknown_tables`
+
+**Unverändert**
+- Ein Override, der von Hand in der Profil-Datei steht, gilt wie bisher auch für eine Kern-Tabelle;
+  nur der Schalter lehnt sie ab
+
+### Byte-Fortschritt im `phase`-Ereignis
+
+**Nur die CLI ändert sich.** Ohne `--json` bleibt die Ausgabe, wie sie ist.
+
+**Neu**
+- `pull --json`: die Phasen `files` und `db_download` tragen `bytes_done` und `bytes_total`,
+  `db_download` dazu `table`. `name`, `done` und `total` sind unverändert; in den anderen Phasen
+  fehlen die neuen Felder
+- Eine Tabelle, die in Chunks kommt, meldet sich je Chunk (höchstens etwa einmal pro Sekunde) mit
+  wachsendem `bytes_done` bei gleichem `done` – die Anzeige steht nicht mehr, während die letzte
+  grosse Tabelle lädt. Der Abschluss jeder Tabelle wird immer gemeldet
+- Beide Felder von `db_download` zählen **geschätzte Bytes laut Site** (Daten + Indizes), nicht die
+  gemessene Übertragung: eine fertige Tabelle mit ihrer ganzen Grösse, die Tabelle in Arbeit mit
+  dem Anteil der empfangenen an den geschätzten Zeilen, bis zu ihrem Abschluss höchstens 99 %.
+  `bytes_done` fällt nie, liegt nie über `bytes_total` und ist am Ende der Phase gleich
+  `bytes_total`. Nach einem Abbruch zählen schon geladene Tabellen in beiden Feldern, unveränderte
+  Tabellen eines Folge-Pulls in keinem
+
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld
