@@ -45,7 +45,9 @@ type Options struct {
 	// Ctx ends the pull resumably (SIGTERM in the server mode); nil = never.
 	Ctx context.Context
 	// Progress reports phase progress for pull --json; nil = none.
-	Progress func(phase string, done, total int)
+	Progress func(Progress)
+	// Now is the clock that limits the progress reports within a table; nil = time.Now.
+	Now func() time.Time
 	// Report receives the summary of a successful pull; nil = not needed.
 	Report *Result
 }
@@ -92,9 +94,27 @@ const (
 	WarningSymlinkSkipped = "symlink_skipped"
 )
 
+// Progress is one progress report of a phase.
+type Progress struct {
+	Phase       string
+	Done, Total int
+	// Table: db_download only – the table that just finished or is being loaded.
+	Table string
+	// Bytes: BytesDone and BytesTotal are known (files, db_download) – also when both are 0.
+	Bytes                 bool
+	BytesDone, BytesTotal int64
+}
+
 func (o *Options) progress(phase string, done, total int) {
 	if o.Progress != nil {
-		o.Progress(phase, done, total)
+		o.Progress(Progress{Phase: phase, Done: done, Total: total})
+	}
+}
+
+// progressBytes reports a phase that knows its bytes.
+func (o *Options) progressBytes(phase string, done, total int, table string, bytesDone, bytesTotal int64) {
+	if o.Progress != nil {
+		o.Progress(Progress{Phase: phase, Done: done, Total: total, Table: table, Bytes: true, BytesDone: bytesDone, BytesTotal: bytesTotal})
 	}
 }
 
@@ -384,8 +404,10 @@ func run(o Options) error {
 	changed, deleted := DiffFiles(delta.Files, base, present)
 	deleted = inScope(deleted, p.scope)
 	fmt.Fprintf(o.Out, "Dateien: %d neu/geändert, %d gelöscht\n", len(changed), len(deleted))
-	o.progress(PhaseFiles, 0, len(changed))
-	fileProgress := func(done, total int) { o.progress(PhaseFiles, done, total) }
+	o.progressBytes(PhaseFiles, 0, len(changed), "", 0, fileBytes(changed))
+	fileProgress := func(done, total int, bytesDone, bytesTotal int64) {
+		o.progressBytes(PhaseFiles, done, total, "", bytesDone, bytesTotal)
+	}
 	var warnings []string
 	skipped, err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out, fileProgress)
 	if err != nil {
@@ -414,8 +436,10 @@ func run(o Options) error {
 			return err
 		}
 		defer dir.Close()
-		opts := DBOptions{RowsPerChunk: o.RowsPerChunk, BundleBytes: o.DBBundleBytes, Scope: p.scope,
-			Progress: func(done, total int) { o.progress(PhaseDBDownload, done, total) }}
+		opts := DBOptions{RowsPerChunk: o.RowsPerChunk, BundleBytes: o.DBBundleBytes, Scope: p.scope, Now: o.Now,
+			Progress: func(p DBProgress) {
+				o.progressBytes(PhaseDBDownload, p.Done, p.Total, p.Table, p.BytesDone, p.BytesTotal)
+			}}
 		if err := downloadTables(client, dir, tables, opts); err != nil {
 			return err
 		}

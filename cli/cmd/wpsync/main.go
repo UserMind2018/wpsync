@@ -731,7 +731,13 @@ func (a *app) cmdPull(args []string) error {
 		opts.Confirm = a.confirm
 	}
 	if a.json {
-		opts.Progress = a.jw.Phase
+		opts.Progress = func(p pull.Progress) {
+			if p.Bytes {
+				a.jw.PhaseBytes(p.Phase, p.Done, p.Total, p.Table, p.BytesDone, p.BytesTotal)
+				return
+			}
+			a.jw.Phase(p.Phase, p.Done, p.Total)
+		}
 	}
 	if *dryRun {
 		return a.status(opts, site, true)

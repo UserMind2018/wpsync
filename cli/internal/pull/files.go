@@ -14,10 +14,11 @@ import (
 )
 
 // DownloadFiles fetches files in bundles of at most bundleBytes and writes them below docroot.
-// progress (may be nil) gets the number of finished files after every bundle. A file below a
+// progress (may be nil) gets the number of finished files after every bundle and their bytes: the
+// sizes the delta names, also for a file that was skipped. A file below a
 // symlinked folder is skipped, reported on out and returned in skipped (Nach-Review N-c): nothing
 // is written through the link, and the pull of everything else goes on.
-func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer, progress func(done, total int)) (skipped []string, err error) {
+func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bundleBytes int64, out io.Writer, progress func(done, total int, bytesDone, bytesTotal int64)) (skipped []string, err error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -30,7 +31,7 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 		return nil, err
 	}
 	defer root.Close()
-	done := 0
+	done, bytesDone, bytesTotal := 0, int64(0), fileBytes(files)
 	for _, group := range bundles(files, bundleBytes) {
 		paths := make([]string, len(group))
 		for i, f := range group {
@@ -51,12 +52,22 @@ func DownloadFiles(c *agentapi.Client, docroot string, files []agentapi.File, bu
 			return skipped, fmt.Errorf("bundle with %d files (first: %s): %w", len(paths), paths[0], err)
 		}
 		done += len(group)
+		bytesDone += fileBytes(group)
 		fmt.Fprintf(out, "  Dateien %d/%d\n", done, len(files))
 		if progress != nil {
-			progress(done, len(files))
+			progress(done, len(files), bytesDone, bytesTotal)
 		}
 	}
 	return skipped, nil
+}
+
+// fileBytes sums the sizes the delta names for files.
+func fileBytes(files []agentapi.File) int64 {
+	var n int64
+	for _, f := range files {
+		n += f.Size
+	}
+	return n
 }
 
 // bundles groups files so a bundle stays below limit (a single larger file gets its own bundle).

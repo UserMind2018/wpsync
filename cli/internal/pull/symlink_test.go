@@ -136,7 +136,7 @@ func TestTablesCacheRefusesSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := storeTable(root, agentapi.Table{Name: "wp_users"}, strings.NewReader("X;")); err != nil {
+	if _, err := storeTable(root, agentapi.Table{Name: "wp_users"}, strings.NewReader("X;")); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(secret); string(b) != "SECRET" {

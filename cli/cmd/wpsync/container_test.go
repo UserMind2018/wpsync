@@ -35,6 +35,18 @@ func TestPullJSONContainerFirstAndFollowUp(t *testing.T) {
 			phases = append(phases, l["name"].(string))
 		}
 	}
+	// W2: files and db_download carry bytes, db_download names the table; nothing else changes.
+	for _, want := range []string{
+		`{"event":"phase","name":"delta","done":1,"total":1}`,
+		`{"event":"phase","name":"files","done":0,"total":1,"bytes_done":0,"bytes_total":10}`,
+		`{"event":"phase","name":"files","done":1,"total":1,"bytes_done":10,"bytes_total":10}`,
+		`{"event":"phase","name":"db_download","done":1,"total":1,"table":"wp_options","bytes_done":34,"bytes_total":40}`,
+		`{"event":"phase","name":"db_import","done":1,"total":1}`,
+	} {
+		if !strings.Contains(r.stdout, want+"\n") {
+			t.Errorf("missing line %s in\n%s", want, r.stdout)
+		}
+	}
 	if got := strings.Join(phases, ","); got != "delta,setup,files,files,db_download,db_import,postsetup,mailguard" {
 		t.Errorf("phases = %s", got)
 	}

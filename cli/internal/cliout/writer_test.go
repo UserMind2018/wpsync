@@ -68,3 +68,27 @@ func TestWriterEvent(t *testing.T) {
 		t.Errorf("events = %q", got)
 	}
 }
+
+// W2: Byte-Fortschritt – die alten Felder bleiben, wie sie sind; die neuen stehen nur da, wenn
+// die Phase sie kennt, dann aber auch mit 0.
+func TestPhaseBytesLine(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.PhaseBytes("db_download", 3, 12, "wp_postmeta", 1048576, 2362232012)
+	w.PhaseBytes("files", 0, 17210, "", 0, 734003200)
+	w.Phase("db_import", 1, 1)
+	got := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	want := []string{
+		`{"event":"phase","name":"db_download","done":3,"total":12,"table":"wp_postmeta","bytes_done":1048576,"bytes_total":2362232012}`,
+		`{"event":"phase","name":"files","done":0,"total":17210,"bytes_done":0,"bytes_total":734003200}`,
+		`{"event":"phase","name":"db_import","done":1,"total":1}`,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("lines = %q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %s\nwant     %s", i, got[i], want[i])
+		}
+	}
+}

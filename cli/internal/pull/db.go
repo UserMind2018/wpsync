@@ -20,8 +20,75 @@ type DBOptions struct {
 	RowsPerChunk int
 	BundleBytes  int64
 	Scope        agentapi.Scope
-	// Progress (may be nil) gets the number of finished tables, already downloaded ones included.
-	Progress func(done, total int)
+	// Progress (may be nil) reports every finished table – already downloaded ones included – and,
+	// at most once per progressInterval, the chunks of a large table in between.
+	Progress func(DBProgress)
+	// Now is the clock of that limit; nil = time.Now.
+	Now func() time.Time
+}
+
+// DBProgress is one progress report of the DB download.
+type DBProgress struct {
+	// Done counts finished tables out of Total; it stays the same while a table arrives in chunks.
+	Done, Total int
+	// Table is the table that just finished or, between two chunks, the one being loaded.
+	Table string
+	// BytesDone is the SQL that lies in the cache for the tables of this run: what was received
+	// plus the files of tables a previous, interrupted run had finished. BytesTotal is the sum
+	// of the site's size estimates (transferBytes). The two measure different things and need
+	// not meet; BytesDone is not capped at BytesTotal.
+	BytesDone, BytesTotal int64
+}
+
+// progressInterval is the least time between two reports that do not finish a table.
+const progressInterval = time.Second
+
+// dbProgress counts tables and bytes of one DB download and reports them.
+type dbProgress struct {
+	report func(DBProgress)
+	now    func() time.Time
+	last   time.Time // time of the last report; zero before the first
+	state  DBProgress
+}
+
+func newDBProgress(tables []agentapi.Table, o DBOptions) *dbProgress {
+	p := &dbProgress{report: o.Progress, now: o.Now, state: DBProgress{Total: len(tables)}}
+	if p.now == nil {
+		p.now = time.Now
+	}
+	for _, t := range tables {
+		p.state.BytesTotal += transferBytes(t)
+	}
+	return p
+}
+
+// add counts received bytes without reporting.
+func (p *dbProgress) add(n int64) { p.state.BytesDone += n }
+
+// chunk reports the table being loaded, unless the last report is less than progressInterval ago.
+func (p *dbProgress) chunk(table string) {
+	if p.report == nil {
+		return
+	}
+	now := p.now()
+	if !p.last.IsZero() && now.Sub(p.last) < progressInterval {
+		return
+	}
+	p.emit(table, now)
+}
+
+// finished counts table as done and always reports it.
+func (p *dbProgress) finished(table string) {
+	p.state.Done++
+	if p.report != nil {
+		p.emit(table, p.now())
+	}
+}
+
+func (p *dbProgress) emit(table string, now time.Time) {
+	p.last = now
+	p.state.Table = table
+	p.report(p.state)
 }
 
 const (
@@ -70,18 +137,13 @@ func downloadTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o
 	if err := checkTableFiles(tables); err != nil {
 		return err
 	}
-	done := 0
-	tick := func() {
-		done++
-		if o.Progress != nil {
-			o.Progress(done, len(tables))
-		}
-	}
+	progress := newDBProgress(tables, o)
 	var small, large []agentapi.Table
 	for _, t := range tables {
 		switch {
 		case markerMatches(dir, t):
-			tick()
+			progress.add(storedBytes(dir, t))
+			progress.finished(t.Name)
 		case t.Mode == profile.ModeStructure || (t.Rows <= int64(o.RowsPerChunk) && t.Bytes <= o.BundleBytes):
 			small = append(small, t)
 		default:
@@ -89,17 +151,42 @@ func downloadTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o
 		}
 	}
 	for _, group := range tableGroups(small, o.BundleBytes) {
-		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope, tick); err != nil {
+		if err := fetchBundles(c, dir, group, o.RowsPerChunk, o.Scope, progress); err != nil {
 			return err
 		}
 	}
 	for _, t := range large {
-		if err := fetchChunks(c, dir, t, o.RowsPerChunk, o.Scope); err != nil {
+		if err := fetchChunks(c, dir, t, o.RowsPerChunk, o.Scope, progress); err != nil {
 			return err
 		}
-		tick()
+		progress.finished(t.Name)
 	}
 	return nil
+}
+
+// storedBytes is the size of a table file a previous run left in the cache (0 if unreadable).
+func storedBytes(dir *os.Root, t agentapi.Table) int64 {
+	name, err := tableFile(t.Name, sqlSuffix)
+	if err != nil {
+		return 0
+	}
+	info, err := safefs.Lstat(dir, name)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
+}
+
+// countingWriter counts what passes through to w.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n += int64(n)
+	return n, err
 }
 
 func tableGroups(tables []agentapi.Table, maxBytes int64) [][]agentapi.Table {
@@ -128,7 +215,7 @@ func transferBytes(t agentapi.Table) int64 {
 	return t.Bytes
 }
 
-func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limit int, scope agentapi.Scope, tick func()) error {
+func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limit int, scope agentapi.Scope, progress *dbProgress) error {
 	byName := map[string]agentapi.Table{}
 	remaining := make([]string, 0, len(group))
 	for _, t := range group {
@@ -141,10 +228,12 @@ func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limi
 			if !ok {
 				return fmt.Errorf("unexpected table %s", name)
 			}
-			if err := storeTable(dir, t, sql); err != nil {
+			n, err := storeTable(dir, t, sql)
+			progress.add(n)
+			if err != nil {
 				return err
 			}
-			tick()
+			progress.finished(name)
 			return nil
 		})
 		if err != nil {
@@ -168,7 +257,7 @@ func fetchBundles(c *agentapi.Client, dir *os.Root, group []agentapi.Table, limi
 	return nil
 }
 
-func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, scope agentapi.Scope) error {
+func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, scope agentapi.Scope, progress *dbProgress) error {
 	part, err := tableFile(t.Name, partSuffix)
 	if err != nil {
 		return err
@@ -183,14 +272,17 @@ func fetchChunks(c *agentapi.Client, dir *os.Root, t agentapi.Table, limit int, 
 	}
 	req := agentapi.ChunkRequest{Table: t.Name, Limit: limit, Scope: scope}
 	for {
-		res, err := c.DBChunk(req, f)
+		into := &countingWriter{w: f}
+		res, err := c.DBChunk(req, into)
+		progress.add(into.n)
 		if err != nil {
 			f.Close()
 			return err
 		}
 		if res.Rows < limit {
-			break
+			break // the caller reports the finished table
 		}
+		progress.chunk(t.Name)
 		if res.Mode == "keyset" {
 			if res.Next == nil {
 				f.Close()
@@ -218,28 +310,29 @@ func createFresh(dir *os.Root, name string) (*os.File, error) {
 	return dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 }
 
-func storeTable(dir *os.Root, t agentapi.Table, sql io.Reader) error {
+// storeTable writes one table of a bundle and returns the bytes it received.
+func storeTable(dir *os.Root, t agentapi.Table, sql io.Reader) (int64, error) {
 	tmp, err := tableFile(t.Name, partSuffix)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	final, err := tableFile(t.Name, sqlSuffix)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	f, err := createFresh(dir, tmp)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, copyErr := io.Copy(f, sql)
+	n, copyErr := io.Copy(f, sql)
 	if err := f.Close(); err != nil || copyErr != nil {
 		dir.Remove(tmp)
-		return errors.Join(err, copyErr)
+		return n, errors.Join(err, copyErr)
 	}
 	if err := dir.Rename(tmp, final); err != nil {
-		return err
+		return n, err
 	}
-	return writeMarker(dir, t)
+	return n, writeMarker(dir, t)
 }
 
 // markerValue ties a downloaded table file to the mode and checksum it was fetched with.

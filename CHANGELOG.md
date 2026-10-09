@@ -106,6 +106,21 @@ Agent ≥ 0.9.0 wie bisher.
   herabstufen – etwa aus einer von Hand bearbeiteten Profil-Datei. Für Kern-Tabellen wird ein
   Override jetzt ignoriert, sie kommen immer mit Daten
 
+### Byte-Fortschritt im `phase`-Ereignis
+
+**Nur die CLI ändert sich.** Ohne `--json` bleibt die Ausgabe, wie sie ist.
+
+**Neu**
+- `pull --json`: die Phasen `files` und `db_download` tragen `bytes_done` und `bytes_total`,
+  `db_download` dazu `table`. `name`, `done` und `total` sind unverändert; in den anderen Phasen
+  fehlen die neuen Felder
+- Eine Tabelle, die in Chunks kommt, meldet sich je Chunk (höchstens etwa einmal pro Sekunde) mit
+  wachsendem `bytes_done` bei gleichem `done` – die Anzeige steht nicht mehr, während die letzte
+  grosse Tabelle lädt. Der Abschluss jeder Tabelle wird immer gemeldet
+- `bytes_total` von `db_download` ist die Schätzung der Site, `bytes_done` das empfangene SQL;
+  `bytes_done` wird nicht auf `bytes_total` begrenzt. Nach einem Abbruch zählen schon geladene
+  Tabellen in beiden Feldern, unveränderte Tabellen eines Folge-Pulls in keinem
+
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld

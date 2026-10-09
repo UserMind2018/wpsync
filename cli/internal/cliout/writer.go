@@ -19,12 +19,16 @@ func NewWriter(w io.Writer) *Writer {
 	return &Writer{enc: enc}
 }
 
-// PhaseEvent is a progress line of pull --json.
+// PhaseEvent is a progress line of pull --json. Table, BytesDone and BytesTotal are only there for
+// phases that know them (PhaseBytes); the two byte fields always come together, also with 0.
 type PhaseEvent struct {
-	Event string `json:"event"`
-	Name  string `json:"name"`
-	Done  int    `json:"done"`
-	Total int    `json:"total"`
+	Event      string `json:"event"`
+	Name       string `json:"name"`
+	Done       int    `json:"done"`
+	Total      int    `json:"total"`
+	Table      string `json:"table,omitempty"`
+	BytesDone  *int64 `json:"bytes_done,omitempty"`
+	BytesTotal *int64 `json:"bytes_total,omitempty"`
 }
 
 // ResultEvent is the last line of every --json command.
@@ -40,6 +44,11 @@ type ResultEvent struct {
 // Phase writes {"event":"phase",…}.
 func (w *Writer) Phase(name string, done, total int) {
 	w.write(PhaseEvent{Event: "phase", Name: name, Done: done, Total: total})
+}
+
+// PhaseBytes writes a phase line with byte progress; table may be empty (omitted then).
+func (w *Writer) PhaseBytes(name string, done, total int, table string, bytesDone, bytesTotal int64) {
+	w.write(PhaseEvent{Event: "phase", Name: name, Done: done, Total: total, Table: table, BytesDone: &bytesDone, BytesTotal: &bytesTotal})
 }
 
 // Result writes {"event":"result",…} and returns the exit code for err. Data is written even on

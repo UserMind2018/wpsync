@@ -1707,6 +1707,41 @@ auch im Container.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`, mit
 `--content` zusätzlich `content`.
 
+`files` und `db_download` tragen zusätzlich Bytes, `db_download` auch die Tabelle. Die drei Felder
+fehlen in allen anderen Phasen; `name`, `done` und `total` bedeuten, was sie immer bedeutet haben:
+
+```json
+{"event":"phase","name":"files","done":120,"total":17210,"bytes_done":16777216,"bytes_total":734003200}
+{"event":"phase","name":"db_download","done":11,"total":12,"table":"wp_postmeta","bytes_done":96468992,"bytes_total":2362232012}
+{"event":"phase","name":"db_download","done":12,"total":12,"table":"wp_postmeta","bytes_done":1610612736,"bytes_total":2362232012}
+```
+
+| Feld | `files` | `db_download` |
+|---|---|---|
+| `bytes_total` | Summe der Dateigrössen aus dem Delta – nur die Dateien, die dieser Pull lädt | Summe der Tabellengrössen, wie die Site sie schätzt (Daten + Indizes laut `SHOW TABLE STATUS`), über die Tabellen, die dieser Pull lädt; eine Tabelle, die nur als Struktur kommt, zählt 0 |
+| `bytes_done` | Grössen der Dateien in den abgeschlossenen Bundles (auch einer übersprungenen Datei) – endet bei `bytes_total` | SQL-Bytes, die wirklich angekommen sind |
+| `table` | – | die Tabelle, die gerade fertig wurde (`done` ist um eins gestiegen) oder, zwischen zwei Chunks, die in Arbeit ist (`done` unverändert) |
+
+- **`bytes_done` und `bytes_total` von `db_download` messen Verschiedenes** – empfangenes SQL
+  gegen die Schätzung der Site – und treffen sich nicht: Indizes werden nicht übertragen,
+  abgewählte Post-Typen fehlen, SQL-Text ist anders gross als die Zeilen auf der Platte.
+  `bytes_done` wird **nicht** auf `bytes_total` begrenzt und kann darüber liegen oder am Ende
+  darunter bleiben. Für eine Anzeige: `min(bytes_done / bytes_total, 1)` zeigt Bewegung
+  innerhalb einer Tabelle; fertig ist die Phase bei `done == total`. `bytes_total` kann 0 sein
+  (nur Struktur-Tabellen, oder keine Datei zu laden).
+- **Grosse Tabellen** kommen in Chunks; jeder Chunk kann ein Ereignis auslösen, bei dem nur
+  `bytes_done` wächst. Höchstens etwa ein solches Zwischen-Ereignis pro Sekunde; das Ereignis zum
+  Abschluss einer Tabelle kommt immer, das letzte der Phase also auch. Kleine Tabellen reisen
+  gebündelt und melden sich nur beim Abschluss.
+- **Fortsetzen nach einem Abbruch** (Exit 30): Tabellen, die der abgebrochene Lauf schon fertig
+  im Cache abgelegt hat, zählen in **beiden** Feldern – in `bytes_total` mit ihrer Schätzung, in
+  `bytes_done` mit der Grösse ihrer Datei – und melden sich gleich zu Beginn der Phase als
+  fertig. Eine halb geladene Tabelle beginnt neu, ihre Bytes zählen nicht. Tabellen und Dateien,
+  die ein Folge-Pull gar nicht neu lädt (unverändert), zählen in **keinem** der beiden Felder
+  und auch nicht in `total`; lädt er keine Tabelle, gibt es kein `db_download`-Ereignis.
+- Die Datei-Phase meldet sich wie bisher je Bundle (16 MB); innerhalb einer einzelnen grossen
+  Datei gibt es kein Zwischen-Ereignis.
+
 Das Ergebnis von `scan --json` (`data`) enthält `site`, `agent_version`,
 `required_agent_version`, `agent_ok`, `infosheet`, `profile` und `requests`; dazu `warnings` und
 `unknown_tables`, wenn `--table` eine Tabelle nennt, die das Infosheet nicht führt
