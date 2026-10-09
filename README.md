@@ -545,10 +545,10 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   findet dann „nichts zu tun“ und stösst weder Nacharbeiten noch den Cache-Schritt an: Ein
   persistenter Object-Cache kann `active_plugins` noch im gepushten Stand halten – dann den Cache
   beim Hoster leeren (oder `wp cache flush`).
-- **Einträge mit ungewöhnlichen Pfaden.** Die CLI nennt Einträge nur in der Form
-  `[A-Za-z0-9._/ -]`. Hat ein abgeschaltetes Plugin eine Hauptdatei mit anderen Zeichen (Umlaute),
-  fehlt der Eintrag in `plugins_back`, `plugins_not_restored` und in `wpsync pushes` – geschaltet
-  wird er trotzdem, und die Einheit wird richtig gemeldet.
+- **Einträge mit ungewöhnlichen Pfaden.** Hat die Hauptdatei eines Plugins Zeichen ausserhalb
+  `[A-Za-z0-9._/ -]` (Klammern, Umlaute), nennt die CLI den Eintrag in der Ausgabe in
+  Anführungszeichen; in `--json` steht er unverändert. Zeigt eine Liste nicht alle Einträge (mehr
+  als 100), steht daneben `<liste>_total`.
 - Themes schaltet ein Push nicht; `mu-plugins` sind immer aktiv; Einzeldatei-Plugins (`hello.php`)
   und Multisite gehen nicht.
 
@@ -560,7 +560,9 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
 Push, solange er steht: `plugins: {"activated", "deactivated", "unchanged", "skipped"}` (Einheiten,
 immer alle vier Listen); `units` nennt den Plugin-Zustand nie – ein Satz nur aus `--deactivate` hat
 `"units": []`. Nach einer Rücknahme: `plugins_back: {"deactivated", "reactivated"}` (Einträge
-`<slug>/<datei>.php`), ggf. `plugins_not_restored: {"added", "removed"}`. Warnungen:
+`<slug>/<datei>.php`), ggf. `plugins_not_restored: {"added", "removed", "unknown"?}` –
+`unknown: true`, wenn der Commit nicht mehr vermerken konnte, was er geändert hat (leere Listen
+heissen dann „nicht bekannt“). Warnungen:
 `deactivation_review`, `requirements_unchecked`, `activation_hooks_skipped`,
 `deactivation_hooks_skipped`, `plugins_not_restored`. `error.reason` (Exit 1): `plugins_invalid`,
 `plugins_requirements`, `plugins_not_allowed`, `plugins_unsupported`, `plugins_failed` – mit

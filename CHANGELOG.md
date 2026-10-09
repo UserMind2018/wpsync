@@ -41,6 +41,9 @@ Agent ≥ 0.9.0 wie bisher.
   `requirements_unchecked`, `activation_hooks_skipped`, `deactivation_hooks_skipped`,
   `plugins_not_restored`; `error.reason` `plugins_invalid`, `plugins_requirements`,
   `plugins_not_allowed`, `plugins_unsupported`, `plugins_failed` mit `error.plugins`
+- Agent und CLI nennen jeden Eintrag, den ein Push schaltet – auch mit Klammern oder Umlauten im
+  Dateinamen (in der Ausgabe gequotet); gekappte Listen tragen `<liste>_total`, und
+  `plugins_not_restored.unknown: true` sagt, wenn die Site die Einträge des Pushs nicht kennt
 - Push-Protokoll (`wpsync pushes`) und Admin-Seite zeigen die Einheit `plugins` mit dem, was
   geschaltet wurde
 - Eine Ablehnung der Inhalte nennt im Fehlerobjekt der CLI jetzt auch `error.total`,
@@ -72,7 +75,6 @@ Agent ≥ 0.9.0 wie bisher.
   Deltas; ein von Hand hergestellter, bytegleicher Stand ist dann nicht vom Push zu unterscheiden
 - Stirbt `rescue.php` zwischen dem COMMIT seiner Rücknahme und dem Vermerk, kann ein persistenter
   Object-Cache `active_plugins` im gepushten Stand behalten
-- Die CLI nennt Einträge nur in der Form `[A-Za-z0-9._/ -]`
 
 ## [0.8.0] – 2026-10-09 · Agent 0.8.0
 

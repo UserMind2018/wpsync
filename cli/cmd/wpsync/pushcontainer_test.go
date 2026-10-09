@@ -476,7 +476,7 @@ func TestRollbackContainerNamesThePluginsBack(t *testing.T) {
 	f.rbBody = `{"ok":true,"status":"rolled_back","plugins":{"deactivated":["kunde/kunde.php","../x.php"],"reactivated":["alt/alt.php"]},"post_actions":[{"step":"plugins_cache","ok":true}]}`
 	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "rollback", "kunde", testPushID, "--json")...)
 	d := lastResult(t, res, "rollback", 0)["data"].(map[string]any)
-	if got, _ := json.Marshal(d["plugins_back"]); string(got) != `{"deactivated":["kunde/kunde.php"],"reactivated":["alt/alt.php"]}` {
+	if got, _ := json.Marshal(d["plugins_back"]); string(got) != `{"deactivated":["kunde/kunde.php"],"deactivated_total":2,"reactivated":["alt/alt.php"]}` {
 		t.Errorf("data.plugins_back = %s", got)
 	}
 	if _, has := d["plugins_not_restored"]; has || d["via"] != "agent" {

@@ -27,8 +27,6 @@ final class ContentPlugins
 
     /** Mehr liest parse() nicht: die Liste einer echten Site hat wenige Kilobyte. */
     private const MAX_BYTES = 1048576;
-    /** <slug>/<pfad>.php – der Slug wie eine Einheit, der Pfad ohne Steuerzeichen und Backslash. */
-    private const ENTRY = '#^[A-Za-z0-9][A-Za-z0-9._-]*/[^\x00-\x1f\x7f\\\\]{1,200}\.php\z#';
 
     /**
      * Hat ein Eintrag die Form, die ein Abbild nennen darf? Ein Plugin als einzelne Datei
@@ -38,15 +36,8 @@ final class ContentPlugins
      */
     public static function valid($entry): bool
     {
-        if (!is_string($entry) || strlen($entry) > 255 || preg_match('//u', $entry) !== 1 || preg_match(self::ENTRY, $entry) !== 1) {
-            return false;
-        }
-        foreach (explode('/', $entry) as $segment) {
-            if ($segment === '' || $segment === '.' || $segment === '..') {
-                return false;
-            }
-        }
-        return true;
+        // Eine Regel für beide Seiten (Security-Review P4 S6): was hier gilt, darf rescue.php auch nennen.
+        return PushRescue::pluginEntry($entry);
     }
 
     /** Ordner eines Eintrags: alles vor dem ersten Schrägstrich. */

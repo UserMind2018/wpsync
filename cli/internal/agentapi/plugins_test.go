@@ -151,10 +151,10 @@ func TestRollbackNotesCarryThePlugins(t *testing.T) {
 		t.Fatal(err)
 	}
 	n = n.Clean()
-	if !reflect.DeepEqual(n.Plugins, &RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{"alt/alt.php"}}) {
+	if !reflect.DeepEqual(n.Plugins, &RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{"alt/alt.php"}, DeactivatedTotal: 2}) { // S6: was wegfällt, zählt
 		t.Errorf("plugins = %+v", n.Plugins)
 	}
-	if !reflect.DeepEqual(n.PluginsNotRestored, &PluginsKept{Added: []string{"kunde/kunde.php"}, Removed: []string{}}) {
+	if !reflect.DeepEqual(n.PluginsNotRestored, &PluginsKept{Added: []string{"kunde/kunde.php"}, Removed: []string{}, AddedTotal: 2}) {
 		t.Errorf("plugins_not_restored = %+v", n.PluginsNotRestored)
 	}
 	if !reflect.DeepEqual(n.Warnings, []string{"plugins_not_restored", "content_not_rolled_back"}) {
@@ -218,7 +218,40 @@ func TestPushListReadsThePluginUnit(t *testing.T) {
 	}
 	u := list[0].Units[0]
 	if !reflect.DeepEqual(u.Activated, []string{"kunde/kunde.php"}) || !reflect.DeepEqual(u.Deactivated, []string{"alt/alt.php"}) ||
-		!reflect.DeepEqual(u.Back, &RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{"alt/alt.php"}}) || u.Via != "rescue" {
+		!reflect.DeepEqual(u.Back, &RollbackPlugins{Deactivated: []string{"kunde/kunde.php"}, Reactivated: []string{"alt/alt.php"}, ReactivatedTotal: 2}) || u.Via != "rescue" {
 		t.Errorf("unit = %+v", u)
+	}
+}
+
+// Security-Review P4 S6: ein Eintrag, den der Agent schaltet, fällt in der CLI nicht still weg – auch mit
+// Klammern oder Umlaut nicht; gezählt wird, was eine Liste nicht zeigt; „unknown“ bleibt erhalten.
+func TestEntriesWithUnusualCharactersAreKeptAndCounted(t *testing.T) {
+	var n RollbackNotes
+	body := `{"ok":true,"status":"rolled_back",
+		"plugins":{"deactivated":["plg-x/mein(plugin).php","plg-y/größe+1.php","../x.php","hello.php","a/b\u0001.php"],"reactivated":["alt/alt.php"],"reactivated_total":140},
+		"plugins_not_restored":{"added":[],"removed":[],"unknown":true},"warnings":["content_not_rolled_back","plugins_not_restored"]}`
+	if err := json.Unmarshal([]byte(body), &n); err != nil {
+		t.Fatal(err)
+	}
+	n = n.Clean()
+	want := &RollbackPlugins{Deactivated: []string{"plg-x/mein(plugin).php", "plg-y/größe+1.php"}, Reactivated: []string{"alt/alt.php"}, DeactivatedTotal: 5, ReactivatedTotal: 140}
+	if !reflect.DeepEqual(n.Plugins, want) {
+		t.Errorf("plugins = %+v", n.Plugins)
+	}
+	if !reflect.DeepEqual(n.PluginsNotRestored, &PluginsKept{Added: []string{}, Removed: []string{}, Unknown: true}) {
+		t.Errorf("plugins_not_restored = %+v", n.PluginsNotRestored)
+	}
+	raw, _ := json.Marshal(n.Plugins)
+	if string(raw) != `{"deactivated":["plg-x/mein(plugin).php","plg-y/größe+1.php"],"reactivated":["alt/alt.php"],"deactivated_total":5,"reactivated_total":140}` {
+		t.Errorf("json = %s", raw)
+	}
+	// Ohne Abweichung kein Zähler; ein unsinniger Zähler der Site zählt nicht.
+	var plain RollbackNotes
+	json.Unmarshal([]byte(`{"plugins":{"deactivated":["a/a.php"],"reactivated":[],"deactivated_total":-3}}`), &plain)
+	if plain = plain.Clean(); plain.Plugins.DeactivatedTotal != 0 || plain.Plugins.ReactivatedTotal != 0 {
+		t.Errorf("plugins = %+v", plain.Plugins)
+	}
+	if PluginEntry("plg-x/mein(plugin).php") || !PluginEntry("a/sub dir/b.php") {
+		t.Error("PluginEntry is the narrow form that is shown unquoted")
 	}
 }

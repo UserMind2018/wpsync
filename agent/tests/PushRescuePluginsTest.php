@@ -383,4 +383,56 @@ final class PushRescuePluginsTest extends ContentRollbackPluginsCase
         $this->assertSame($later, $this->record()['superseded_by'], 'unverändert – und der zurückgerollte spätere sperrt nicht mehr');
         $this->assertSame(200, $this->rescue()[0]);
     }
+
+    /**
+     * Security-Review P4 S6: EINE Regel für Einträge – was der Agent schaltet, nennt er auch. Ein gültiger
+     * Eintrag mit Klammern, Umlaut oder Pluszeichen fällt nicht mehr still aus Antwort und Protokoll.
+     */
+    public function testAnEntryWithUnusualCharactersIsNamedToo(): void
+    {
+        $odd = ['plg-x/mein(plugin).php', 'plg-y/größe+1.php'];
+        foreach (array_merge($odd, ['a/a.php', 'a/sub dir/b.php']) as $entry) {
+            $this->assertSame(\WpSync\ContentPlugins::valid($entry), PushRescue::pluginEntry($entry), $entry);
+            $this->assertTrue(PushRescue::pluginEntry($entry), $entry);
+        }
+        foreach (['../x.php', 'a/../b.php', 'hello.php', "a/b\x01.php", 'a/b\\c.php', "a/\xff.php", 7, null] as $entry) {
+            $this->assertFalse(PushRescue::pluginEntry($entry));
+            $this->assertFalse(\WpSync\ContentPlugins::valid($entry));
+        }
+        $this->pushed($odd, []);
+        $body = $this->rescue()[1];
+        $this->assertSame(['deactivated' => $odd, 'reactivated' => []], $body['plugins']);
+        $this->assertSame($odd, $this->record()['content']['plugins_back']['deactivated']);
+    }
+
+    /** S6: was nicht in eine Antwort geht (keine Form, über 100), zählt – eine gekappte Liste sagt, wie viele es sind. */
+    public function testListsThatAreCutSayHowManyEntriesThereAre(): void
+    {
+        $many = [];
+        for ($i = 0; $i < 150; $i++) {
+            $many[] = 'evil/p' . $i . '.php';
+        }
+        $lists = PushRescue::pluginLists(['added' => ['ok/ok.php', '../x.php', 7], 'removed' => $many], ['added', 'removed']);
+        $this->assertSame(['ok/ok.php'], $lists['added']);
+        $this->assertSame(3, $lists['added_total']);
+        $this->assertCount(100, $lists['removed']);
+        $this->assertSame(150, $lists['removed_total']);
+        $this->assertSame(['added' => ['ok/ok.php'], 'removed' => []], PushRescue::pluginLists(['added' => ['ok/ok.php'], 'removed' => []], ['added', 'removed']), 'ohne Abweichung kein Zähler');
+    }
+
+    /**
+     * S6, zweiter Fall: PHP starb zwischen dem COMMIT und dem Vermerk „applied“ – rescue.json kennt die
+     * Einträge des Pushs nicht. Bleibt der DB-Anteil stehen, warnt die Antwort trotzdem und sagt, dass
+     * sie die Einträge nicht kennt, statt eine leere Liste als „nichts geändert“ auszugeben.
+     */
+    public function testAnUnacknowledgedCommitWarnsAlthoughTheListsAreEmpty(): void
+    {
+        $this->pushed(['kunde/kunde.php'], [], null, false);
+        $this->assertSame([200, [
+            'ok' => true, 'status' => 'rolled_back',
+            'plugins_not_restored' => ['added' => [], 'removed' => [], 'unknown' => true],
+            'warnings'             => ['content_not_rolled_back', 'plugins_not_restored'],
+        ]], $this->rescue(['content' => '0']));
+        $this->assertSame(['akismet/akismet.php', 'kunde/kunde.php', 'old/old.php'], $this->active(), 'die Liste trägt den Stand des Pushs');
+    }
 }

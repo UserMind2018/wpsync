@@ -865,3 +865,37 @@ func TestRunConfirmsAContentPushWhoseCacheStepFailed(t *testing.T) {
 		t.Errorf("routes = %s", got)
 	}
 }
+
+// Security-Review P4 S6: ein Eintrag mit ungewöhnlichen Zeichen steht in Ausgabe und Ergebnis – in der
+// Ausgabe gequotet –, und wo der Agent die Einträge nicht kennt, sagt die CLI das, statt nichts zu nennen.
+func TestRollbackNamesOddEntriesQuotedAndUnknownOnes(t *testing.T) {
+	f, o, _, out := pluginPushed(t)
+	f.rbBody = `{"ok":true,"plugins":{"deactivated":["plg-x/mein(plugin).php"],"reactivated":["alt/alt.php"],"reactivated_total":3}}`
+	var report Result
+	o.Report = &report
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if report.PluginsBack == nil || !reflect.DeepEqual(report.PluginsBack.Deactivated, []string{"plg-x/mein(plugin).php"}) || report.PluginsBack.ReactivatedTotal != 3 {
+		t.Errorf("report = %+v", report.PluginsBack)
+	}
+	for _, want := range []string{`wieder deaktiviert: "plg-x/mein(plugin).php"`, "wieder aktiviert: alt/alt.php (und 2 weitere)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+
+	f, o, _, out = pluginPushed(t)
+	f.rollback = 500
+	f.rescueBody = `{"ok":true,"status":"rolled_back","content":{"state":"kept","error":{"code":"rescue_db_unavailable"}},"plugins_not_restored":{"added":[],"removed":[],"unknown":true},"warnings":["content_not_rolled_back","plugins_not_restored"]}`
+	o.Report = &report
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if report.PluginsNotRestored == nil || !report.PluginsNotRestored.Unknown || !slices.Contains(report.Warnings, WarningPluginsNotRestored) {
+		t.Errorf("report = %+v", report)
+	}
+	if !strings.Contains(out.String(), "welche Einträge der Push geändert hat, ist auf der Site nicht vermerkt") {
+		t.Errorf("output:\n%s", out)
+	}
+}

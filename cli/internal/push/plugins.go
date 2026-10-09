@@ -446,29 +446,37 @@ func printSwitched(out io.Writer, a *agentapi.PluginsApplied) {
 	}
 }
 
-// printEntries prints one line of plugin entries; they are the agent's words.
-func printEntries(out io.Writer, label string, entries []string) {
-	if len(entries) == 0 {
+// printEntries prints one line of plugin entries; they are the agent's words. total is how many
+// there are when the list does not show all of them (0: it is complete).
+func printEntries(out io.Writer, label string, entries []string, total int) {
+	if len(entries) == 0 && total == 0 {
 		return
 	}
 	shown := make([]string, 0, len(entries))
 	for _, e := range entries {
 		shown = append(shown, showEntry(e))
 	}
-	fmt.Fprintf(out, "  %s: %s\n", label, strings.Join(shown, ", "))
+	line := strings.Join(shown, ", ")
+	if total > len(entries) {
+		line = strings.TrimSpace(fmt.Sprintf("%s (und %d weitere)", line, total-len(entries)))
+	}
+	fmt.Fprintf(out, "  %s: %s\n", label, line)
 }
 
 // printPluginsBack names what a rollback changed in the list of active plugins – or, when the
 // database part of the push stayed, what of the push still stands there (A18).
 func printPluginsBack(out io.Writer, notes agentapi.RollbackNotes) {
 	if p := notes.Plugins; p != nil {
-		printEntries(out, "wieder deaktiviert", p.Deactivated)
-		printEntries(out, "wieder aktiviert", p.Reactivated)
+		printEntries(out, "wieder deaktiviert", p.Deactivated, p.DeactivatedTotal)
+		printEntries(out, "wieder aktiviert", p.Reactivated, p.ReactivatedTotal)
 	}
 	if p := notes.PluginsNotRestored; p != nil {
 		fmt.Fprintln(out, "  ! Der Plugin-Zustand des Pushs steht noch auf der Site:")
-		printEntries(out, "  noch aktiv", p.Added)
-		printEntries(out, "  noch inaktiv", p.Removed)
+		printEntries(out, "  noch aktiv", p.Added, p.AddedTotal)
+		printEntries(out, "  noch inaktiv", p.Removed, p.RemovedTotal)
+		if p.Unknown {
+			fmt.Fprintln(out, "    welche Einträge der Push geändert hat, ist auf der Site nicht vermerkt – unter Plugins im WP-Admin nachsehen")
+		}
 	}
 }
 

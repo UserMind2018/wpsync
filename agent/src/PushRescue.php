@@ -65,8 +65,12 @@ final class PushRescue
      */
     public const PLUGINS_NOT_RESTORED = 'plugins_not_restored';
 
-    /** Eintrag <slug>/<pfad>.php, wie rescue.json ihn in einer Antwort nennen darf (pluginLists()). */
-    private const PLUGIN_ENTRY = '#^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/ -]{0,200}\.php\z#';
+    /**
+     * Eintrag von active_plugins: <slug>/<pfad>.php – der Slug wie eine Einheit, der Pfad ohne Steuerzeichen
+     * und Backslash. Die EINE Regel des Agents (pluginEntry()): ContentPlugins::valid() ist dieselbe, damit
+     * alles, was geschaltet wird, auch genannt werden kann (Security-Review P4 S6).
+     */
+    private const PLUGIN_ENTRY = '#^[A-Za-z0-9][A-Za-z0-9._-]*/[^\x00-\x1f\x7f\\\\]{1,200}\.php\z#';
 
     /** content.via in rescue.json: rescue.php hat den DB-Anteil abgeschlossen. */
     public const VIA_RESCUE = 'rescue';
@@ -714,6 +718,11 @@ final class PushRescue
             if (is_array($stored['plugins'] ?? null)) {
                 $warnings[]                   = self::PLUGINS_NOT_RESTORED;
                 $body['plugins_not_restored'] = self::pluginLists($stored['plugins'], ['added', 'removed']);
+                if (($stored['state'] ?? '') === self::CONTENT_PENDING) {
+                    // Der Commit hat „applied“ nie vermerkt: was er an der Liste geändert hat, steht hier nicht.
+                    // Leere Listen heissen dann „unbekannt“, nicht „nichts“ (Security-Review P4 S6).
+                    $body['plugins_not_restored']['unknown'] = true;
+                }
             }
         } elseif (is_array($stored) && $want) {
             $content = ['state' => ($result['state'] ?? '') === 'nothing' ? 'nothing' : self::CONTENT_DONE];
@@ -742,24 +751,53 @@ final class PushRescue
     /**
      * Listen von Plugin-Einträgen aus rescue.json für eine Antwort oder das Protokoll. Der Datensatz
      * ist nicht authentisiert (wer im Arbeitsordner schreiben kann, kann ihn ändern): hinaus geht nur,
-     * was die Form eines Eintrags hat, je höchstens 100 – und geschrieben wird nie daraus.
+     * was die Form eines Eintrags hat, je höchstens 100 – und geschrieben wird nie daraus. Weicht die Zahl
+     * der Einträge einer Liste von dem ab, was hinausgeht, steht sie als <liste>_total daneben.
      *
      * @param array<string, mixed> $raw
      * @param list<string>         $sides Namen der Listen
-     * @return array<string, list<string>>
+     * @return array<string, list<string>|int>
      */
     public static function pluginLists(array $raw, array $sides): array
     {
         $out = [];
         foreach ($sides as $side) {
+            $list       = is_array($raw[$side] ?? null) ? $raw[$side] : [];
             $out[$side] = [];
-            foreach (is_array($raw[$side] ?? null) ? $raw[$side] : [] as $entry) {
-                if (count($out[$side]) < 100 && is_string($entry) && strlen($entry) <= 255 && strpos($entry, '..') === false && preg_match(self::PLUGIN_ENTRY, $entry) === 1) {
+            foreach ($list as $entry) {
+                if (count($out[$side]) < 100 && self::pluginEntry($entry)) {
                     $out[$side][] = $entry;
                 }
             }
         }
+        // Was nicht hinausging (keine Form, über 100), zählt: eine Liste ist nie still unvollständig.
+        foreach ($sides as $side) {
+            $total = count(is_array($raw[$side] ?? null) ? $raw[$side] : []);
+            if ($total !== count($out[$side])) {
+                $out[$side . '_total'] = min($total, 1 << 20);
+            }
+        }
         return $out;
+    }
+
+    /**
+     * Hat ein Eintrag die Form, die der Agent schaltet und nennt? <slug>/<pfad>.php, höchstens 255 Bytes,
+     * gültiges UTF-8, kein leeres Segment, kein „.“ und kein „..“. Ohne eine weitere Klasse – diese hier
+     * ist geladen, bevor rescue.php einen Schlüssel geprüft hat.
+     *
+     * @param mixed $entry
+     */
+    public static function pluginEntry($entry): bool
+    {
+        if (!is_string($entry) || strlen($entry) > 255 || preg_match('//u', $entry) !== 1 || preg_match(self::PLUGIN_ENTRY, $entry) !== 1) {
+            return false;
+        }
+        foreach (explode('/', $entry) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

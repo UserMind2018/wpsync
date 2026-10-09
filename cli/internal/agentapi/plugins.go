@@ -3,6 +3,7 @@ package agentapi
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // MinAgentPlugins is the first agent that switches plugins with a push (Spec Content-Push P4, A19).
@@ -24,14 +25,18 @@ const (
 var (
 	pluginUnitRe  = regexp.MustCompile(`^plugins/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	pluginEntryRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/ -]{0,200}\.php$`)
+	// agentEntryRe is the agent's rule for an entry (PushRescue::pluginEntry): the path may carry any
+	// character but controls and the backslash.
+	agentEntryRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[^\x00-\x1f\x7f\\]{1,200}\.php$`)
 )
 
 // PluginUnit reports whether s names a plugin as a unit: "plugins/<slug>".
 func PluginUnit(s string) bool { return pluginUnitRe.MatchString(s) }
 
 // PluginEntry reports whether s has the form of an entry of active_plugins as the CLI takes it
-// from the site: "<slug>/<path>.php" of letters, digits, dot, underscore, hyphen, slash and blank,
-// without "..". Such an entry is safe to show as it is.
+// from the site and shows unquoted: "<slug>/<path>.php" of letters, digits, dot, underscore, hyphen,
+// slash and blank, without "..". The agent's own rule is wider (agentEntry); what only passes that
+// is kept as data and shown quoted.
 func PluginEntry(s string) bool {
 	return len(s) <= 255 && !strings.Contains(s, "..") && pluginEntryRe.MatchString(s)
 }
@@ -140,6 +145,10 @@ type PluginsApplied struct {
 type RollbackPlugins struct {
 	Deactivated []string `json:"deactivated"`
 	Reactivated []string `json:"reactivated"`
+	// DeactivatedTotal, ReactivatedTotal: how many entries there are, when a list does not show all of
+	// them (more than 100, or entries that are none); omitted when the list is complete.
+	DeactivatedTotal int `json:"deactivated_total,omitempty"`
+	ReactivatedTotal int `json:"reactivated_total,omitempty"`
 }
 
 // PluginsKept names the entries of a push that still stand because rescue.php left the database
@@ -147,6 +156,11 @@ type RollbackPlugins struct {
 type PluginsKept struct {
 	Added   []string `json:"added"`
 	Removed []string `json:"removed"`
+	// AddedTotal, RemovedTotal: as in RollbackPlugins. Unknown: the commit of the push never noted
+	// what it changed (it died right after the COMMIT) – empty lists then mean "not known", not "nothing".
+	AddedTotal   int  `json:"added_total,omitempty"`
+	RemovedTotal int  `json:"removed_total,omitempty"`
+	Unknown      bool `json:"unknown,omitempty"`
 }
 
 func cleanWord(s string) string {
@@ -172,15 +186,43 @@ func cleanLabel(p *string) *string {
 	return &s
 }
 
-// cleanEntries keeps entries of active_plugins in their form, at most 100; never nil.
+// agentEntry reports whether s is an entry of active_plugins as the agent switches and names it:
+// "<slug>/<path>.php", valid UTF-8, no empty segment, no "." and no "..". Such an entry is data for a
+// caller (JSON); for people it is shown as it is only in the narrow form of PluginEntry, quoted otherwise.
+func agentEntry(s string) bool {
+	if len(s) > 255 || !utf8.ValidString(s) || !agentEntryRe.MatchString(s) {
+		return false
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// cleanEntries keeps entries of active_plugins in the agent's form, at most 100; never nil.
 func cleanEntries(in []string) []string {
 	out := []string{}
 	for _, e := range in {
-		if len(out) < maxPluginEntries && PluginEntry(e) {
+		if len(out) < maxPluginEntries && agentEntry(e) {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// entriesTotal is how many entries a list has when that is more than it shows: the larger of what the
+// site says and what it sent; 0 when the list is complete. A list is never silently incomplete (S6).
+func entriesTotal(said, sent, shown int) int {
+	total := max(said, sent)
+	if total <= shown || total > 1<<20 {
+		if sent > shown {
+			return sent
+		}
+		return 0
+	}
+	return total
 }
 
 // cleanUnits keeps names of plugin units, at most 2×20; never nil.
@@ -294,12 +336,18 @@ func (p *RollbackPlugins) clean() *RollbackPlugins {
 	if p == nil {
 		return nil
 	}
-	return &RollbackPlugins{Deactivated: cleanEntries(p.Deactivated), Reactivated: cleanEntries(p.Reactivated)}
+	out := &RollbackPlugins{Deactivated: cleanEntries(p.Deactivated), Reactivated: cleanEntries(p.Reactivated)}
+	out.DeactivatedTotal = entriesTotal(p.DeactivatedTotal, len(p.Deactivated), len(out.Deactivated))
+	out.ReactivatedTotal = entriesTotal(p.ReactivatedTotal, len(p.Reactivated), len(out.Reactivated))
+	return out
 }
 
 func (p *PluginsKept) clean() *PluginsKept {
 	if p == nil {
 		return nil
 	}
-	return &PluginsKept{Added: cleanEntries(p.Added), Removed: cleanEntries(p.Removed)}
+	out := &PluginsKept{Added: cleanEntries(p.Added), Removed: cleanEntries(p.Removed), Unknown: p.Unknown}
+	out.AddedTotal = entriesTotal(p.AddedTotal, len(p.Added), len(out.Added))
+	out.RemovedTotal = entriesTotal(p.RemovedTotal, len(p.Removed), len(out.Removed))
+	return out
 }
