@@ -312,7 +312,14 @@ final class ContentCheck
                             $unsafe[] = ContentException::key($table, $key);
                             continue 2;
                         }
-                        $new = $this->target->origin->insert((string) $value);
+                        // Ein Fehler beim Einsetzen oder Normalisieren kostet diese Zeile, nicht die Prüfung
+                        // (wie ContentReader::normal()). Was der Fehler war, bleibt hier.
+                        try {
+                            $new  = $this->target->origin->insert((string) $value);
+                            $back = $new === null ? null : $this->target->origin->normalize($new);
+                        } catch (\Throwable $e) {
+                            $new = null;
+                        }
                         if ($new === null) {
                             $unknown[] = ContentException::key($table, $key);
                             continue 2;
@@ -329,7 +336,7 @@ final class ContentCheck
                         // Was geschrieben würde, muss normalisiert wieder der Wert des Pakets sein – sonst hätte
                         // die Zeile auf dem Ziel einen anderen Abdruck als in der Arbeitskopie (etwa: die
                         // Adresse des Ziels steht wörtlich im Wert).
-                        if ($this->target->origin->normalize($new) !== (string) $value) {
+                        if ($back !== (string) $value) {
                             $unequal[] = ContentException::key($table, $key);
                             continue 2;
                         }

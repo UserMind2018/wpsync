@@ -446,4 +446,49 @@ final class ContentCheckTest extends TestCase
         $this->store->failRead = true;
         $this->refused('content_failed', [$this->updatePost()]);
     }
+
+    /**
+     * Scheitert das Einsetzen oder Normalisieren eines Werts mit einem Fehler statt mit null, ist
+     * das die Ablehnung genau dieser Zeile – wie beim Lesen (ContentReader), nie das Ende der Prüfung.
+     */
+    public function testAValueThatBreaksTheOriginIsThatRowsRefusal(): void
+    {
+        foreach (['insert', 'normalize'] as $failing) {
+            $target         = ContentFixtures::live($this->store);
+            $target->origin = new class ($target->origin, $failing) {
+                /** @var \WpSync\ContentOrigin */
+                private $inner;
+                /** @var string */
+                private $failing;
+
+                public function __construct(\WpSync\ContentOrigin $inner, string $failing)
+                {
+                    $this->inner   = $inner;
+                    $this->failing = $failing;
+                }
+
+                public function insert(string $value): ?string
+                {
+                    if ($this->failing === 'insert' && $value === 'bricht') {
+                        throw new \TypeError('boom');
+                    }
+                    return $this->inner->insert($value);
+                }
+
+                public function normalize(string $value): ?string
+                {
+                    if ($this->failing === 'normalize' && $value === 'bricht') {
+                        throw new \ValueError('boom');
+                    }
+                    return $this->inner->normalize($value);
+                }
+            };
+            $e = $this->refused('package_invalid', [
+                ContentFixtures::row('insert', 'postmeta', "219\0_gut", 'absent', ['values' => ['x']]),
+                ContentFixtures::row('insert', 'postmeta', "219\0_kaputt", 'absent', ['values' => ['y', 'bricht']]),
+            ], [], $target);
+            $this->assertSame([['table' => 'postmeta', 'key' => "219\0_kaputt"]], $e->keys(), $failing);
+            $this->assertStringNotContainsString('boom', $e->getMessage());
+        }
+    }
 }
