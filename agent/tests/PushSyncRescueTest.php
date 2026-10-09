@@ -318,17 +318,71 @@ final class PushSyncRescueTest extends PushRescueFlowCase
         $this->assertDirectoryDoesNotExist($this->work($this->staging) . '/' . $id);
     }
 
-    /** R15: was an eingefügten Objekten stehen blieb, steht im Protokoll des Pushs. */
-    public function testWhatWasLeftIsNotedInThePushLog(): void
+    /**
+     * R15: was an eingefügten Objekten stehen blieb, steht im Protokoll des Pushs. Security-Review
+     * P3, M2: beim Wiederanlauf räumt der Agent es weg, solange das Objekt weiter fehlt – sonst hinge
+     * es sich an das nächste Objekt mit dieser ID. Danach geht derselbe Satz noch einmal.
+     */
+    public function testWhatWasLeftIsNotedInThePushLogAndCleanedUp(): void
     {
-        $id = $this->pushed();
-        $this->liveDb->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        $old = $this->liveDb->data;
+        $sha = $this->stage($this->rows());
+        list($id, $commit) = $this->push($sha, 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit);
+        $GLOBALS['wpsync_post_actions'] = [];
+        $this->liveDb->data['postmeta']["1000001\0farbe"]        = ['values' => ['rot']];
+        $this->liveDb->data['postmeta']["1000001\0_wp_old_slug"] = ['values' => ['alt']]; // feste Sperrliste: bleibt, wird nicht genannt (P8)
         $body = $this->rescued($id);
         $this->assertSame(['content_left_extra'], $body['warnings']);
+        $this->assertSame(['values' => ['rot']], $this->liveDb->data['postmeta']["1000001\0farbe"], 'rescue.php löscht nie, was der Push nicht schrieb');
+
+        // Solange der Rest liegt, lehnt der Agent ein neues Objekt an dieser ID ab.
+        $check = new \WpSync\ContentCheck(\WpSync\ContentPackage::read($this->work($this->live) . '/' . $id . '/content/package.jsonl'), ContentFixtures::live($this->liveDb));
+        try {
+            $check->run();
+            $this->fail('accepted');
+        } catch (\WpSync\ContentException $e) {
+            $this->assertSame('id_has_leftovers', $e->reason());
+            $this->assertSame([['table' => 'postmeta', 'key' => "1000001\0farbe"], ['table' => 'postmeta', 'key' => "1000001\0_wp_old_slug"]], $e->keys());
+        }
+
         Push::catchUp();
+
         $unit = $this->contentUnit($id);
         $this->assertSame([[['table' => 'postmeta', 'key' => "1000001\0farbe"]], 1], [$unit['left'], $unit['left_total']]);
-        $this->assertStringContainsString('1 fremde Stelle(n) an eingefügten Objekten blieben stehen', Admin::unitLine($unit));
+        $this->assertSame(['object_cache', 'rewrite_rules', 'revisions', 'left_cleanup'], array_column($unit['post_actions'], 'step'));
+        $this->assertSame([true, true, true, true], array_column($unit['post_actions'], 'ok'));
+        $this->assertStringContainsString('1 fremde Stelle(n) an eingefügten Objekten blieben stehen (Meta und Zuordnungen davon inzwischen entfernt)', Admin::unitLine($unit));
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data, 'nichts hängt mehr an der ID des zurückgenommenen Beitrags');
+
+        // Derselbe Satz noch einmal: die ID ist frei und sauber.
+        list($again, $commit) = $this->push($this->stage($this->rows()), 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $this->assertNotSame($id, $again);
+        $this->assertSame([], preg_grep('/^1000001\x00/', array_map('strval', array_keys($this->liveDb->data['postmeta']))), 'keine fremde Meta am neuen Beitrag');
+        $this->assertArrayHasKey('1000001', $this->liveDb->data['posts']);
+    }
+
+    /** M2: ohne Reste gibt es den Schritt nicht; scheitert das Aufräumen, hält es den Abschluss nicht auf. */
+    public function testTheCleanupIsAStepOfItsOwnAndNeverHoldsTheFinishUp(): void
+    {
+        $id = $this->pushed();
+        $this->rescued($id);
+        Push::catchUp();
+        $this->assertNotContains('left_cleanup', array_column($this->contentUnit($id)['post_actions'], 'step'));
+
+        $id = $this->pushed();
+        $this->liveDb->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        $this->rescued($id);
+        file_put_contents($this->work($this->live) . '/' . $id . '/content/before.json', 'kaputt');
+        Push::catchUp();
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+        $steps = array_column($this->contentUnit($id)['post_actions'], 'ok', 'step');
+        $this->assertFalse($steps['left_cleanup']);
+        $this->assertTrue($steps['object_cache'], 'die übrigen Nacharbeiten laufen trotzdem');
+        $this->assertSame(['values' => ['rot']], $this->liveDb->data['postmeta']["1000001\0farbe"]);
     }
 
     /** R14: auch in der Kopie verfällt der Umschlag; ein frischer bleibt. */

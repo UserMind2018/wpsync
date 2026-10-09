@@ -131,7 +131,7 @@ func TestNothingToPushNamesTheSkippedUnits(t *testing.T) {
 func TestContentRefusalsHaveReasonKeysAndPaths(t *testing.T) {
 	keys := []agentapi.ContentKey{{Table: "posts", Key: "219"}, {Table: "postmeta", Key: "219\x00_x", Pattern: "email"}}
 	for _, reason := range []string{"package_invalid", "baseline_outdated", "origin_mismatch", "package_too_large", "engine_unsupported",
-		"blocked_row", "list_version_mismatch", "local_origin_in_package", "pseudonym_in_package", "id_outside_corridor", "id_taken",
+		"blocked_row", "list_version_mismatch", "local_origin_in_package", "pseudonym_in_package", "id_outside_corridor", "id_taken", "id_has_leftovers",
 		"conflict", "row_unfaithful", "dangling_reference", "upload_missing", "author_unknown", "changed_since_push", "unsafe_value",
 		"write_mismatch", "package_missing", "content_failed"} {
 		api := &agentapi.APIError{Status: 409, Code: "wpsync_content_" + reason, Message: "abgelehnt"}

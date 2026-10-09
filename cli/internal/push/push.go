@@ -1359,6 +1359,9 @@ func printLeft(out io.Writer, c *agentapi.RescueContent) {
 		more = fmt.Sprintf(" und %d weitere", c.LeftTotal-len(names))
 	}
 	fmt.Fprintf(out, "  ! An eingefügten Objekten hing etwas, das nicht vom Push stammt – es blieb stehen (verwaist): %s%s\n", strings.Join(names, ", "), more)
+	// Left alone it would attach itself to the next object with the same ID (security review P3, M2).
+	fmt.Fprintln(out, "    Meta und Zuordnungen davon räumt der Agent weg, sobald WordPress wieder lädt. Kommentare und Kindbeiträge bleiben:\n"+
+		"    solange sie liegen, lehnt der Agent ein neues Objekt mit dieser ID ab (id_has_leftovers) – auf der Site von Hand entfernen.")
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay

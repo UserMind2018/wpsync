@@ -177,6 +177,88 @@ final class ContentRollback
     }
 
     /**
+     * Räumt auf, was eine Rücknahme mit $leave an den vom Push eingefügten Objekten stehen liess
+     * (R15; Security-Review P3 M2) – für den Agent, sobald WordPress wieder lädt. Für jeden Beitrag,
+     * jeden Term und jede term_taxonomy-Zeile, die der Push eingefügt hat und die es weiterhin nicht
+     * gibt, geht, was purge() auch bei der Rücknahme über den Agent nähme: alle Meta und
+     * Zuordnungen an dieser ID, die der festen Sperrliste eingeschlossen. Sie sind für WordPress
+     * unerreichbar, solange das Objekt fehlt – und hingen sich an das nächste Objekt mit dieser ID.
+     * Gibt es das Objekt wieder, gehört ihm, was an ihm hängt: dann geschieht dort nichts.
+     * Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms) bleiben – das
+     * sind eigene Zeilen, die niemand ungefragt löscht; ContentCheck lehnt ein neues Objekt an
+     * einer solchen ID ab (id_has_leftovers).
+     *
+     * @param string $dir Ordner content im Arbeitsordner des Pushs
+     * @return int an so vielen Objekten hing etwas, das entfernt wurde
+     * @throws ContentException before_image_invalid, engine_unsupported oder content_failed
+     */
+    public static function sweep(ContentTarget $target, string $dir): int
+    {
+        $image = ContentImage::get($dir, ContentImage::BEFORE);
+        if ($image === null) {
+            return 0; // ohne Vorher-Abbild wurde nie geschrieben
+        }
+        $before = self::keys($image, true);
+        if ($before === null) {
+            throw ContentImage::invalid();
+        }
+        unset($image);
+        $inserted = [];
+        foreach ($before as $entry) {
+            if ($entry['state'] === null && isset(ContentState::PK[$entry['t']])) {
+                $inserted[$entry['t']][] = $entry['k'];
+            }
+        }
+        if ($inserted === []) {
+            return 0;
+        }
+        ContentState::innodb($target->store);
+        $store = $target->store;
+        try {
+            return $store->transaction(static function () use ($store, $inserted): int {
+                $swept   = 0;
+                $recount = [];
+                foreach ($inserted as $table => $ids) {
+                    $gone = [];
+                    foreach ($store->read($table, $ids, true) as $id => $raw) {
+                        if ($raw === null) {
+                            $gone[] = (string) $id;
+                        }
+                    }
+                    if ($gone === []) {
+                        continue;
+                    }
+                    $hanging = $store->attached($table, $gone, true);
+                    // Die Zähler der Terme, aus denen ein verschwundener Beitrag dabei fällt, stimmen danach nicht mehr.
+                    $terms = $table === 'posts' ? $store->relations($gone, true) : [];
+                    foreach ($gone as $id) {
+                        $have = $hanging[$id] ?? ['meta' => [], 'relations' => []];
+                        if ($have['meta'] === [] && $have['relations'] === []) {
+                            continue;
+                        }
+                        $store->purge($table, $id);
+                        $swept++;
+                        foreach ($terms[$id] ?? [] as $tt) {
+                            $recount[(string) $tt] = true;
+                        }
+                    }
+                }
+                if ($recount !== []) {
+                    $store->recount(array_map('strval', array_keys($recount)));
+                }
+                // Ging die Verbindung verloren, hat der Server verworfen, was die Transaktion schrieb.
+                if (!$store->alive()) {
+                    throw ContentRepair::lost();
+                }
+                return $swept;
+            });
+        } catch (ContentException $e) {
+            // Auch ein unklarer COMMIT ist hier nur ein Fehlschlag: ein zweiter Lauf fände nichts oder räumte zu Ende.
+            throw $e->reason() === ContentException::UNCLEAR ? new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Aufräumen verloren.') : $e;
+        }
+    }
+
+    /**
      * Was an den vom Push eingefügten Beiträgen, Termen und term_taxonomy-Zeilen hängt, ohne dass
      * der Push es geschrieben hat (M3): Meta-Schlüssel, Zuordnungen – an einer eingefügten
      * term_taxonomy die fremder Objekte –, Kommentare, Revisionen und Kindbeiträge, weitere

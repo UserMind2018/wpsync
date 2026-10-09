@@ -482,6 +482,18 @@ final class PushContent
     }
 
     /**
+     * Räumt auf, was rescue.php an den eingefügten Objekten eines Pushs stehen liess (P3 R15,
+     * ContentRollback::sweep()) – solange es die Objekte weiter nicht gibt.
+     *
+     * @return int an so vielen Objekten hing etwas, das entfernt wurde
+     * @throws ContentException
+     */
+    public static function sweep(string $name, string $content, string $pushDir): int
+    {
+        return ContentRollback::sweep(self::target($name, $content), $pushDir . '/' . self::UNIT);
+    }
+
+    /**
      * Nacharbeiten nach dem Anwenden oder der Rücknahme (§7.7); nie ein Fehler des Pushs.
      *
      * @param array<string, mixed>|null $changes

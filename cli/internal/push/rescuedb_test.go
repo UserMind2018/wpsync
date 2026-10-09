@@ -317,7 +317,7 @@ func TestRunNamesWhatRescueLeftOnInsertedObjects(t *testing.T) {
 	if !reflect.DeepEqual(report.Warnings, []string{WarningContentLeftExtra}) || report.ContentLeftTotal != 1 || len(report.ContentLeft) != 1 || report.ContentLeft[0].Table != "postmeta" {
 		t.Errorf("report = %+v", report)
 	}
-	if !strings.Contains(out.String(), "blieb stehen") || !strings.Contains(out.String(), "postmeta") {
+	if !strings.Contains(out.String(), "blieb stehen") || !strings.Contains(out.String(), "postmeta") || !strings.Contains(out.String(), "id_has_leftovers") {
 		t.Errorf("output:\n%s", out)
 	}
 }

@@ -34,6 +34,11 @@ final class Push
     public const TARGETS    = ['live', 'staging'];
     /** So lange wartet der Commit vor COMMIT höchstens auf die Sperre des Pushs (Spec Content-Push P3 §7.1). */
     public const GATE_SECONDS = 15.0;
+    /**
+     * Schritt der Nacharbeiten nach einer Rücknahme durch rescue.php: was an den eingefügten Objekten
+     * stehen blieb (R15), ist weggeräumt (ok) oder liess sich nicht wegräumen. Fehlt der Schritt, hing nichts.
+     */
+    public const LEFT_CLEANUP = 'left_cleanup';
     /** Der Umschlag für rescue.php (rescue.sealed) verfällt nach 24 Stunden (P3 R14). */
     public const RESCUE_DB_TTL = 86400;
 
@@ -1083,9 +1088,10 @@ final class Push
     }
 
     /**
-     * Was nach einer Rücknahme der Inhalte durch rescue.php nachzuholen ist (P3 §8.2): die
-     * Nacharbeiten (§7.7) – höchstens einmal, ein Fehlschlag hält den Abschluss nie auf – und der
-     * Vermerk im Protokoll der Pushes (via, post_actions, was stehen blieb).
+     * Was nach einer Rücknahme der Inhalte durch rescue.php nachzuholen ist (P3 §8.2): das
+     * Aufräumen dessen, was an eingefügten Objekten stehen blieb (R15), und die Nacharbeiten (§7.7) –
+     * beides höchstens einmal, ein Fehlschlag hält den Abschluss nie auf – und der Vermerk im
+     * Protokoll der Pushes (via, post_actions, was stehen blieb).
      *
      * @param array<string, mixed> $push
      * @param array<string, mixed> $record rescue.json
@@ -1105,6 +1111,14 @@ final class Push
         if (($stored['post'] ?? '') === PushRescue::POST_PENDING) {
             // Erst merken, dann ausführen: legt eine Nacharbeit WordPress lahm, läuft sie kein zweites Mal.
             PushRescue::setContentFields($work, $pushId, ['post' => PushRescue::POST_DONE]);
+            // Zuerst, was rescue.php an den eingefügten Objekten stehen liess (R15): Meta und Zuordnungen
+            // an IDs, die es nicht mehr gibt. Sie hingen sich an das nächste Objekt mit dieser ID.
+            $swept = null;
+            try {
+                $swept = PushContent::sweep((string) $push['target'], $content, $work . '/' . $pushId) > 0 ? true : null;
+            } catch (\Throwable $e) {
+                $swept = false;
+            }
             $actions = [['step' => 'post_actions', 'ok' => false]];
             $changes = null;
             try {
@@ -1122,6 +1136,9 @@ final class Push
                 }
             } catch (\Throwable $e) {
                 $actions = [['step' => 'post_actions', 'ok' => false]];
+            }
+            if ($swept !== null) {
+                $actions[] = ['step' => self::LEFT_CLEANUP, 'ok' => $swept];
             }
             $note['post_actions'] = $actions;
         }

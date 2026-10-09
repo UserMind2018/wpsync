@@ -1001,6 +1001,9 @@ func contentNext(reason string, site *sites.Site) string {
 	switch reason {
 	case "conflict", "id_taken", "baseline_outdated", "row_unfaithful":
 		return fmt.Sprintf(" – die Site hat sich seit dem Pull geändert oder das Paket ist älter als der Inhaltsstand: wpsync pull %s --content, Änderungen neu anlegen, Paket neu bauen; nichts wurde übertragen", site.Name)
+	case "id_has_leftovers":
+		return " – an der ID eines neuen Objekts hängen auf der Site noch Reste eines früheren (Meta, Zuordnungen, Kommentare, Kindbeiträge; siehe keys), sie hingen sich an das neue. " +
+			"Die genannten Zeilen auf der Site entfernen, dann erneut pushen; nichts wurde übertragen"
 	case "author_unknown":
 		return fmt.Sprintf(" – das Push-Fenster im WP-Admin öffnen (%s/wp-admin/tools.php?page=wpsync), nicht per WP-CLI: der Benutzer, der es öffnet, wird Autor neuer Beiträge", site.URL)
 	case "changed_since_push":

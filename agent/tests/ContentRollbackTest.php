@@ -593,6 +593,85 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->assertSame(['state', 'changes'], array_keys(ContentRollback::run(ContentFixtures::live($this->store), $this->dir)));
     }
 
+    /**
+     * Security-Review P3, M2: was die Rücknahme ohne WordPress an eingefügten Objekten stehen liess,
+     * räumt sweep() weg, solange das Objekt weiter fehlt – Meta und Zuordnungen, auch die der festen
+     * Sperrliste. Sie hingen sich sonst an ein neues Objekt derselben ID. Kommentare und Kinder
+     * bleiben: das sind eigene Inhalte, die niemand ungefragt löscht.
+     */
+    public function testSweepRemovesWhatHangsOnInsertedObjectsThatAreStillGone(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $this->store->data['terms']['8']                               = ContentFixtures::term('8', 'Tag');
+        $this->store->data['term_taxonomy']['8']                       = ContentFixtures::taxonomy('8', '8', 'post_tag');
+        $this->store->data['term_taxonomy']['8']['count']              = '1';
+        $this->store->data['term_relationships']["1000001\0post_tag"] = ['values' => ['8:0']];
+        $this->store->data['postmeta']["1000001\0farbe"]              = ['values' => ['rot']];
+        $this->store->data['postmeta']["1000001\0_wp_old_slug"]       = ['values' => ['alt']];
+        $this->store->data['termmeta']["1000001\0farbe"]              = ['values' => ['rot']];
+        $this->store->data['posts']['1000050']                         = ContentFixtures::post('1000050', ['post_type' => 'revision', 'post_status' => 'inherit', 'post_parent' => '1000001']);
+        $this->store->orphans                                          = ['1000001' => ['77']];
+        $this->store->comments['1000001']                              = 2;
+        $back = ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->assertSame(ContentRollback::DONE, $back['state']);
+        $this->assertCount(6, $back['left'], 'ohne die Meta der festen Sperrliste');
+        $this->assertArrayHasKey("1000001\0_wp_old_slug", $this->store->data['postmeta']);
+        // Eine Zuordnung eines fremden Beitrags auf die eingefügte term_taxonomy-Zeile: mit der Zeile verwaist.
+        $this->store->orphans['220'] = ['1000002'];
+        $this->store->log            = [];
+
+        $this->assertSame(3, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir), 'Beitrag, Term, term_taxonomy-Zeile');
+
+        $expected                           = $old;
+        $expected['terms']['8']             = $this->store->data['terms']['8'];
+        $expected['term_taxonomy']['8']     = ContentFixtures::taxonomy('8', '8', 'post_tag');
+        $expected['term_taxonomy']['8']['count'] = '0';
+        $expected['posts']['1000050']       = $this->store->data['posts']['1000050'];
+        $this->assertSame(self::sorted($expected), self::sorted(array_filter($this->store->data)), 'der Stand vor dem Push; die Revision bleibt');
+        $this->assertSame([], $this->store->orphans, 'auch die verwaisten Zuordnungen am Beitrag und auf die term_taxonomy-Zeile');
+        $this->assertSame(2, $this->store->comments['1000001'], 'Kommentare bleiben');
+        $this->assertSame(['begin', 'purge posts:1000001', 'purge terms:1000001', 'purge term_taxonomy:1000002', 'recount 8,77', 'commit'], $this->store->log);
+        $this->assertContains('posts:1000001', $this->store->locked, 'unter Sperre gelesen');
+
+        // Ein zweiter Lauf findet nichts mehr – und schreibt nichts.
+        $this->store->log = [];
+        $this->assertSame(0, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir));
+        $this->assertSame([], preg_grep('/^(purge|write|delete|recount)/', $this->store->log));
+    }
+
+    /** M2: gibt es das Objekt wieder (ein neuer Push hat die ID belegt), gehört ihm, was an ihm hängt – sweep() fasst es nicht an. */
+    public function testSweepNeverTouchesAnObjectThatExistsAgain(): void
+    {
+        $this->apply($this->rows());
+        $this->store->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        $this->store->data['posts']['1000001'] = ContentFixtures::post('1000001');
+        $now              = $this->store->data;
+        $this->store->log = [];
+        $this->assertSame(0, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir));
+        $this->assertSame($now, $this->store->data);
+        $this->assertSame([], preg_grep('/^(purge|write|delete)/', $this->store->log));
+    }
+
+    /** M2: ohne Vorher-Abbild gibt es nichts aufzuräumen; ein verändertes räumt nichts weg. */
+    public function testSweepNeedsTheBeforeImageOfThePush(): void
+    {
+        $this->assertSame(0, ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir));
+        $this->apply($this->rows());
+        $this->store->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        ContentRollback::run(ContentFixtures::live($this->store), $this->dir, true);
+        file_put_contents($this->dir . '/before.json', '{"keys":[{"t":"benutzer","k":"1"}]}');
+        $now = $this->store->data;
+        try {
+            ContentRollback::sweep(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::IMAGE, $e->reason());
+        }
+        $this->assertSame($now, $this->store->data);
+    }
+
     /** R15: ging die Verbindung im COMMIT verloren und kam er an, nennt das Ergebnis das Fremde trotzdem. */
     public function testLeavingSurvivesAnUnclearCommit(): void
     {

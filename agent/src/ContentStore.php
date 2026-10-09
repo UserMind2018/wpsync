@@ -85,8 +85,10 @@ interface ContentStore
      *                  (<ID>\0 für verwaiste, ohne term_taxonomy-Zeile); comments: Zahl seiner
      *                  Kommentare; children: IDs der Beiträge mit diesem post_parent (auch Revisionen)
      *   terms          meta: Meta-Schlüssel; children: term_taxonomy_ids des Terms
-     *   term_taxonomy  relations: Schlüssel <object_id>\0<Taxonomie> jeder Zuordnung auf diese Zeile;
+     *   term_taxonomy  relations: Schlüssel <object_id>\0<Taxonomie> jeder Zuordnung auf diese Zeile
+     *                  (<object_id>\0, wenn es zu der ID keine Zeile gibt – verwaist);
      *                  children: term_taxonomy_ids der Kind-Terme (parent = term_id, dieselbe Taxonomie)
+     * Die Objekte selbst müssen nicht existieren: auch was an einer freien ID hängt, wird genannt.
      *
      * @param list<string> $ids
      * @param bool         $lock wie bei read()

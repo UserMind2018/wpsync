@@ -313,6 +313,11 @@ final class Admin
             $left = (int) ($unit['left_total'] ?? 0);
             if ($left > 0) {
                 $line .= ', ' . $left . ' fremde Stelle(n) an eingefügten Objekten blieben stehen';
+                foreach ($steps as $step) {
+                    if (is_array($step) && ($step['step'] ?? '') === Push::LEFT_CLEANUP && !empty($step['ok'])) {
+                        $line .= ' (Meta und Zuordnungen davon inzwischen entfernt)';
+                    }
+                }
             }
         }
         return $line;

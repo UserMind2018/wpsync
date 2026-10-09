@@ -348,10 +348,12 @@ final class ContentSql implements ContentStore
                     $add($row, 'children', (string) $row['c']);
                 }
             } else {
-                $sql = 'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r JOIN ' . $this->quoted('term_taxonomy')
+                // LEFT JOIN: auch Zuordnungen auf eine ID, zu der es (noch oder nicht mehr) keine Zeile gibt –
+                // sie hingen sich an eine neue term_taxonomy-Zeile dieser ID (ContentCheck::leftovers()).
+                $sql = 'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r LEFT JOIN ' . $this->quoted('term_taxonomy')
                     . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id`' . $in . ' ORDER BY r.`object_id`' . $tail;
                 foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
-                    $add($row, 'relations', Canon::pairKey((string) $row['obj'], (string) $row['tax']));
+                    $add($row, 'relations', Canon::pairKey((string) $row['obj'], (string) ($row['tax'] ?? '')));
                 }
                 $sql = 'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM ' . $this->quoted('term_taxonomy') . ' p JOIN ' . $this->quoted('term_taxonomy')
                     . ' c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id`' . $in . ' ORDER BY c.`term_taxonomy_id`' . $tail;

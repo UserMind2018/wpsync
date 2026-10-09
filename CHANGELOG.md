@@ -49,6 +49,14 @@ sich wie bisher (`content_not_rolled_back`).
   aus (`rescue.lock`): wer zu spät kommt, bekommt HTTP 423 (`busy` bzw. `wpsync_push_busy`); die CLI
   wiederholt dreimal im Abstand von 2 s. Ein Commit, den eine Rücknahme überholt hat, macht
   `ROLLBACK`
+- Was `rescue.php` an eingefügten Objekten stehen lässt, bleibt nicht folgenlos liegen – es hinge
+  sich an ein neues Objekt mit derselben ID. Neu deshalb: **(a)** der Agent lehnt ein `insert`
+  ab, an dessen ID auf dem Ziel noch etwas hängt (Meta, Zuordnungen, Kommentare, Kinder) –
+  `error.reason: "id_has_leftovers"` (HTTP 409 `wpsync_content_id_has_leftovers`, Exit 1) mit den
+  Resten in `error.keys`; nicht im Probelauf ohne offenes Push-Fenster. **(b)** Beim Wiederanlauf
+  entfernt der Agent an jedem eingefügten Objekt, das weiterhin fehlt, alle Meta und Zuordnungen;
+  das Protokoll nennt es als Nacharbeit `left_cleanup`. Kommentare und Kinder (Revisionen,
+  Kindseiten) löscht er nicht – solange sie liegen, greift (a)
 - `rescue.php` schickt die CLI ab jetzt `content=1`, wenn der Push Inhalte trug; ohne das Feld
   bleibt es bei Code und Uploads
 - `wpsync rollback --json` und ein zurückgerollter `push --json` nennen `via`

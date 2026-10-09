@@ -707,6 +707,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
 | `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |
 | `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors des Pakets, mehr als `limits.id_headroom` (2.000.000) über der höchsten ID, die das Ziel in dieser Tabelle schon vergeben hat, oder über 2^53 − 1 – bzw. seine ID ist auf dem Ziel belegt |
+| `id_has_leftovers` | die ID eines neuen Beitrags, Terms oder einer neuen `term_taxonomy`-Zeile ist frei, aber auf dem Ziel hängt noch etwas an ihr: Meta, Zuordnungen, Kommentare, Kindbeiträge (auch Revisionen), weitere Taxonomien eines Terms – Reste eines früheren Objekts, etwa nach einer [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress). Sie hingen sich an das neue Objekt. `error.keys` nennt die Reste (Kommentare als `{"table":"comments","key":"<post-id>"}`); dort entfernen, dann erneut pushen. Was das Paket an der ID selbst schreibt, zählt nicht. Nicht im Probelauf ohne offenes Push-Fenster |
 | `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
 | `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
 | `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
@@ -913,9 +914,23 @@ Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren
   die Site ist unten – blockiert das nicht: `rescue.php` nimmt zurück, was der Push geschrieben
   hat, und **lässt das Fremde stehen** (verwaiste Meta, Zuordnungen, Kommentare, Kindseiten). Das
   Ergebnis nennt es: `warnings: ["content_left_extra"]`, `content_left: [{table, key}]`
-  (höchstens 200, `content_left_total`). Gelöscht oder überschrieben wird nur, was der Push selbst
-  geschrieben hat – auch Meta, die WordPress an den neuen Beitrag gehängt hat (`_edit_lock` …),
-  bleibt dann verwaist liegen.
+  (höchstens 200, `content_left_total`). `rescue.php` löscht oder überschreibt nur, was der Push
+  selbst geschrieben hat – auch Meta, die WordPress an den neuen Beitrag gehängt hat
+  (`_edit_lock`, `_wp_old_slug` …), bleibt dann zunächst verwaist liegen und wird nicht eigens
+  genannt.
+
+  Harmlos ist das nicht von selbst: WordPress sieht verwaiste Zeilen zwar nicht, solange das Objekt
+  fehlt – legt aber später jemand ein Objekt **mit derselben ID** an (derselbe Satz, noch einmal
+  gepusht), hängen sie an ihm: fremde Meta an der neuen Seite, alte Kommentare darunter, fremde
+  Beiträge im neuen Term. Deshalb zweierlei:
+  - **Der Agent räumt nach.** Sobald WordPress wieder lädt, entfernt er an jedem eingefügten
+    Objekt, das weiterhin fehlt, alle Meta und Zuordnungen (auch die der festen Sperrliste) –
+    dasselbe, was die Rücknahme über den Agent mitnähme. Im Protokoll steht es als Nacharbeit
+    `left_cleanup` (`ok: false`, wenn es nicht gelang; der Schritt fehlt, wenn nichts hing).
+    Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms) löscht der
+    Agent **nicht** – das sind eigene Inhalte.
+  - **Ein neues Objekt an einer ID mit Resten wird abgelehnt** (`id_has_leftovers`,
+    siehe [Was der Agent prüft](#was-der-agent-prüft)), bis sie auf der Site entfernt sind.
 - **Persistenter Object-Cache.** Mit Redis oder Memcached hält `alloptions` den gepushten Wert,
   auch wenn die Datenbank schon zurück ist. Sagt `rescue.php` deshalb `cache: "stale"` (Live, es
   wurden Zeilen zurückgeschrieben, `wp-content/object-cache.php` liegt da), ruft die CLI einen
@@ -1508,7 +1523,8 @@ und eines zurückgerollten `push` `via` (`"agent"` oder `"rescue"`), `content_er
 (`{"code", "keys"?, "total"?}`, neben `content_not_rolled_back`) und `content_left`
 (`[{"table","key"}]`, höchstens 200) mit `content_left_total`; in `warnings`
 `rescue_db_unavailable`, `object_cache_stale` und `content_left_extra`; in `pushes` an der
-Einheit `content` `via: "rescue"`, `post_actions` und `left`/`left_total`. Bedeutung:
+Einheit `content` `via: "rescue"`, `post_actions` (darin nach einer Rücknahme mit Resten der Schritt
+`left_cleanup`) und `left`/`left_total`. Bedeutung:
 [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress).
 
 **Site-Lock.** Pro Site läuft nur ein `pull`, `push`, `rollback` oder `content export` gleichzeitig (`flock` auf

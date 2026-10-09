@@ -96,6 +96,7 @@ final class ContentCheck
         $this->values();
         $this->ids();
         $this->orphans($lock);
+        $this->leftovers($lock);
         $this->references();
         if (!$partial) {
             $this->files($uploads);
@@ -637,6 +638,69 @@ final class ContentCheck
         }
         if ($conflict !== []) {
             throw new ContentException(ContentException::CONFLICT, 'Auf dem Ziel seit dem Pull geändert: ' . count($conflict) . ' Zeile(n) – erneut ziehen.', $conflict);
+        }
+    }
+
+    /**
+     * Nr. 7 (Nachtrag, Security-Review P3 M2): an der ID eines neuen Beitrags, Terms oder einer neuen
+     * term_taxonomy-Zeile hängt auf dem Ziel nichts. Die ID ist frei (ids()), aber Meta,
+     * Zuordnungen, Kommentare oder Kinder können unter ihr noch liegen – stehen gelassen von einer
+     * Rücknahme ohne WordPress (R15) oder von sonst jemandem verwaist. Sie hingen sich an das neue
+     * Objekt: fremde Meta an einer neuen Seite, alte Kommentare unter ihr, fremde Beiträge in einem
+     * neuen Term. Gezählt wird, was die Rücknahme als „left“ kennt (ContentStore::attached()), dazu
+     * Meta der festen Sperrliste – ein altes _wp_old_slug leitete auf den neuen Beitrag um. Was das
+     * Paket an der ID selbst schreibt, ist kein Rest: darüber entscheiden die Prüfungen seiner Zeile.
+     *
+     * Nicht im Probelauf ohne offenes Push-Fenster: die Antwort verriete, an welchen IDs etwas liegt.
+     *
+     * @throws ContentException id_has_leftovers – mit den Resten als {table, key}, Kommentare als {comments, <post-id>}
+     */
+    private function leftovers(bool $lock): void
+    {
+        if ($this->partial) {
+            return;
+        }
+        $new   = [];
+        $named = [];
+        foreach ($this->package->rows() as $row) {
+            $named[$row['table']][$row['key']] = true;
+            if ($row['op'] === 'insert' && isset(ContentState::PK[$row['table']])) {
+                $new[$row['table']][] = $row['key'];
+            }
+        }
+        $left = [];
+        foreach ($new as $table => $ids) {
+            $meta  = $table === 'posts' ? 'postmeta' : 'termmeta';
+            $child = $table === 'posts' ? 'posts' : 'term_taxonomy';
+            foreach ($this->target->store->attached($table, $ids, $lock) as $id => $have) {
+                $id = (string) $id;
+                foreach ($have['meta'] as $name) {
+                    $pair = Canon::pairKey($id, (string) $name);
+                    if (!isset($named[$meta][$pair])) {
+                        $left[$meta . "\0\0" . $pair] = ContentException::key($meta, $pair);
+                    }
+                }
+                foreach ($have['relations'] as $pair) {
+                    if (!isset($named['term_relationships'][(string) $pair])) {
+                        $left["term_relationships\0\0" . $pair] = ContentException::key('term_relationships', (string) $pair);
+                    }
+                }
+                if ($have['comments'] > 0) {
+                    $left["comments\0\0" . $id] = ContentException::key('comments', $id);
+                }
+                foreach ($have['children'] as $other) {
+                    if (!isset($named[$child][(string) $other])) {
+                        $left[$child . "\0\0" . $other] = ContentException::key($child, (string) $other);
+                    }
+                }
+            }
+        }
+        if ($left !== []) {
+            throw new ContentException(
+                ContentException::LEFTOVERS,
+                'An den IDs neuer Objekte hängen auf dem Ziel noch Reste eines früheren Objekts (Meta, Zuordnungen, Kommentare, Kinder): ' . count($left) . ' Stelle(n) – sie hingen sich an das neue. Erst dort aufräumen.',
+                array_values($left)
+            );
         }
     }
 

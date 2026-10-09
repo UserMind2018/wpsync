@@ -87,7 +87,7 @@ type Failure struct {
 	// (Spec Content-Push §10, S7); left out when there are none.
 	SkippedNew []string `json:"skipped_new,omitempty"`
 	// Keys and Paths: with a refusal of the content of a push (reason conflict, blocked_row,
-	// id_taken, upload_missing, changed_since_push …) the rows as {table, key} and the files
+	// id_taken, id_has_leftovers, upload_missing, changed_since_push …) the rows as {table, key} and the files
 	// relative to wp-content/uploads/ it is about (Spec Content-Push §10). Never a value.
 	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
 	Paths []string              `json:"paths,omitempty"`
