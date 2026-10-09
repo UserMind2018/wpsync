@@ -59,6 +59,12 @@ type Options struct {
 	// the content back without WordPress (Spec Content-Push P3 R12); without it such a push goes out
 	// with the warning rescue_db_unavailable.
 	RequireRescueDB bool
+	// Activate and Deactivate (--activate, --deactivate): plugins to switch in the same set, as units
+	// "plugins/<slug>" (Spec Content-Push P4 §4.1). A unit to activate always becomes part of the set,
+	// changed or not – the agent activates only code the same push checked (A3). One to deactivate
+	// needs neither the set nor a local folder (A20). Such a push needs the rescue envelope (A9):
+	// RequireRescueDB is implied.
+	Activate, Deactivate []string
 
 	// Target: live or staging. Empty means live for a push; for a rollback it means "not named":
 	// without a push ID the newest live push, with one the target of that push (V10).
