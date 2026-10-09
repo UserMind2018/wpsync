@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -53,5 +55,20 @@ func TestWriteScript(t *testing.T) {
 	}
 	if err := os.WriteFile(path, Script("export.php"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// CanonVersion (Go) and Canon::VERSION (embedded PHP) are the same number, always.
+func TestCanonVersionMatchesPHP(t *testing.T) {
+	data, err := phpFS.ReadFile("php/Canon.php")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`public const VERSION\s*=\s*(\d+)\s*;`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("php/Canon.php has no `public const VERSION = <n>;`")
+	}
+	if n, err := strconv.Atoi(string(m[1])); err != nil || n != CanonVersion {
+		t.Fatalf("Canon::VERSION = %s, CanonVersion = %d", m[1], CanonVersion)
 	}
 }
