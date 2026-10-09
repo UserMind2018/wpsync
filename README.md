@@ -7,13 +7,15 @@ Das Projekt besteht aus zwei Teilen:
 
 | Teil | Ordner | Läuft auf | Aufgabe |
 |---|---|---|---|
-| **CLI** `wpsync` | `cli/` (Go) | deinem Mac | koppeln, scannen, ziehen, lokales DDEV-Projekt einrichten, Code pushen |
-| **Agent** `wpsync-agent` | `agent/` (PHP-Plugin) | der Live-Site | signierte Endpunkte für Infosheet, Delta, DB und Dateien; im Push-Fenster zusätzlich für Code |
+| **CLI** `wpsync` | `cli/` (Go) | deinem Mac | koppeln, scannen, ziehen, lokales DDEV-Projekt einrichten, Code, Uploads und Inhalte pushen |
+| **Agent** `wpsync-agent` | `agent/` (PHP-Plugin) | der Live-Site | signierte Endpunkte für Infosheet, Delta, DB und Dateien; im Push-Fenster zusätzlich für Code, neue Uploads und Inhalte |
 
 Beim Pull liest der Agent nur und schreibt ausschliesslich in eigene Tabellen (`wpsync_*`).
-Schreiben kann er einzig über `wpsync push`: ganze Plugin-, Theme- und mu-plugins-Verzeichnisse,
-und nur solange ein Administrator im WP-Admin ein Push-Fenster geöffnet hat. Datenbank und
-Uploads der Live-Site schreibt wpsync nie.
+Schreiben kann er einzig über `wpsync push`, und nur solange ein Administrator im WP-Admin ein
+Push-Fenster geöffnet hat: ganze Plugin-, Theme- und mu-plugins-Verzeichnisse, mit `--uploads`
+neue Dateien unter `wp-content/uploads/` (nie ersetzen, nie löschen) und mit `--content` geprüfte
+Zeilen der sieben Inhaltstabellen. Alles andere in Datenbank und Uploads der Live-Site schreibt
+wpsync nie.
 
 ---
 
