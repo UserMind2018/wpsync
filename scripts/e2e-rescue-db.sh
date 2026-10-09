@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E DB-Rücknahme ohne WordPress (Spec Content-Push P3; AC-158, AC-160, AC-161–AC-166, AC-168,
-# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15; Security-Review P3: M1, M2, N3, N7): rescue.php
+# AC-169, AC-171, AC-173, R7, R9, R10, R11, R14, R15; Security-Review P3: M1, M2, N3, N7, NR-1, NR-2): rescue.php
 # nimmt nach einem Push mit Inhalten
 # auch die Datenbank-Zeilen zurück – über eine eigene mysqli-Verbindung aus dem versiegelten
 # Umschlag des Pushs. Es ist der einzige Test, in dem MysqliLink und RescueDb eine echte
@@ -519,6 +519,10 @@ echo "== Lokale Änderungen der Arbeitskopie – aus ihnen entstehen alle Pakete
 TITLE_A='E2E A geändert 🚀 Ünïcödé 日本語'
 NEW_ID="$(tgt wp post create --post_type=page --post_status=publish --post_title="E2E Neu" --post_name=e2e-neu --porcelain --skip-plugins --skip-themes)"
 ok "die neue Seite liegt im Korridor" test "$NEW_ID" -gt 1000000
+# NR-2: eine neue Kategorie – ihr Term und ihre term_taxonomy-Zeile liegen im Korridor.
+NEW_TERM="$(tgt wp term create category "E2E Kat" --slug=e2e-kat --porcelain --skip-plugins --skip-themes)"
+NEW_TT="$(tgt wp term get category "$NEW_TERM" --field=term_taxonomy_id --skip-plugins --skip-themes)"
+ok "die neue Kategorie liegt im Korridor" test "$NEW_TERM" -gt 1000000 -a "$NEW_TT" -gt 1000000
 tgt wp eval-file - "$PAGE_A" "$PAGE_B" "$DRAFT" "$PAGE_FULL" "$NEW_ID" --skip-plugins --skip-themes <<'PHP'
 <?php
 list($a, $b, $draft, $full, $new) = array_map('intval', $args);
@@ -818,6 +822,23 @@ jrun freie-id "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/neu.jsonl"
 eq "M2: ohne den Rest ginge derselbe Satz (Probelauf, Exit 0)" "$RC" 0
 state_clean "R15"
 
+echo "== NR-2: unter der freien ID eines neuen Terms hängt eine Unterkategorie – id_has_leftovers"
+pkg kat "(.t == \"terms\" and .k == \"$NEW_TERM\") or (.t == \"term_taxonomy\" and .k == \"$NEW_TT\")"
+eq "Paket kat: der Term und seine term_taxonomy-Zeile" "$(jq -r '.op + ":" + .table' "$PKG/kat.body" | LC_ALL=C sort | paste -sd' ' -)" "insert:term_taxonomy insert:terms"
+# Wie nach einer Rücknahme ohne WordPress, bei der sie stehen blieb: eine Unterkategorie, deren parent
+# auf die ID des (auf Live nicht mehr vorhandenen) Terms zeigt.
+sql -e "INSERT INTO ${PREFIX}terms (name, slug, term_group) VALUES ('E2E Kind', 'e2e-kind', 0);
+        INSERT INTO ${PREFIX}term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (LAST_INSERT_ID(), 'category', '', $NEW_TERM, 0)"
+KIND_TT="$(q "SELECT term_taxonomy_id FROM ${PREFIX}term_taxonomy WHERE parent = $NEW_TERM")"
+jrun kind-term "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/kat.jsonl" --yes --json
+eq "NR-2: neuer Term an der ID mit dem Kind-Term: Exit 1, id_has_leftovers" "$RC $(last kind-term '.error.reason')" "1 id_has_leftovers"
+eq "NR-2: genannt wird die Unterkategorie" "$(last kind-term '.error.keys | map(.table + ":" + .key) | join(",")')" "term_taxonomy:$KIND_TT"
+eq "NR-2: nichts wurde übertragen, kein offener Push" "$(q "SELECT COUNT(*) FROM ${PREFIX}terms WHERE term_id = $NEW_TERM") $(pending)" "0 null"
+sql -e "DELETE t FROM ${PREFIX}terms t JOIN ${PREFIX}term_taxonomy x ON x.term_id = t.term_id WHERE x.term_taxonomy_id = $KIND_TT; DELETE FROM ${PREFIX}term_taxonomy WHERE term_taxonomy_id = $KIND_TT"
+jrun kind-term-frei "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/kat.jsonl" --dry-run --json
+eq "NR-2: ohne die Unterkategorie ginge derselbe Satz (Probelauf, Exit 0)" "$RC" 0
+state_clean "NR-2"
+
 echo "== AC-173/AC-160: die Datenbank ist nicht erreichbar, dann eine fremde Sperre – keine Antwort, kein Protokoll nennt Zugangsdaten, SQL oder Werte"
 LOG_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 curl -s -o /dev/null "$SOURCE_URL/e2e-log-probe.php"
@@ -935,7 +956,7 @@ T0="$(date +%s)"
 jrun m1-confirm-belegt "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
 WAITED=$(($(date +%s) - T0))
 eq "M1: confirm bei belegter Sperre: Exit 44 (busy)" "$RC $(last m1-confirm-belegt '.error.code')" "44 busy"
-ok "M1: der Agent nennt wpsync_push_busy" contains "$(last m1-confirm-belegt '.error.message')" "wpsync_push_busy"
+ok "M1: die Meldung des Agents nennt die laufende Rücknahme" contains "$(last m1-confirm-belegt '.error.message')" "läuft gerade eine Rücknahme"
 ok "M1: confirm hat auf die Sperre gewartet (${WAITED} s)" test "$WAITED" -ge 10
 eq "M1: nichts ist bestätigt – weder rescue.json noch das Protokoll" "$(jq -r .status "$D/rescue.json") $(record "$HELD" .status)" "committed committed"
 ok "M1: der Umschlag bleibt für die Rücknahme liegen" test -s "$D/rescue.sealed"
@@ -949,6 +970,35 @@ eq "M1: die Datenbank ist unberührt, der Status bleibt" "$(dbsum) $(jq -r .stat
 jrun m1-rollback "$WPSYNC" rollback "$TARGET" "$HELD" --json
 eq "M1: zurück geht er über den Agent (Exit 0)" "$RC $(last m1-rollback '.data.via')" "0 agent"
 state_clean "M1"
+arm
+
+echo "== NR-1: confirm wartet auf die Sperre, während der Agent den Push zurücknimmt – danach wird nichts bestätigt"
+disarm
+hold nr1 --no-code --content "$PKG/klein.jsonl"
+D="$(work)/$HELD"
+# Eine fremde Sitzung hält eine Zeile des Pushs: die Rücknahme über den Agent hält rescue.lock und wartet
+# in der Datenbank (bis 10 s). In dieser Zeit kommt confirm, liest „committed“ und wartet auf die Sperre.
+(sql -e "START TRANSACTION; SELECT ID FROM ${PREFIX}posts WHERE ID = $PAGE_B FOR UPDATE; SELECT SLEEP(6); ROLLBACK" >/dev/null 2>&1) &
+LOCKER=$!
+sleep 1.5
+"$WPSYNC" rollback "$TARGET" "$HELD" --json >"$JSON/nr1-rollback.jsonl" 2>"$JSON/nr1-rollback.err" </dev/null &
+ROLLER=$!
+sleep 1.5
+ok "NR-1: die Rücknahme läuft noch und hält die Sperre" sh -c "kill -0 $ROLLER && test -e '$D/rescue.lock'"
+jrun nr1-confirm "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+wait "$ROLLER" || true
+wait "$LOCKER" || true
+eq "NR-1: die Rücknahme über den Agent ging durch" "$(last nr1-rollback '.data.status + " " + .data.via')" "rolled_back agent"
+ok "NR-1: confirm bestätigt nichts (Exit ungleich 0)" test "$RC" != 0
+no "NR-1: confirm meldet den Push nicht als bestätigt" hasF "$JSON/nr1-confirm.jsonl" '"status":"confirmed"'
+eq "NR-1: im Protokoll steht rolled_back – nie bestätigt neben zurückgetauschtem Stand" "$(record "$HELD" .status)" rolled_back
+no "NR-1: confirm hat den Ordner des Pushs nicht neu angelegt" test -e "$D"
+eq "NR-1: kein offener Push" "$(pending)" "null"
+state_clean "NR-1"
+# Und danach: ein confirm für den schon zurückgenommenen Push bleibt abgelehnt.
+jrun nr1-confirm-danach "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+ok "NR-1: auch danach wird nichts bestätigt" test "$RC" != 0
+eq "NR-1: das Protokoll bleibt bei rolled_back" "$(record "$HELD" .status)" rolled_back
 arm
 
 echo "== N7: HTTP 200 ohne status rolled_back ist für die CLI keine Rücknahme"
@@ -972,7 +1022,7 @@ eq "N7: die Site antwortet wieder" "$(code "$SOURCE_URL/")" 200
 finished "N7" "$HELD"
 state_clean "N7"
 
-echo "== R10: die Sperre des Pushs ist belegt – 423 busy, die CLI wiederholt; über den Agent wpsync_push_busy"
+echo "== R10: die Sperre des Pushs ist belegt – 423 busy, die CLI wiederholt; über den Agent Exit 44 (busy), wenn sie belegt bleibt"
 # Eine fremde Hand hält rescue.lock (flock im Container, dieselbe Sperre wie PHP): so sieht rescue.php
 # eine laufende Rücknahme über den Agent oder einen Commit an seiner Naht.
 hold belegt themes/e2e-theme --content "$PKG/klein.jsonl"
@@ -999,7 +1049,7 @@ LOCKER=$!
 sleep 1.5
 jrun belegt-agent-busy "$WPSYNC" rollback "$TARGET" "$HELD" --json
 eq "R10: über den Agent, Sperre bleibt belegt: Exit 44 (busy)" "$RC $(last belegt-agent-busy '.error.code')" "44 busy"
-ok "R10: der Agent antwortet mit wpsync_push_busy (HTTP 423)" contains "$(last belegt-agent-busy '.error.message')" "HTTP 423 wpsync_push_busy"
+ok "R10: die Meldung des Agents nennt die laufende Rücknahme" contains "$(last belegt-agent-busy '.error.message')" "läuft gerade eine Rücknahme oder sein Commit"
 eq "R10: nichts ist zurückgenommen, der Push bleibt offen" "$(lopt options_e2e_fuse) $(pending | jq -r .push_id)" "an $HELD"
 wait "$LOCKER" || true
 (src exec flock -x "/var/www/html/public/wp-content/${D#"$WPC"/}/rescue.lock" sleep 5 >/dev/null 2>&1) &
