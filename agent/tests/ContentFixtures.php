@@ -65,6 +65,22 @@ final class ContentFixtures
         return ['term_taxonomy_id' => $id, 'term_id' => $termId, 'taxonomy' => $taxonomy, 'description' => '', 'parent' => '0', 'count' => '0'];
     }
 
+    public const STAGING_DIR = 'wpsync-staging-0123456789ab';
+
+    /** Das Ziel Live über einem Store im Speicher. */
+    public static function live(ContentMemory $store, string $uploadsDir = '/nonexistent/uploads', string $siteurl = self::HOME): \WpSync\ContentTarget
+    {
+        return new \WpSync\ContentTarget('live', $store, new ContentOrigin(self::HOME), self::HOME, $siteurl, self::HOME, 'wp_', $uploadsDir, self::HOME . '/wp-content/uploads', 'auto');
+    }
+
+    /** Die Staging-Kopie derselben Site: ihre Werte tragen den Pfad der Kopie hinter dem Host. */
+    public static function staging(ContentMemory $store, string $uploadsDir = '/nonexistent/uploads'): \WpSync\ContentTarget
+    {
+        $url    = self::HOME . '/' . self::STAGING_DIR;
+        $origin = new ContentOrigin(self::HOME, new \WpSync\StagingReplace(self::HOME, '/' . self::STAGING_DIR));
+        return new \WpSync\ContentTarget('staging', $store, $origin, self::HOME, self::HOME, $url, 'stgabcdef_', $uploadsDir, $url . '/wp-content/uploads', 'auto');
+    }
+
     /** Abdruck, den das Manifest für diesen Rohzustand des Ziels nennt (Ziel: Live mit HOME). */
     public static function hash(string $table, string $key, ?array $raw): string
     {

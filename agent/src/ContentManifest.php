@@ -138,7 +138,7 @@ final class ContentManifest
     }
 
     /** Schema, Host und Port in einer Form, in der sich zwei URLs vergleichen lassen; '' wenn unlesbar. */
-    private static function origin(string $url): string
+    public static function origin(string $url): string
     {
         $parts  = parse_url($url);
         $scheme = strtolower((string) ($parts['scheme'] ?? ''));
