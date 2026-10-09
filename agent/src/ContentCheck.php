@@ -180,6 +180,10 @@ final class ContentCheck
                     $keys['postmeta'][] = Canon::pairKey($row['key'], $meta);
                 }
             }
+            // Die Sicherungen eines Attachments liegen im Ordner seiner Datei (files()).
+            if ($row['table'] === 'postmeta' && strtolower(ContentState::split($row['key'])[1]) === '_wp_attachment_backup_sizes') {
+                $keys['postmeta'][] = Canon::pairKey($object, '_wp_attached_file');
+            }
         }
         foreach ($this->rows['term_relationships'] ?? [] as $row) {
             foreach ($row['values'] as $entry) {
@@ -605,9 +609,13 @@ final class ContentCheck
         return $dangling;
     }
 
+    /** Meta-Schlüssel, die Dateien eines Attachments nennen – WordPress findet sie ohne Rücksicht auf Gross/klein. */
+    private const FILE_META = ['_wp_attached_file', '_wp_attachment_metadata', '_wp_attachment_backup_sizes'];
+
     /**
      * Nr. 9: jede Datei eines Attachments liegt auf dem Ziel oder kommt mit der Einheit uploads (S10).
-     * Geprüft wird jeder Wert des Paars; _wp_attached_file hat höchstens einen.
+     * Geprüft wird jeder Wert des Paars, wie er geschrieben wird – nach dem Einsetzen der Origin –,
+     * und in jeder Schreibweise des Schlüssels; _wp_attached_file hat höchstens einen.
      *
      * @param array<string, mixed> $uploads
      */
@@ -616,22 +624,37 @@ final class ContentCheck
         $missing = [];
         $invalid = [];
         foreach ($this->rows['postmeta'] ?? [] as $key => $row) {
-            $name = ContentState::split((string) $key)[1];
-            if (($name !== '_wp_attached_file' && $name !== '_wp_attachment_metadata') || $row['values'] === []) {
+            $key = (string) $key;
+            list($object, $name) = ContentState::split($key);
+            $name = strtolower($name);
+            if (!in_array($name, self::FILE_META, true) || $row['values'] === []) {
                 continue;
             }
             // Ein Attachment hat genau eine Datei: WordPress liest den ersten Wert, wer sonst liest, vielleicht einen anderen.
             if ($name === '_wp_attached_file' && count($row['values']) > 1) {
-                $invalid[] = ContentException::key('postmeta', (string) $key);
+                $invalid[] = ContentException::key('postmeta', $key);
                 continue;
             }
-            foreach ($row['values'] as $value) {
-                foreach (self::attachmentFiles($name, (string) $value) as $rel) {
+            $dir = '';
+            if ($name === '_wp_attachment_backup_sizes') {
+                $dir = $this->attachedDir($object);
+                if ($dir === null) {
+                    $invalid[] = ContentException::key('postmeta', $key); // ohne Datei des Attachments kein Ordner für ihre Sicherungen
+                    continue;
+                }
+            }
+            foreach ($this->inserted['postmeta'][$key]['values'] ?? $row['values'] as $value) {
+                $files = self::attachmentFiles($name, (string) $value, $dir);
+                if ($files === null) {
+                    $invalid[] = ContentException::key('postmeta', $key);
+                    continue 2;
+                }
+                foreach ($files as $rel) {
                     // Härtung S3: derselbe Massstab wie für die Einheit uploads – Pfad, Name, Typ.
                     $ok = strpos($rel, '://') === false && PushUploads::validFile($rel) && !PushUploads::blockedName($rel)
                         && (!function_exists('wp_check_filetype') || PushUploads::allowedName($rel));
                     if (!$ok) {
-                        $invalid[] = ContentException::key('postmeta', (string) $key);
+                        $invalid[] = ContentException::key('postmeta', $key);
                         continue 3;
                     }
                     $full = $this->target->uploadsDir . '/' . $rel;
@@ -651,17 +674,49 @@ final class ContentCheck
     }
 
     /**
-     * Dateien eines Attachments relativ zu uploads/ (S10): _wp_attached_file selbst; aus
-     * _wp_attachment_metadata file, sizes.*.file und original_image im Ordner von file.
-     *
-     * @return list<string>
+     * Ordner der Datei eines Attachments relativ zu uploads/, mit Schrägstrich am Ende ('' direkt
+     * unter uploads): aus dem Paket, sonst vom Ziel. null: das Objekt hat keine Datei.
      */
-    public static function attachmentFiles(string $metaKey, string $value): array
+    private function attachedDir(string $object): ?string
+    {
+        $pair = Canon::pairKey($object, '_wp_attached_file');
+        $file = $this->inserted['postmeta'][$pair]['values'][0] ?? (isset($this->rows['postmeta'][$pair]) ? null : ($this->state['postmeta'][$pair]['values'][0] ?? null));
+        if (!is_string($file) || $file === '') {
+            return null;
+        }
+        return dirname($file) === '.' ? '' : dirname($file) . '/';
+    }
+
+    /**
+     * Dateien eines Attachments relativ zu uploads/ (S10): _wp_attached_file selbst; aus
+     * _wp_attachment_metadata file, sizes.*.file und original_image im Ordner von file; aus
+     * _wp_attachment_backup_sizes das Feld file jedes Eintrags im Ordner $dir – dort nur ein
+     * Dateiname, kein Pfad.
+     *
+     * @param string $metaKey kleingeschrieben
+     * @param string $dir     nur für _wp_attachment_backup_sizes: Ordner der Datei des Attachments, '' oder mit / am Ende
+     * @return list<string>|null null: der Wert hat nicht die Form, die WordPress dort schreibt
+     */
+    public static function attachmentFiles(string $metaKey, string $value, string $dir = ''): ?array
     {
         if ($metaKey === '_wp_attached_file') {
             return $value === '' ? [] : [$value];
         }
         $meta = SerializedWalker::looksSerialized($value) ? @unserialize($value, ['allowed_classes' => false]) : null;
+        if ($metaKey === '_wp_attachment_backup_sizes') {
+            if (!is_array($meta)) {
+                return $value === '' ? [] : null;
+            }
+            $files = [];
+            foreach ($meta as $size) {
+                $file = is_array($size) ? ($size['file'] ?? null) : null;
+                if (!is_string($file) || $file === '' || basename($file) !== $file || strpos($file, '\\') !== false) {
+                    return null;
+                }
+                $files[] = $dir . $file;
+            }
+            return array_values(array_unique($files));
+        }
         if (!is_array($meta) || !is_string($meta['file'] ?? null) || $meta['file'] === '') {
             return [];
         }

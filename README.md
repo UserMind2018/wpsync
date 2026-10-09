@@ -681,7 +681,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
 | `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
 | `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
-| `upload_missing` | eine Datei eines Attachments (`_wp_attached_file`, aus `_wp_attachment_metadata` `file`, `sizes.*.file`, `original_image`) liegt weder auf dem Ziel noch in `--uploads`; `error.paths` nennt sie |
+| `upload_missing` | eine Datei eines Attachments (`_wp_attached_file`, aus `_wp_attachment_metadata` `file`, `sizes.*.file`, `original_image`, aus `_wp_attachment_backup_sizes` `file` jedes Eintrags – die Schlüssel in jeder Gross-/Kleinschreibung) liegt weder auf dem Ziel noch in `--uploads`; `error.paths` nennt sie. Geprüft wird der Wert, wie er geschrieben wird; ein Pfad, der nicht unter `uploads` liegen darf, ist `blocked_row` |
 | `author_unknown` | das Paket legt Beiträge an, das Push-Fenster wurde aber nicht im WP-Admin geöffnet – der Benutzer, der es öffnet, wird ihr Autor. Erst beim echten Push, nicht im Probelauf |
 | `package_missing` | das Paket liegt nicht (mehr) auf der Site |
 | `content_failed` | Datenbank oder Dateisystem haben versagt; nichts wurde übernommen |

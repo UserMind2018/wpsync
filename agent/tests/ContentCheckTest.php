@@ -563,6 +563,66 @@ final class ContentCheckTest extends TestCase
         exec('rm -rf ' . escapeshellarg($dir));
     }
 
+    /**
+     * N4: WordPress findet einen Meta-Schlüssel ohne Rücksicht auf Gross/klein – die Dateiprüfung
+     * auch. Sie prüft den Wert, wie er geschrieben wird (nach dem Einsetzen der Origin), und die
+     * Dateien aus _wp_attachment_backup_sizes mit.
+     */
+    public function testAttachmentFilesAreCheckedForEverySpellingAndOnTheInsertedValue(): void
+    {
+        $dir = sys_get_temp_dir() . '/wpsync-check-' . bin2hex(random_bytes(4));
+        mkdir($dir . '/2026/10', 0777, true);
+        file_put_contents($dir . '/2026/10/da.jpg', 'x');
+        file_put_contents($dir . '/2026/10/da-e1.jpg', 'x');
+        $target = ContentFixtures::live($this->store, $dir);
+        $row    = static function (string $name, array $values, string $id = '300'): array {
+            return ContentFixtures::row('insert', 'postmeta', $id . "\0" . $name, 'absent', ['values' => $values]);
+        };
+
+        // Andere Schreibweise des Schlüssels: derselbe Massstab.
+        foreach (['_WP_Attached_File', '_wp_Attached_file', '_WP_ATTACHED_FILE'] as $name) {
+            $e = $this->refused('blocked_row', [$row($name, ['../../../wp-config.php'])], [], $target);
+            $this->assertSame([['table' => 'postmeta', 'key' => "300\0" . $name]], $e->keys());
+            $this->refused('upload_missing', [$row($name, ['2026/10/fehlt.jpg'])], [], $target);
+            $this->refused('blocked_row', [$row($name, ['2026/10/da.jpg', '2026/10/da.jpg'])], [], $target);
+            $this->check([$row($name, ['2026/10/da.jpg'])], [], $target)->run();
+        }
+        $sized = serialize(['file' => '2026/10/da.jpg', 'sizes' => ['x' => ['file' => '../../../wp-config.php']]]);
+        $this->refused('blocked_row', [$row('_WP_Attachment_Metadata', [$sized])], [], $target);
+        $this->refused('upload_missing', [$row('_wp_attachment_METADATA', [serialize(['file' => '2026/10/fehlt.jpg'])])], [], $target);
+
+        // Der eingesetzte Wert zählt: aus dem Platzhalter wird eine Adresse, und die ist kein Pfad unter uploads.
+        $e = $this->refused('blocked_row', [$row('_wp_attached_file', [ContentOrigin::PLAIN . '/2026/10/da.jpg'])], [], $target);
+        $this->assertSame([['table' => 'postmeta', 'key' => "300\0_wp_attached_file"]], $e->keys());
+
+        // _wp_attachment_backup_sizes: jede Datei liegt im Ordner der Datei des Attachments.
+        $backup = static function (array $files): string {
+            $out = [];
+            foreach ($files as $i => $file) {
+                $out['full-' . $i] = ['file' => $file, 'width' => 10, 'height' => 10];
+            }
+            return serialize($out);
+        };
+        $attached = $row('_wp_attached_file', ['2026/10/da.jpg']);
+        $this->check([$attached, $row('_wp_attachment_backup_sizes', [$backup(['da-e1.jpg'])])], [], $target)->run();
+        $this->check([$attached, $row('_WP_Attachment_Backup_Sizes', [$backup(['neu-e2.jpg'])])], [], $target)->run(['2026/10/neu-e2.jpg' => 1]);
+        $e = $this->refused('upload_missing', [$attached, $row('_wp_attachment_backup_sizes', [$backup(['da-e1.jpg', 'fehlt-e3.jpg'])])], [], $target);
+        $this->assertSame(['2026/10/fehlt-e3.jpg'], $e->toArray()['paths']);
+        foreach (['../../../wp-config.php', 'sub/da-e1.jpg', '/etc/passwd', 'shell.php', '.htaccess', 'x.php.jpg', ''] as $file) {
+            $e = $this->refused('blocked_row', [$attached, $row('_wp_attachment_backup_sizes', [$backup([$file])])], [], $target);
+            $this->assertSame([['table' => 'postmeta', 'key' => "300\0_wp_attachment_backup_sizes"]], $e->keys(), $file);
+        }
+        $this->refused('blocked_row', [$attached, $row('_wp_attachment_backup_sizes', [serialize(['full' => 'kein Eintrag'])])], [], $target);
+
+        // Die Datei des Attachments steht nicht im Paket: sie kommt vom Ziel.
+        $this->store->data['postmeta']["300\0_wp_attached_file"] = ['values' => ['2026/10/da.jpg']];
+        $this->check([$row('_wp_attachment_backup_sizes', [$backup(['da-e1.jpg'])])], [], $target)->run();
+        $this->refused('upload_missing', [$row('_wp_attachment_backup_sizes', [$backup(['fehlt-e3.jpg'])])], [], $target);
+        // Ohne Datei des Attachments gibt es keinen Ordner, in dem die Sicherungen liegen könnten.
+        $this->refused('blocked_row', [$row('_wp_attachment_backup_sizes', [$backup(['da-e1.jpg'])], '219')], [], $target);
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
     /** Nr. 9, S10: die Dateimenge eines Attachments ist genau festgelegt. */
     public function testUploadMissing(): void
     {

@@ -166,6 +166,12 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Schlüssel in der Reihenfolge des Pakets) und prüft die Dateien von Attachments
   (`upload_missing`) nicht. Die Antwort nennt `content.partial: true`; die CLI reicht `partial`
   im `plan`-Ereignis durch und sagt es in einer Zeile. Mit offenem Fenster unverändert
+- Agent: Die Dateiprüfung von Attachments erkennt ihre Meta-Schlüssel in jeder
+  Gross-/Kleinschreibung (`_WP_Attached_File` umging sie; WordPress liest den Schlüssel
+  trotzdem), prüft den Pfad am Wert, wie er geschrieben wird (nach dem Einsetzen der Adresse des
+  Ziels), und nimmt `_wp_attachment_backup_sizes` dazu: `file` jedes Eintrags ist ein blosser
+  Dateiname im Ordner der Datei des Attachments, sonst `blocked_row`; fehlt die Datei,
+  `upload_missing`
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 
