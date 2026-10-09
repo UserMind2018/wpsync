@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       wpsync Agent
  * Description:       Signierte Schnittstelle für wpsync: pull (Live → Lokal), push von Code im Push-Fenster und Staging-Kopie auf dem Server.
- * Version:           0.7.0
+ * Version:           0.8.0
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -18,7 +18,7 @@ if (defined('WPSYNC_STAGING')) {
     return;
 }
 
-const WPSYNC_VERSION = '0.7.0';
+const WPSYNC_VERSION = '0.8.0';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
