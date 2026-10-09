@@ -72,3 +72,18 @@ func withContent(changed, all []agentapi.Table, content []string, fresh bool) (r
 	}
 	return reload, true
 }
+
+// reloadsContent reports whether one of the tables to reload is a content table. A pull without
+// --content then drops the content state: its baseline would no longer be the working copy (Plan B11).
+func reloadsContent(tables []agentapi.Table, prefix string) bool {
+	isContent := map[string]bool{}
+	for _, n := range contentNames {
+		isContent[prefix+n] = true
+	}
+	for _, t := range tables {
+		if isContent[t.Name] {
+			return true
+		}
+	}
+	return false
+}

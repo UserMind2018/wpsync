@@ -424,6 +424,17 @@ func run(o Options) error {
 			return err
 		}
 
+		// B11: without --content nobody rebuilds manifest and baseline, so a reloaded content table
+		// outdates them. Dropped before the import – from there on the working copy is another one.
+		if !o.Content && reloadsContent(tables, delta.Env.TablePrefix) {
+			had := content.Fresh(siteDir)
+			if err := content.Invalidate(siteDir); err != nil {
+				return fmt.Errorf("Inhaltsstand verwerfen: %w", err)
+			}
+			if had {
+				fmt.Fprintf(o.Out, "  Inhaltsstand verworfen (Inhaltstabellen neu geladen) – neu bauen mit wpsync pull %s --content\n", name)
+			}
+		}
 		if err := importTablesIn(runner, dir, tables); err != nil {
 			return localenv.Wrap("db import", err)
 		}

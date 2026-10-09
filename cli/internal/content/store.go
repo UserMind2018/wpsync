@@ -183,6 +183,25 @@ func Fresh(siteDir string) bool {
 	return true
 }
 
+// Invalidate drops the content state of a site folder: summary.json goes, so Fresh says no and the
+// next pull with --content reloads the content tables and rebuilds the baseline. A pull without
+// --content calls it before it replaces a content table (Plan B11). No state is no error – neither
+// a missing folder nor one behind a symlink, which is never followed and never counts as fresh.
+func Invalidate(siteDir string) error {
+	root, err := open(siteDir, false)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, safefs.ErrSymlink) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.Remove(summaryName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 type recordLine struct {
 	T string  `json:"t"`
 	K string  `json:"k"`

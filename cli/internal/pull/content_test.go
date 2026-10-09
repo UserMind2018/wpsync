@@ -1,12 +1,14 @@
 package pull
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,9 +128,11 @@ type contentDriver struct {
 
 func (d *contentDriver) Runner(string) localenv.Runner { return d.runner }
 
-// contentAgent is an agent 0.7.0 with the seven content tables and a manifest of two rows.
+// contentAgent is an agent 0.7.0 with the seven content tables and a manifest of two rows. With
+// usersSum set the delta also carries wp_users – a table that is no content table.
 type contentAgent struct {
 	postsSum     string
+	usersSum     string
 	manifestFail bool
 	routes       []string
 }
@@ -160,6 +164,9 @@ func (a *contentAgent) serve(t *testing.T) *httptest.Server {
 					sum = a.postsSum
 				}
 				tables = append(tables, fmt.Sprintf(`{"name":"wp_%s","checksum":%q,"rows":1,"bytes":40}`, n, sum))
+			}
+			if a.usersSum != "" {
+				tables = append(tables, fmt.Sprintf(`{"name":"wp_users","checksum":%q,"rows":1,"bytes":40}`, a.usersSum))
 			}
 			fmt.Fprintf(w, `{"env":{"php_version":"8.3.35","wp_version":"6.8.1","table_prefix":"wp_","home":"https://kunde.de","siteurl":"https://kunde.de","agent_version":"0.7.0","anon":"1.abcd1234"},
 "tables":[%s],"files":[],"skipped":[],"next":null}`, strings.Join(tables, ","))
@@ -287,4 +294,129 @@ func TestRunWithoutContentLeavesContentAlone(t *testing.T) {
 	if res.Content != nil || agent.count("/wpsync/v1/content/manifest") != 0 {
 		t.Fatalf("content = %+v, routes = %v", res.Content, agent.routes)
 	}
+	// B11 on a site without content state: the seven tables were loaded, nothing to drop, no folder.
+	if res.TablesLoaded != 7 {
+		t.Fatalf("tables = %d", res.TablesLoaded)
+	}
+	if _, err := os.Lstat(content.Paths(filepath.Join(o.SitesRoot, "kunde")).Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".wpsync/content after a pull without --content: %v", err)
+	}
+}
+
+func TestReloadsContent(t *testing.T) {
+	all := deltaTables()
+	if reloadsContent(nil, "wp_") || reloadsContent(all[7:], "wp_") {
+		t.Fatal("users and wc_orders are no content tables")
+	}
+	for i := 0; i < 7; i++ {
+		if !reloadsContent([]agentapi.Table{all[8], all[i]}, "wp_") {
+			t.Errorf("%s is a content table", all[i].Name)
+		}
+	}
+	if reloadsContent(all[:7], "other_") {
+		t.Fatal("tables of another prefix are no content tables")
+	}
+}
+
+// Plan B11: a pull without --content that reloads a content table drops the content state – the
+// baseline no longer belongs to the working copy. The next pull with --content reloads all seven
+// and says so. A pull without --content that only reloads other tables leaves the state alone.
+func TestRunWithoutContentDropsTheContentStateItOutdates(t *testing.T) {
+	agent := &contentAgent{postsSum: "c1", usersSum: "u1"}
+	srv := agent.serve(t)
+	defer srv.Close()
+	fake := newFakeDriver(false)
+	runner := &streamRunner{fakeRunner: fake.runner, export: localExport}
+	o := pullOptions(t, srv.URL, &contentDriver{fakeDriver: fake, runner: runner})
+	var res Result
+	o.Report = &res
+	siteDir := filepath.Join(o.SitesRoot, "kunde")
+	pull := func(step string, withContent bool) {
+		t.Helper()
+		o.Content = withContent
+		o.Out = &bytes.Buffer{}
+		res = Result{}
+		if err := Run(o); err != nil {
+			t.Fatalf("%s: %v\n%s", step, err, o.Out)
+		}
+	}
+
+	pull("first pull with --content", true)
+	if res.Content == nil || !res.Content.Reloaded || res.TablesLoaded != 8 || !content.Fresh(siteDir) {
+		t.Fatalf("first pull: content = %+v, tables = %d, fresh = %v", res.Content, res.TablesLoaded, content.Fresh(siteDir))
+	}
+
+	// Only users changed: the content tables stay, so does the state.
+	agent.usersSum = "u2"
+	pull("pull without --content, users changed", false)
+	if res.TablesLoaded != 1 || !content.Fresh(siteDir) {
+		t.Fatalf("users only: tables = %d, fresh = %v", res.TablesLoaded, content.Fresh(siteDir))
+	}
+	if strings.Contains(fmt.Sprint(o.Out), "Inhaltsstand") {
+		t.Errorf("nothing was dropped:\n%s", o.Out)
+	}
+	pull("pull with --content, nothing changed", true)
+	if res.Content == nil || res.Content.Reloaded || res.TablesLoaded != 0 {
+		t.Fatalf("unchanged: content = %+v, tables = %d", res.Content, res.TablesLoaded)
+	}
+
+	// posts changed and the pull runs without --content: the baseline is outdated.
+	agent.postsSum = "c2"
+	manifests := agent.count("/wpsync/v1/content/manifest")
+	pull("pull without --content, posts changed", false)
+	if res.TablesLoaded != 1 || res.Content != nil || agent.count("/wpsync/v1/content/manifest") != manifests {
+		t.Fatalf("posts changed: tables = %d, content = %+v", res.TablesLoaded, res.Content)
+	}
+	if content.Fresh(siteDir) {
+		t.Fatal("the content state still counts as fresh although posts was reloaded")
+	}
+	if !strings.Contains(fmt.Sprint(o.Out), "Inhaltsstand verworfen") {
+		t.Errorf("the pull does not say that it dropped the state:\n%s", o.Out)
+	}
+
+	// For the delta nothing changed any more – the dropped state alone makes the pull reload all seven.
+	pull("next pull with --content", true)
+	if res.Content == nil || !res.Content.Reloaded || res.TablesLoaded != 7 || !content.Fresh(siteDir) {
+		t.Fatalf("after the drop: content = %+v, tables = %d, fresh = %v", res.Content, res.TablesLoaded, content.Fresh(siteDir))
+	}
+}
+
+// The state is dropped before the import: if the import fails, the tables may be half replaced.
+func TestRunWithoutContentDropsTheStateBeforeTheImport(t *testing.T) {
+	agent := &contentAgent{postsSum: "c1"}
+	srv := agent.serve(t)
+	defer srv.Close()
+	fake := newFakeDriver(false)
+	runner := &streamRunner{fakeRunner: fake.runner, export: localExport}
+	o := pullOptions(t, srv.URL, &contentDriver{fakeDriver: fake, runner: runner})
+	o.Content = true
+	if err := Run(o); err != nil {
+		t.Fatalf("first pull: %v\n%s", err, o.Out)
+	}
+	siteDir := filepath.Join(o.SitesRoot, "kunde")
+
+	agent.postsSum = "c2"
+	o.Content = false
+	failing := &failingImport{streamRunner: runner, siteDir: siteDir}
+	o.Driver = &contentDriver{fakeDriver: fake, runner: failing}
+	if err := Run(o); err == nil || !failing.asked {
+		t.Fatalf("expected the import to fail, err = %v", err)
+	}
+	if failing.freshAtImport || content.Fresh(siteDir) {
+		t.Fatalf("fresh at the import = %v, afterwards = %v", failing.freshAtImport, content.Fresh(siteDir))
+	}
+}
+
+// failingImport fails every SQL import and notes whether the content state was still fresh then.
+type failingImport struct {
+	*streamRunner
+	siteDir       string
+	asked         bool
+	freshAtImport bool
+}
+
+func (f *failingImport) RunStdin(stdin io.Reader, args ...string) error {
+	f.asked = true
+	f.freshAtImport = content.Fresh(f.siteDir)
+	return errors.New("import failed")
 }

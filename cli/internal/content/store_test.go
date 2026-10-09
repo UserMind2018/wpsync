@@ -247,3 +247,90 @@ func TestStoreNeverReadsThroughASymlink(t *testing.T) {
 		t.Fatalf("map=%+v err=%v", m, err)
 	}
 }
+
+// freshState writes a complete content state of this CLI's canonical form.
+func freshState(t *testing.T, dir string) Files {
+	t.Helper()
+	f := Paths(dir)
+	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful} {
+		write(t, p, "x")
+	}
+	write(t, f.Summary, `{"rows":3,"unfaithful":0,"id_max":{"posts":9},"canon_version":1}`)
+	if !Fresh(dir) {
+		t.Fatal("expected a fresh state")
+	}
+	return f
+}
+
+// Plan B11: Invalidate drops the state by removing summary.json alone, can be repeated and needs
+// neither the folder nor the site folder.
+func TestInvalidateDropsTheState(t *testing.T) {
+	dir := t.TempDir()
+	f := freshState(t, dir)
+	for i := 0; i < 2; i++ {
+		if err := Invalidate(dir); err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		if Fresh(dir) {
+			t.Fatalf("call %d: still fresh", i+1)
+		}
+	}
+	if _, err := os.Lstat(f.Summary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("summary.json: %v", err)
+	}
+	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful} {
+		if data, err := os.ReadFile(p); err != nil || string(data) != "x" {
+			t.Errorf("%s: %q, %v", filepath.Base(p), data, err)
+		}
+	}
+
+	empty := t.TempDir()
+	if err := Invalidate(empty); err != nil {
+		t.Fatalf("site folder without content state: %v", err)
+	}
+	if entries, _ := os.ReadDir(empty); len(entries) != 0 {
+		t.Fatalf("Invalidate created %v", entries)
+	}
+	if err := Invalidate(filepath.Join(empty, "missing")); err != nil {
+		t.Fatalf("missing site folder: %v", err)
+	}
+}
+
+// A symlinked content folder is no state (Fresh says no) and nothing behind it is removed; a
+// symlink in place of summary.json is removed itself.
+func TestInvalidateNeverFollowsASymlink(t *testing.T) {
+	outside := t.TempDir()
+	kept := freshState(t, outside).Summary
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".wpsync"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(Paths(outside).Dir, Paths(dir).Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := Invalidate(dir); err != nil || Fresh(dir) {
+		t.Fatalf("symlinked folder: err=%v fresh=%v", err, Fresh(dir))
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("removed through the symlinked folder: %v", err)
+	}
+
+	dir = t.TempDir()
+	f := freshState(t, dir)
+	if err := os.Remove(f.Summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(kept, f.Summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := Invalidate(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(f.Summary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the symlink stays: %v", err)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("removed the target of the symlink: %v", err)
+	}
+}
