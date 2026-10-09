@@ -24,7 +24,7 @@ foreach ([
     'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
     'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'PushRescueStub', 'PushWindow', 'Push',
-    'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'StagingConfig', 'StagingAccess', 'StagingHosts',
+    'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'StagingConfig', 'StagingAccess', 'StagingHosts',
     'StagingFiles', 'StagingDb', 'Staging', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
