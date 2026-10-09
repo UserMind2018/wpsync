@@ -229,6 +229,10 @@ func TestRunContentBuildsReusesAndProtectsTheBaseline(t *testing.T) {
 	if m, _, err := content.ReadMap(siteDir); err != nil || m.Local != "http://kunde.local" || m.Live.Home != "https://kunde.de" {
 		t.Fatalf("map = %+v, %v", m, err)
 	}
+	// What the export needs of the source to run offline, as /delta named it.
+	if env, err := content.ReadEnv(siteDir); err != nil || env.PHPVersion != "8.3.35" || env.TablePrefix != "wp_" {
+		t.Fatalf("env = %+v, %v", env, err)
+	}
 	if stored, err := content.LoadSummary(siteDir); err != nil || stored.Reloaded {
 		t.Fatalf("summary.json = %+v, %v", stored, err)
 	}

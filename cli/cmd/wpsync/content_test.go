@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,8 +15,6 @@ import (
 	"github.com/usermind/wpsync/internal/cliout"
 	"github.com/usermind/wpsync/internal/content"
 	"github.com/usermind/wpsync/internal/ddev"
-	"github.com/usermind/wpsync/internal/keychain"
-	"github.com/usermind/wpsync/internal/secretstore"
 )
 
 func TestContentNeedsASubcommand(t *testing.T) {
@@ -60,6 +60,7 @@ func contentState(t *testing.T, siteDir, local string) {
 	f := content.Paths(siteDir)
 	for path, data := range map[string]string{
 		f.Manifest: `{"t":"posts","k":"1","h":"aa"}` + "\n", f.Baseline: `{"t":"posts","k":"1","h":"aa"}` + "\n", f.Unfaithful: "",
+		f.Env:     `{"php_version":"8.3.35","table_prefix":"kd_"}` + "\n",
 		f.Summary: fmt.Sprintf(`{"rows":1,"unfaithful":0,"id_max":{"posts":1},"canon_version":%d,"reloaded":false}`+"\n", content.CanonVersion),
 	} {
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -88,17 +89,28 @@ func contentFiles(t *testing.T, siteDir string) string {
 	return strings.Join(out, "\x01")
 }
 
+// offlineSite pairs "vorlage" with a site that must not see a single request: the export runs
+// without the network.
+func offlineSite(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("content export asked the site: %s %s", r.Method, r.URL)
+		http.Error(w, "offline", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	paired(t, "vorlage", srv.URL)
+}
+
 func exportArgs(docroot string, extra ...string) []string {
 	return append(append([]string{"content", "export", "vorlage", "--secret-stdin"}, extra...), containerArgs(docroot)...)
 }
 
 // Container mode: stdout carries the record lines and nothing else, every message – also the one
-// of the docker run – goes to stderr, the URL comes from map.json, and nothing below
-// .wpsync/content changes.
+// of the docker run – goes to stderr, the URL comes from map.json, PHP version and table prefix
+// come from env.json (no request to the site), and nothing below .wpsync/content changes.
 func TestContentExportContainerWritesOnlyRowsToStdout(t *testing.T) {
 	env(t)
-	ag := newAgent(t)
-	paired(t, "vorlage", ag.URL())
+	offlineSite(t)
 	docroot, dockerLog := containerSite(t)
 	t.Setenv("FAKE_EXPORT", exportOutput)
 	siteDir := filepath.Dir(docroot)
@@ -123,6 +135,9 @@ func TestContentExportContainerWritesOnlyRowsToStdout(t *testing.T) {
 			t.Errorf("missing %q in the docker calls:\n%s", want, calls)
 		}
 	}
+	if !strings.Contains(string(calls), "-e WORDPRESS_TABLE_PREFIX ") {
+		t.Errorf("the run does not name the table prefix:\n%s", calls)
+	}
 	if strings.Contains(string(calls), "search-replace") || strings.Contains(string(calls), "mariadb") {
 		t.Errorf("the export must not write to the site:\n%s", calls)
 	}
@@ -139,8 +154,7 @@ func TestContentExportContainerWritesOnlyRowsToStdout(t *testing.T) {
 // B6: with --json the record lines stay as they are and the result object is the last line.
 func TestContentExportJSONEndsWithTheResult(t *testing.T) {
 	env(t)
-	ag := newAgent(t)
-	paired(t, "vorlage", ag.URL())
+	offlineSite(t)
 	docroot, _ := containerSite(t)
 	t.Setenv("FAKE_EXPORT", exportOutput)
 	contentState(t, filepath.Dir(docroot), mapLocalURL)
@@ -162,8 +176,7 @@ func TestContentExportJSONEndsWithTheResult(t *testing.T) {
 // An export that stops halfway fails; the rows written so far are followed by the failed result.
 func TestContentExportIncompleteFails(t *testing.T) {
 	env(t)
-	ag := newAgent(t)
-	paired(t, "vorlage", ag.URL())
+	offlineSite(t)
 	docroot, _ := containerSite(t)
 	t.Setenv("FAKE_EXPORT", exportRows) // no closing line
 	contentState(t, filepath.Dir(docroot), mapLocalURL)
@@ -185,8 +198,7 @@ func TestContentExportIncompleteFails(t *testing.T) {
 // step, no docker run, nothing on stdout.
 func TestContentExportNeedsAFreshContentState(t *testing.T) {
 	env(t)
-	ag := newAgent(t)
-	paired(t, "vorlage", ag.URL())
+	offlineSite(t)
 	docroot, dockerLog := containerSite(t)
 	t.Setenv("FAKE_EXPORT", exportOutput)
 	siteDir := filepath.Dir(docroot)
@@ -218,6 +230,48 @@ func TestContentExportNeedsAFreshContentState(t *testing.T) {
 	}
 }
 
+// env.json lies in the site folder and is checked like the values of /delta: with a value that
+// must not reach docker or WP-CLI, or with a file that cannot be read, nothing runs.
+func TestContentExportRefusesAnUnusableEnv(t *testing.T) {
+	env(t)
+	offlineSite(t)
+	docroot, dockerLog := containerSite(t)
+	t.Setenv("FAKE_EXPORT", exportOutput)
+	siteDir := filepath.Dir(docroot)
+	contentState(t, siteDir, mapLocalURL)
+	envFile := content.Paths(siteDir).Env
+	for _, bad := range []string{
+		`{"php_version":"8.3.35","table_prefix":"--exec=x"}`,
+		`{"php_version":"8.3 --privileged","table_prefix":"wp_"}`,
+		`{"table_prefix":"wp_"}`,
+		`not json`,
+	} {
+		if err := os.WriteFile(envFile, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := run(t, context.Background(), secrets, exportArgs(docroot)...)
+		if r.code != cliout.ExitLocalEnv || r.stdout != "" {
+			t.Errorf("%s: exit %d, stdout %q", bad, r.code, r.stdout)
+		}
+		for _, want := range []string{"env.json", "wpsync pull vorlage --content --full"} {
+			if !strings.Contains(r.stderr, want) {
+				t.Errorf("%s: stderr lacks %q:\n%s", bad, want, r.stderr)
+			}
+		}
+	}
+	// Without the file the state is not fresh at all.
+	if err := os.Remove(envFile); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, context.Background(), secrets, exportArgs(docroot)...)
+	if r.code != cliout.ExitUsage || r.stdout != "" || !strings.Contains(r.stderr, "zuerst: wpsync pull vorlage --content") {
+		t.Errorf("missing env.json: exit %d\nstdout: %q\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+	if calls, _ := os.ReadFile(dockerLog); len(calls) != 0 {
+		t.Errorf("docker ran:\n%s", calls)
+	}
+}
+
 // fakeDDEV logs argv per call; `ddev wp eval-file -` prints $FAKE_EXPORT on stdout and a line on
 // stderr, `ddev describe` would name another URL than map.json.
 const fakeDDEV = `#!/bin/sh
@@ -230,7 +284,8 @@ exit 0
 `
 
 // Mac mode: the DDEV driver writes its messages to stderr although the command runs without
-// --json, the URL comes from map.json and DDEV is neither started nor asked for its URL.
+// --json, the URL comes from map.json and DDEV is neither started nor asked for its URL. The
+// keychain is not touched.
 func TestContentExportDDEVKeepsStdoutForRows(t *testing.T) {
 	_, root := env(t)
 	useDocker(t, &cmdDocker{})
@@ -243,10 +298,6 @@ func TestContentExportDDEVKeepsStdoutForRows(t *testing.T) {
 	t.Setenv("FAKE_DDEV_LOG", ddevLog)
 	t.Setenv("FAKE_EXPORT", exportOutput)
 	paired(t, "kunde", "https://kunde.example")
-	kc := keychain.NewMemory()
-	if err := (secretstore.Keychain{KC: kc}).Set("kunde", testSecret); err != nil {
-		t.Fatal(err)
-	}
 	siteDir := filepath.Join(root, "kunde")
 	write(t, siteDir, "config.yaml", "name: kunde\n")
 	store, err := ddevStore(root)
@@ -263,7 +314,8 @@ func TestContentExportDDEVKeepsStdoutForRows(t *testing.T) {
 	contentState(t, siteDir, "http://kunde.ddev.site")
 	before := contentFiles(t, siteDir)
 
-	r := runKC(t, context.Background(), kc, "", "content", "export", "kunde")
+	// An empty keychain: the export needs no secret, it asks nobody.
+	r := run(t, context.Background(), "", "content", "export", "kunde")
 	if r.code != 0 {
 		t.Fatalf("exit %d\nstderr: %s", r.code, r.stderr)
 	}

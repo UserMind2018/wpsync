@@ -4,13 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 
-	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/cliout"
 	"github.com/usermind/wpsync/internal/content"
 	"github.com/usermind/wpsync/internal/localenv"
-	"github.com/usermind/wpsync/internal/pull"
 	"github.com/usermind/wpsync/internal/sitelock"
 	"github.com/usermind/wpsync/internal/sites"
 )
@@ -23,7 +20,7 @@ var errNoContentPull = errors.New("kein aktueller Inhaltsstand aus einem Pull mi
 // working copy as JSON lines to stdout (Spec Content-Push §4.4). stdout belongs to these lines
 // alone: every message, also those of the driver, goes to stderr, and with --json the result
 // object follows as the last line (Plan B6). The command changes neither the site nor
-// .wpsync/content.
+// .wpsync/content and sends no request: everything it needs lies in the site folder.
 func (a *app) cmdContent(args []string) error {
 	const call = "wpsync content export <site> [--json] [--secret-stdin] [--driver container …]"
 	a.dataStdout = true
@@ -40,7 +37,7 @@ func (a *app) cmdContent(args []string) error {
 	if err := df.needsSecretStdin(*secretStdin); err != nil {
 		return err
 	}
-	site, secret, err := loadSite(positional[0], a.secretStore(*secretStdin))
+	site, err := a.contentSite(positional[0], *secretStdin)
 	if err != nil {
 		return err
 	}
@@ -77,7 +74,7 @@ func (a *app) cmdContent(args []string) error {
 		return stale
 	}
 	if inContainer, _ := df.isContainer(); inContainer {
-		if err := a.configureFromSheet(drv, site, secret); err != nil {
+		if err := configureFromEnv(drv, dir, site.Name); err != nil {
 			return err
 		}
 	}
@@ -90,26 +87,34 @@ func (a *app) cmdContent(args []string) error {
 	return nil
 }
 
-// configureFromSheet gives the container driver what a pull takes from /delta: PHP version (the
-// WP-CLI image without --cli-image) and table prefix (WORDPRESS_TABLE_PREFIX of the run) of the
-// source. Nothing in the site folder records them, so the export asks the site's infosheet – one
-// read request. The DDEV driver needs neither for `ddev wp`.
-func (a *app) configureFromSheet(drv localenv.Driver, site *sites.Site, secret string) error {
-	client := agentapi.New(site.URL, site.KeyID, secret, site.RPS)
-	client.Ctx = a.ctx
-	sheet, _, err := client.Infosheet()
+// contentSite loads the paired site. The export signs no request, so on the Mac the keychain
+// stays untouched. With --secret-stdin (the container mode demands it) the secret line is read as
+// for a pull: the DB password the driver needs is the line after it, and a caller passes the same
+// stdin to every command.
+func (a *app) contentSite(name string, secretStdin bool) (*sites.Site, error) {
+	if secretStdin {
+		site, _, err := loadSite(name, a.secretStore(true))
+		return site, err
+	}
+	site, err := sites.Load(name)
 	if err != nil {
-		return explain(err, site)
+		return nil, cliout.Usage(fmt.Errorf("%v – zuerst wpsync pair ausführen", err))
 	}
-	if sheet == nil {
-		return pullError(pull.ErrNoInfosheet, site)
+	return site, nil
+}
+
+// configureFromEnv gives the container driver what a pull takes from /delta: PHP version (the
+// WP-CLI image without --cli-image) and table prefix (WORDPRESS_TABLE_PREFIX of the run) of the
+// source, as the pull with --content left them in env.json. content.ReadEnv checks the values –
+// the file lies in the site folder. The DDEV driver needs neither for `ddev wp`.
+func configureFromEnv(drv localenv.Driver, dir, site string) error {
+	env, err := content.ReadEnv(dir)
+	if err == nil {
+		err = drv.Configure(env.Agent())
 	}
-	if bad := sheet.Env.InvalidArgs(); len(bad) > 0 {
-		keys := make([]string, len(bad))
-		for i, f := range bad {
-			keys[i] = f.Key + " = " + agentapi.Printable(f.Value)
-		}
-		return fmt.Errorf("%w: %s", agentapi.ErrInvalidEnv, strings.Join(keys, ", "))
+	if err != nil {
+		return cliout.Hint(localenv.Wrap("env.json", err), fmt.Sprintf("%s ist nicht verwendbar (%v) – neu bauen mit: wpsync pull %s --content --full",
+			content.Paths(dir).Env, err, site))
 	}
-	return localenv.Wrap("configure", drv.Configure(sheet.Env))
+	return nil
 }

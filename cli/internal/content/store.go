@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/usermind/wpsync/internal/agentapi"
@@ -19,13 +20,14 @@ import (
 )
 
 // Files are the paths below <siteDir>/.wpsync/content (Spec Content-Push §4.3).
-type Files struct{ Dir, Manifest, Map, Baseline, Unfaithful, Summary string }
+type Files struct{ Dir, Manifest, Map, Baseline, Unfaithful, Env, Summary string }
 
 const (
 	manifestName   = "manifest.jsonl"
 	mapName        = "map.json"
 	baselineName   = "baseline.jsonl"
 	unfaithfulName = "unfaithful.jsonl"
+	envName        = "env.json"
 	summaryName    = "summary.json"
 )
 
@@ -33,7 +35,8 @@ const (
 func Paths(siteDir string) Files {
 	dir := filepath.Join(siteDir, ".wpsync", "content")
 	return Files{Dir: dir, Manifest: filepath.Join(dir, manifestName), Map: filepath.Join(dir, mapName),
-		Baseline: filepath.Join(dir, baselineName), Unfaithful: filepath.Join(dir, unfaithfulName), Summary: filepath.Join(dir, summaryName)}
+		Baseline: filepath.Join(dir, baselineName), Unfaithful: filepath.Join(dir, unfaithfulName), Env: filepath.Join(dir, envName),
+		Summary: filepath.Join(dir, summaryName)}
 }
 
 // Map is the domain map of the pull (Spec Content-Push §5.1): exactly the values the pull gave to
@@ -44,6 +47,40 @@ type Map struct {
 	Live         agentapi.ContentOrigins `json:"live"`
 	Local        string                  `json:"local"`
 	PulledAt     string                  `json:"pulled_at"`
+}
+
+// Env is what the local runtime needs of the source to run WP-CLI in the site: the container
+// driver picks its WP-CLI image by the PHP version and hands the table prefix to WordPress. The
+// pull takes both from /delta; env.json keeps them, so `content export` runs without a request to
+// the site. Nothing else of the source belongs here – no URL, no secret.
+type Env struct {
+	PHPVersion  string `json:"php_version"`
+	TablePrefix string `json:"table_prefix"`
+}
+
+// Agent returns e as the Env a localenv.Driver is configured with.
+func (e Env) Agent() agentapi.Env {
+	return agentapi.Env{PHPVersion: e.PHPVersion, TablePrefix: e.TablePrefix}
+}
+
+// ErrEnv: env.json holds a value that must not reach docker or WP-CLI. Not agentapi.ErrInvalidEnv:
+// that one names a value the source sent, this is a file of the site folder (exit code local_env).
+var ErrEnv = errors.New("unzulässiger Wert")
+
+// check applies the rules of /delta (agentapi.Env.InvalidArgs) to both values; unlike there, the
+// PHP version must be present.
+func (e Env) check() error {
+	var bad []string
+	if _, ok := agentapi.PHPMajorMinor(e.PHPVersion); !ok {
+		bad = append(bad, "php_version "+agentapi.Printable(e.PHPVersion))
+	}
+	if !agentapi.ValidTablePrefix(e.TablePrefix) {
+		bad = append(bad, "table_prefix "+agentapi.Printable(e.TablePrefix))
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("env.json: %w: %s", ErrEnv, strings.Join(bad, ", "))
+	}
+	return nil
 }
 
 // Summary is the `content` object of pull --json (Spec Content-Push §10).
@@ -145,6 +182,36 @@ func ReadMap(siteDir string) (Map, string, error) {
 	return m, hex.EncodeToString(sum[:]), nil
 }
 
+func writeEnv(root *os.Root, e Env) error {
+	data, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFile(root, envName, func(w io.Writer) error { _, err := w.Write(append(data, '\n')); return err })
+}
+
+// ReadEnv returns env.json. The file lies in the site folder (on the Mac in the DDEV mount), so
+// its values are checked before anyone hands them to docker or WP-CLI: ErrEnv.
+func ReadEnv(siteDir string) (Env, error) {
+	var e Env
+	root, err := open(siteDir, false)
+	if err != nil {
+		return e, err
+	}
+	defer root.Close()
+	data, err := safefs.ReadFile(root, envName)
+	if err != nil {
+		return e, err
+	}
+	if err := json.Unmarshal(data, &e); err != nil {
+		return Env{}, fmt.Errorf("env.json: %w", err)
+	}
+	if err := e.check(); err != nil {
+		return Env{}, err
+	}
+	return e, nil
+}
+
 // LoadSummary returns summary.json.
 func LoadSummary(siteDir string) (*Summary, error) {
 	root, err := open(siteDir, false)
@@ -175,7 +242,7 @@ func Fresh(siteDir string) bool {
 		return false
 	}
 	defer root.Close()
-	for _, name := range []string{manifestName, mapName, baselineName, unfaithfulName} {
+	for _, name := range []string{manifestName, mapName, baselineName, unfaithfulName, envName} {
 		if info, err := safefs.Lstat(root, name); err != nil || !info.Mode().IsRegular() {
 			return false
 		}
@@ -293,9 +360,10 @@ func compare(root *os.Root) (rows, bad int, err error) {
 }
 
 // Refresh rebuilds the content state after a pull that reloaded the content tables: manifest of
-// the live site, map.json, baseline of the local site and unfaithful.jsonl. summary.json goes
-// first and comes back last, so a failed refresh never looks fresh.
-func Refresh(siteDir string, src Source, r localenv.Runner, scope agentapi.Scope, localURL string, now time.Time) (*Summary, error) {
+// the live site, map.json, env.json (env: PHP version and table prefix of the source as this pull
+// got them), baseline of the local site and unfaithful.jsonl. summary.json goes first and comes
+// back last, so a failed refresh never looks fresh.
+func Refresh(siteDir string, src Source, r localenv.Runner, scope agentapi.Scope, localURL string, env Env, now time.Time) (*Summary, error) {
 	root, err := open(siteDir, true)
 	if err != nil {
 		return nil, err
@@ -320,6 +388,9 @@ func Refresh(siteDir string, src Source, r localenv.Runner, scope agentapi.Scope
 	}
 	if _, err := writeMap(root, Map{CanonVersion: head.CanonVersion, Variants: head.Variants, Live: head.Origins,
 		Local: localURL, PulledAt: now.UTC().Format(time.RFC3339)}); err != nil {
+		return nil, err
+	}
+	if err := writeEnv(root, env); err != nil {
 		return nil, err
 	}
 	if err := writeFile(root, baselineName, func(w io.Writer) error {

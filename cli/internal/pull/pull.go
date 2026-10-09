@@ -470,7 +470,8 @@ func run(o Options) error {
 				return localenv.Wrap("local url", err)
 			}
 			o.progress(PhaseContent, 0, 1)
-			if summary, err = content.Refresh(siteDir, client, runner, p.scope, url, time.Now()); err != nil {
+			env := content.Env{PHPVersion: delta.Env.PHPVersion, TablePrefix: delta.Env.TablePrefix}
+			if summary, err = content.Refresh(siteDir, client, runner, p.scope, url, env, time.Now()); err != nil {
 				return fmt.Errorf("Inhalts-Manifest: %w", err)
 			}
 			timer.done("Inhalte")

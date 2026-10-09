@@ -26,7 +26,7 @@ func write(t *testing.T, path, data string) {
 func TestPaths(t *testing.T) {
 	f := Paths("/sites/kunde")
 	if f.Dir != "/sites/kunde/.wpsync/content" || f.Manifest != f.Dir+"/manifest.jsonl" || f.Map != f.Dir+"/map.json" ||
-		f.Baseline != f.Dir+"/baseline.jsonl" || f.Unfaithful != f.Dir+"/unfaithful.jsonl" || f.Summary != f.Dir+"/summary.json" {
+		f.Baseline != f.Dir+"/baseline.jsonl" || f.Unfaithful != f.Dir+"/unfaithful.jsonl" || f.Summary != f.Dir+"/summary.json" || f.Env != f.Dir+"/env.json" {
 		t.Fatalf("%+v", f)
 	}
 }
@@ -100,6 +100,10 @@ func TestFreshNeedsEveryFileAndTheCanonVersion(t *testing.T) {
 		t.Fatal("another canon version is not fresh")
 	}
 	write(t, f.Summary, `{"rows":3,"unfaithful":0,"id_max":{"posts":9},"canon_version":1}`)
+	if Fresh(dir) {
+		t.Fatal("without env.json not fresh – the export could not run offline")
+	}
+	write(t, f.Env, `{"php_version":"8.3.35","table_prefix":"wp_"}`)
 	if !Fresh(dir) {
 		t.Fatal("expected fresh")
 	}
@@ -131,7 +135,7 @@ func TestRefreshWritesEverything(t *testing.T) {
 	head := &agentapi.ContentHead{CanonVersion: 1, Variants: []string{"plain", "esc1", "esc2"}, IDMax: map[string]int64{"posts": 1204},
 		Origins: agentapi.ContentOrigins{Home: "https://kunde.de", SiteURL: "https://kunde.de"}, Pushable: true}
 	r := &fakeRunner{out: `{"t":"posts","k":"1","h":"aa","row":{}}` + "\n" + `{"t":"posts","k":"2","h":"zz","row":{}}` + "\n" + `{"end":true,"rows":2}` + "\n"}
-	s, err := Refresh(dir, refreshSource{head: head}, r, agentapi.Scope{}, "https://kunde.ddev.site", time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC))
+	s, err := Refresh(dir, refreshSource{head: head}, r, agentapi.Scope{}, "https://kunde.ddev.site", Env{PHPVersion: "8.3.35", TablePrefix: "kd_"}, time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +149,80 @@ func TestRefreshWritesEverything(t *testing.T) {
 	if r.args[3] != "https://kunde.ddev.site" {
 		t.Fatalf("export args: %v", r.args)
 	}
+	if env, err := ReadEnv(dir); err != nil || env.PHPVersion != "8.3.35" || env.TablePrefix != "kd_" {
+		t.Fatalf("env=%+v err=%v", env, err)
+	}
+	if data, _ := os.ReadFile(Paths(dir).Env); string(data) != "{\n  \"php_version\": \"8.3.35\",\n  \"table_prefix\": \"kd_\"\n}\n" {
+		t.Fatalf("env.json = %q", data)
+	}
+}
+
+// summary.json is the last file of a refresh: when the export fails after env.json was written,
+// the state is not fresh.
+func TestRefreshWritesEnvBeforeTheSummary(t *testing.T) {
+	dir := t.TempDir()
+	head := &agentapi.ContentHead{CanonVersion: CanonVersion}
+	r := &fakeRunner{out: `{"t":"posts","k":"1","h":"aa"}` + "\n"} // no closing line: the export fails
+	if _, err := Refresh(dir, refreshSource{head: head}, r, agentapi.Scope{}, "https://x.test", Env{PHPVersion: "8.3.35", TablePrefix: "wp_"}, time.Now()); !errors.Is(err, ErrExport) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := ReadEnv(dir); err != nil {
+		t.Fatalf("env.json is written before the baseline: %v", err)
+	}
+	if _, err := os.Lstat(Paths(dir).Summary); !errors.Is(err, os.ErrNotExist) || Fresh(dir) {
+		t.Fatalf("summary.json: %v, fresh=%v", err, Fresh(dir))
+	}
+}
+
+// env.json lies in the site folder: its values are checked like those of /delta before they
+// reach docker or WP-CLI.
+func TestReadEnvChecksTheValues(t *testing.T) {
+	dir := t.TempDir()
+	f := Paths(dir)
+	if _, err := ReadEnv(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing: %v", err)
+	}
+	for _, bad := range []string{
+		`{"php_version":"8.3.35","table_prefix":"--exec=x"}`,
+		`{"php_version":"8.3.35","table_prefix":""}`,
+		`{"php_version":"8.3.35"}`,
+		`{"php_version":"8.3 --rm","table_prefix":"wp_"}`,
+		`{"php_version":"latest","table_prefix":"wp_"}`,
+		`{"php_version":"","table_prefix":"wp_"}`,
+		`{"table_prefix":"wp_"}`,
+	} {
+		write(t, f.Env, bad)
+		if _, err := ReadEnv(dir); !errors.Is(err, ErrEnv) || errors.Is(err, agentapi.ErrInvalidEnv) {
+			t.Errorf("%s: err=%v", bad, err)
+		}
+	}
+	for _, broken := range []string{``, `not json`, `[]`, `{"php_version":8}`} {
+		write(t, f.Env, broken)
+		if _, err := ReadEnv(dir); err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%q: err=%v", broken, err)
+		}
+	}
+	write(t, f.Env, `{"php_version":"8.3.35-1ubuntu","table_prefix":"djTui5D_"}`)
+	env, err := ReadEnv(dir)
+	if err != nil || env.PHPVersion != "8.3.35-1ubuntu" || env.TablePrefix != "djTui5D_" {
+		t.Fatalf("env=%+v err=%v", env, err)
+	}
+	if a := env.Agent(); a.PHPVersion != env.PHPVersion || a.TablePrefix != env.TablePrefix || a.Home != "" {
+		t.Fatalf("agent env = %+v", a)
+	}
+
+	outside := filepath.Join(t.TempDir(), "env.json")
+	write(t, outside, `{"php_version":"8.3","table_prefix":"evil_"}`)
+	os.Remove(f.Env)
+	if err := os.Symlink(outside, f.Env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEnv(dir); err == nil {
+		t.Fatal("expected an error for a symlinked env.json")
+	}
+	if Fresh(dir) {
+		t.Fatal("a symlinked env.json is no fresh state")
+	}
 }
 
 func TestRefreshLeavesNothingFreshAfterAnError(t *testing.T) {
@@ -155,7 +233,7 @@ func TestRefreshLeavesNothingFreshAfterAnError(t *testing.T) {
 	}
 	write(t, f.Summary, `{"rows":3,"unfaithful":0,"id_max":{},"canon_version":1}`)
 	boom := errors.New("boom")
-	if _, err := Refresh(dir, refreshSource{err: boom}, &fakeRunner{}, agentapi.Scope{}, "https://x.test", time.Now()); !errors.Is(err, boom) {
+	if _, err := Refresh(dir, refreshSource{err: boom}, &fakeRunner{}, agentapi.Scope{}, "https://x.test", Env{PHPVersion: "8.3.35", TablePrefix: "wp_"}, time.Now()); !errors.Is(err, boom) {
 		t.Fatalf("err=%v", err)
 	}
 	if Fresh(dir) {
@@ -165,7 +243,7 @@ func TestRefreshLeavesNothingFreshAfterAnError(t *testing.T) {
 
 func TestRefreshRefusesAnotherCanonVersion(t *testing.T) {
 	head := &agentapi.ContentHead{CanonVersion: 2}
-	_, err := Refresh(t.TempDir(), refreshSource{head: head}, &fakeRunner{}, agentapi.Scope{}, "https://x.test", time.Now())
+	_, err := Refresh(t.TempDir(), refreshSource{head: head}, &fakeRunner{}, agentapi.Scope{}, "https://x.test", Env{PHPVersion: "8.3.35", TablePrefix: "wp_"}, time.Now())
 	if !errors.Is(err, ErrCanonVersion) {
 		t.Fatalf("err=%v", err)
 	}
@@ -210,15 +288,15 @@ func TestRefreshStoresReloadedFalse(t *testing.T) {
 	dir := t.TempDir()
 	head := &agentapi.ContentHead{CanonVersion: CanonVersion}
 	r := &fakeRunner{out: `{"end":true,"rows":0}` + "\n"}
-	if _, err := Refresh(dir, refreshSource{head: head}, r, agentapi.Scope{}, "https://x.test", time.Now()); err != nil {
+	if _, err := Refresh(dir, refreshSource{head: head}, r, agentapi.Scope{}, "https://x.test", Env{PHPVersion: "8.3.35", TablePrefix: "wp_"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(Paths(dir).Summary)
 	if err != nil || !strings.Contains(string(data), `"reloaded": false`) {
 		t.Fatalf("summary.json=%s err=%v", data, err)
 	}
-	if entries, _ := os.ReadDir(Paths(dir).Dir); len(entries) != 5 {
-		t.Fatalf("expected the five files and no temp file, got %v", entries)
+	if entries, _ := os.ReadDir(Paths(dir).Dir); len(entries) != 6 {
+		t.Fatalf("expected the six files and no temp file, got %v", entries)
 	}
 }
 
@@ -252,7 +330,7 @@ func TestStoreNeverReadsThroughASymlink(t *testing.T) {
 func freshState(t *testing.T, dir string) Files {
 	t.Helper()
 	f := Paths(dir)
-	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful} {
+	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful, f.Env} {
 		write(t, p, "x")
 	}
 	write(t, f.Summary, `{"rows":3,"unfaithful":0,"id_max":{"posts":9},"canon_version":1}`)
@@ -278,7 +356,7 @@ func TestInvalidateDropsTheState(t *testing.T) {
 	if _, err := os.Lstat(f.Summary); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("summary.json: %v", err)
 	}
-	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful} {
+	for _, p := range []string{f.Manifest, f.Map, f.Baseline, f.Unfaithful, f.Env} {
 		if data, err := os.ReadFile(p); err != nil || string(data) != "x" {
 			t.Errorf("%s: %q, %v", filepath.Base(p), data, err)
 		}
