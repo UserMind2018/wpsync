@@ -209,6 +209,43 @@ final class ContentPostActionsTest extends TestCase
         $this->assertArrayNotHasKey('rewrite_rules', $store->data['options']);
     }
 
+    /**
+     * Security-Review P4 S4: die Liste geht per SQL am Object-Cache vorbei. Hält ein persistenter Cache
+     * nach den Nacharbeiten noch den alten Stand (alloptions), lädt WordPress die neue Liste erst später –
+     * am Health-Check vorbei. Der Agent liest deshalb zurück, was WordPress als Nächstes lädt, und meldet
+     * eine Abweichung als gescheiterten Schritt plugins_effective.
+     */
+    public function testTheStepPluginsEffectiveReadsBackWhatWordPressWillLoad(): void
+    {
+        $changes = [
+            'posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => false,
+            'plugins' => ['added' => ['kunde/kunde.php'], 'removed' => ['old/old.php'], 'h' => str_repeat('a', 64)],
+            'plugins_expect' => ['present' => ['kunde/kunde.php'], 'absent' => ['old/old.php']],
+        ];
+        $steps = static function () use ($changes): array {
+            return array_column(ContentPostActions::live($changes, $GLOBALS['wpdb'], ''), 'ok', 'step');
+        };
+        $GLOBALS['wpdb'] = $this->db;
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['akismet/akismet.php', 'kunde/kunde.php'])];
+        $this->assertSame(['object_cache' => true, 'plugins_cache' => true, 'plugins_effective' => true], $steps());
+        // Der Cache hält noch den Stand vor dem Push: das neue Plugin fehlt, das abgeschaltete steht noch da.
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['akismet/akismet.php', 'old/old.php'])];
+        $this->assertSame(['object_cache' => true, 'plugins_cache' => true, 'plugins_effective' => false], $steps());
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => 'kaputt'];
+        $this->assertFalse($steps()['plugins_effective']);
+        // Nicht in alloptions (autoload aus) oder ohne Erwartung: der Schritt hat nichts zu beurteilen und fehlt.
+        $GLOBALS['wpsync_alloptions'] = [];
+        $this->assertArrayNotHasKey('plugins_effective', $steps());
+        $GLOBALS['wpsync_alloptions'] = ['active_plugins' => serialize(['kunde/kunde.php'])];
+        unset($changes['plugins_expect']);
+        $this->assertArrayNotHasKey('plugins_effective', array_column(ContentPostActions::live($changes, $this->db, ''), 'ok', 'step'));
+        // In der Kopie gibt es keinen Object-Cache: kein Schritt.
+        $changes['plugins_expect'] = ['present' => ['kunde/kunde.php'], 'absent' => []];
+        $store = new ContentMemory();
+        $this->assertNotContains('plugins_effective', array_column(ContentPostActions::staging($changes, $store, $this->db, '', '', false), 'step'));
+        unset($GLOBALS['wpsync_alloptions']);
+    }
+
     /** Ein Satz, der an der Liste nichts geändert hat (A11), löst keinen der Schritte aus. */
     public function testAnUnchangedPluginListNeedsNoPluginSteps(): void
     {

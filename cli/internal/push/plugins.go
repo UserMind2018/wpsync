@@ -471,3 +471,15 @@ func printPluginsBack(out io.Writer, notes agentapi.RollbackNotes) {
 		printEntries(out, "  noch inaktiv", p.Removed)
 	}
 }
+
+// cacheStepFailed names the first failed post action that decides whether the new list of active
+// plugins is in effect: object_cache and plugins_cache drop what WordPress cached, plugins_effective
+// is the agent reading back what the next request will load. "" when none failed.
+func cacheStepFailed(actions []agentapi.PostAction) string {
+	for _, a := range actions {
+		if !a.OK && (a.Step == "object_cache" || a.Step == "plugins_cache" || a.Step == "plugins_effective") {
+			return a.Step
+		}
+	}
+	return ""
+}

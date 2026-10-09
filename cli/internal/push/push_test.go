@@ -455,7 +455,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(last.Activate)+len(last.Deactivate) > 0 && !f.noPlugins && !f.noSwitch {
 			if answer["content"] == nil { // the database step ran for the plugin state alone
-				answer["content"] = &agentapi.ContentApplied{PostActions: []agentapi.PostAction{{Step: "plugins_cache", OK: true}}, Seconds: 0.01}
+				steps := []agentapi.PostAction{{Step: "plugins_cache", OK: true}}
+				if f.actions != nil {
+					steps = f.actions
+				}
+				answer["content"] = &agentapi.ContentApplied{PostActions: steps, Seconds: 0.01}
 			}
 			switched := f.switched(last)
 			if f.tamperPlugins != nil {

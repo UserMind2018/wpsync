@@ -475,7 +475,11 @@ Beide Schalter lassen sich wiederholen oder nehmen mehrere Einheiten mit Komma
   Admin-Kontext; ohne `action` antwortet WordPress dort mit HTTP 400 und `0` – verglichen wird
   vorher/nachher. `admin_init` läuft dabei nicht: ein Plugin, das erst dort wirft, sieht der Check
   nicht. Wird eine Seite schlechter, geht der ganze Satz zurück (Exit 43): über den Agent, und wenn
-  der nicht mehr antwortet, über `rescue.php`.
+  der nicht mehr antwortet, über `rescue.php`. Dasselbe gilt, wenn offen ist, ob die neue Liste
+  überhaupt schon geladen wird: Die Liste geht per SQL am Object-Cache vorbei, der Agent leert ihn
+  danach (`object_cache`, `plugins_cache`) und liest zurück, was WordPress als Nächstes lädt
+  (`plugins_effective`). Scheitert einer dieser drei Schritte, wird nicht bestätigt, sondern
+  zurückgenommen – sonst hätte der Health-Check den alten Stand geprüft.
 - **Rücknahme.** Für die Liste gilt ein **Delta**, kein Abdruck: Zurückgenommen wird, was der Push
   hinzugefügt hat und noch in der Liste steht; zurück kommt, was er gestrichen hat und noch fehlt.
   Was ein Administrator seither im WP-Admin geschaltet hat, bleibt – und sperrt die Rücknahme nicht.

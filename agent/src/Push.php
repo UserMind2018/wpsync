@@ -800,7 +800,9 @@ final class Push
             $answer['content'] = [
                 'rows'         => $applied['rows'],
                 'after'        => $applied['after'],
-                'post_actions' => PushContent::postActions($target, $content, $applied['changes']), // §7.7: nie ein Fehler des Pushs
+                // §7.7: nie ein Fehler des Pushs. Mit Plugin-Zustand liest der Agent zurück, ob die neue Liste gilt (S4).
+                'post_actions' => PushContent::postActions($target, $content, $applied['changes']
+                    + ($resolved === null ? [] : ['plugins_expect' => ['present' => $applied['plugins']['added'], 'absent' => $applied['plugins']['removed']]])),
                 'seconds'      => $applied['seconds'],
             ];
             if ($resolved !== null) {
@@ -1126,7 +1128,8 @@ final class Push
                 $switched = $back['plugins'];
                 self::notePlugins($pushId, (array) $push['units'], ['back' => $switched]);
             }
-            $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
+            $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes'] === null || $switched === null ? $back['changes']
+                : $back['changes'] + ['plugins_expect' => ['present' => $switched['reactivated'], 'absent' => $switched['deactivated']]]);
         }
         list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId, null, $confirmed);
         if ($status !== 200) {

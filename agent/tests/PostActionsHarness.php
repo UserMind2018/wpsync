@@ -35,6 +35,12 @@ namespace {
         return true;
     }
 
+    /** @return array<string, mixed> was WordPress beim nächsten Laden aus alloptions liest – im Test gesetzt */
+    function wp_load_alloptions(): array
+    {
+        return (array) ($GLOBALS['wpsync_alloptions'] ?? []);
+    }
+
     function delete_option(string $name): bool
     {
         wpsync_note('delete_option', $name);

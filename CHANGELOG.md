@@ -31,6 +31,9 @@ Agent ≥ 0.9.0 wie bisher.
 - Rücknahme der Liste als **Delta** des authentisierten Vorher-Abbilds – über den Agent und über
   `rescue.php` ohne WordPress; fremde Änderungen an der Liste bleiben und sperren nichts
 - Der Health-Check prüft zusätzlich `wp-admin/admin-ajax.php` (Plugins im Admin-Kontext)
+- Nacharbeit `plugins_effective`: der Agent liest nach dem Leeren des Object-Cache zurück, welche
+  Liste WordPress als Nächstes lädt. Scheitert sie oder `object_cache`/`plugins_cache`, bestätigt die
+  CLI einen Satz mit Plugin-Zustand nicht, sondern nimmt ihn zurück (Exit 43)
 - `--to staging`: nur die Tabelle der Kopie; was die Kopie abschaltet, wird dort nicht aktiviert
   (`skipped`)
 - `--json`: im `plan` `plugins` und `hooks_skipped`; im Ergebnis `plugins`, nach einer Rücknahme

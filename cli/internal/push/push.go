@@ -1088,6 +1088,14 @@ func Run(o Options) error {
 	if switchOff != "" && len(worse) == 0 {
 		worse = []string{switchOff}
 	}
+	// The list bypassed the object cache; it takes effect only when the cache lets go of the old one. If
+	// the agent could not make sure of that, the health check may have seen the old plugins – and the new
+	// list would take effect later, without a way back. Never confirm that (Security-Review P4 S4).
+	if sw.any() && committed.Content != nil && len(worse) == 0 {
+		if step := cacheStepFailed(committed.Content.PostActions); step != "" {
+			worse = []string{fmt.Sprintf("die Nacharbeit %s ist auf der Site nicht gelungen – ob die neue Liste der Plugins schon gilt, ist offen; ungeprüft wird nicht bestätigt", step)}
+		}
+	}
 	if len(worse) > 0 {
 		report.Health = WorsePages(before, after)
 		return rolledBack(report, rollbackNow(done, o, acc, journal, urls, before, worse))

@@ -65,6 +65,24 @@ final class ContentPostActions
                 wp_cache_delete('plugins', 'plugins');
             });
         }
+        // Die Liste ging per SQL am Object-Cache vorbei; wirksam wird sie erst, wenn WordPress sie neu liest.
+        // Zurücklesen, was der nächste Request laden wird (alloptions – ohne die Filter von get_option()): hält
+        // ein persistenter Cache noch den alten Stand, prüfte der Health-Check die falsche Liste, und die neue
+        // griffe später ohne Notfallweg (Security-Review P4 S4). Der Aufrufer nennt, was jetzt gelten muss.
+        $expect = is_array($changes['plugins_expect'] ?? null) ? $changes['plugins_expect'] : null;
+        if ($expect !== null && function_exists('wp_load_alloptions')) {
+            $present = array_values(array_filter((array) ($expect['present'] ?? []), 'is_string'));
+            $absent  = array_values(array_filter((array) ($expect['absent'] ?? []), 'is_string'));
+            $all     = ($present === [] && $absent === []) ? [] : (array) wp_load_alloptions();
+            // Steht die Option nicht in alloptions (autoload aus), gibt es hier nichts zu beurteilen.
+            if (array_key_exists(ContentPlugins::OPTION, $all)) {
+                self::step($steps, 'plugins_effective', static function () use ($all, $present, $absent): bool {
+                    $raw  = $all[ContentPlugins::OPTION];
+                    $list = is_array($raw) ? array_values(array_filter($raw, 'is_string')) : ContentPlugins::parse($raw);
+                    return $list !== null && ContentPlugins::settled($list, $present, $absent);
+                });
+            }
+        }
         if (class_exists('\Elementor\Plugin', false)) {
             self::step($steps, 'elementor_css', static function (): void {
                 \Elementor\Plugin::$instance->files_manager->clear_cache();

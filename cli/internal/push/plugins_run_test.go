@@ -817,3 +817,51 @@ func TestRollbackRefusedForWantOfTheRightToSwitchPlugins(t *testing.T) {
 		t.Errorf("routes = %s", got)
 	}
 }
+
+// Security-Review P4 S4: die Liste wird erst wirksam, wenn der Object-Cache sie hergibt. Meldet der Agent
+// eine der Nacharbeiten dazu als gescheitert, hätte der Health-Check womöglich den alten Stand geprüft –
+// ein Satz mit Plugin-Zustand wird dann nicht bestätigt, sondern zurückgenommen (Exit 43).
+func TestRunNeverConfirmsAPluginStateWhoseCacheStepFailed(t *testing.T) {
+	for _, step := range []string{"object_cache", "plugins_cache", "plugins_effective"} {
+		f := newFakeSite(t)
+		f.actions = []agentapi.PostAction{{Step: "object_cache", OK: step != "object_cache"}, {Step: "plugins_cache", OK: step != "plugins_cache"},
+			{Step: "plugins_effective", OK: step != "plugins_effective"}, {Step: "rewrite_rules", OK: true}}
+		o, _, out := pluginSite(t, f)
+		o.Activate = []string{"plugins/kunde"}
+		var report Result
+		o.Report = &report
+		err := Run(o)
+		var rolled *RolledBackError
+		if !errors.As(err, &rolled) || rolled.Via != "agent" || len(rolled.Reasons) != 1 || !strings.Contains(rolled.Reasons[0], step) {
+			t.Fatalf("%s: err = %v\n%s", step, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback") {
+			t.Errorf("%s: routes = %s", step, got)
+		}
+		if report.Status != "rolled_back" || report.Plugins != nil {
+			t.Errorf("%s: report = %+v", step, report)
+		}
+	}
+	// Ein anderer gescheiterter Schritt (Rewrite-Regeln, ein Cache-Plugin) bleibt, was er war: eine Zeile, kein Abbruch.
+	f := newFakeSite(t)
+	f.actions = []agentapi.PostAction{{Step: "object_cache", OK: true}, {Step: "rewrite_rules", OK: false}}
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+// S4: ohne Plugin-Zustand ändert sich nichts – ein gescheiterter Schritt object_cache nach einem Inhalts-Push ist wie bisher keine Rücknahme.
+func TestRunConfirmsAContentPushWhoseCacheStepFailed(t *testing.T) {
+	f := newFakeSite(t)
+	o, _, out := contentSite(t, f)
+	f.actions = []agentapi.PostAction{{Step: "object_cache", OK: false}}
+	o.NoCode = true
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit confirm") {
+		t.Errorf("routes = %s", got)
+	}
+}
