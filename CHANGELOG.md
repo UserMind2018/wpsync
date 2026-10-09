@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unreleased]
+## [0.7.0] – 2026-10-09 · Agent 0.7.0
 
 **Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` und `push --content` brauchen
 Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter
