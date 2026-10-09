@@ -184,6 +184,9 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Beitrags mit `op: trash`; ein fremder Schlüssel lässt `manifest.jsonl` und `baseline.jsonl`
   unangetastet (`warnings: ["content_state_failed"]`). Weicht `content.rows` von der Zeilenzahl
   des Pakets ab, wird der Satz nicht bestätigt, sondern zurückgenommen
+- Agent: Ein Wert, der – ohne Leerraum am Rand – wie ein serialisiertes Objekt beginnt
+  (`O:8:"stdClass":0:{}x`), ist `unsafe_value`, auch wenn er wegen eines Anhangs nicht als
+  serialisiert gilt: PHPs `unserialize()` läse das Objekt trotzdem
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

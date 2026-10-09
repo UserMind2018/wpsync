@@ -416,7 +416,7 @@ final class ContentCheck
                     $new = $value;
                     if ($value !== null && $table !== 'term_relationships') {
                         // Härtung S1: WordPress reicht Meta und Optionen an maybe_unserialize() – kein Objekt, nichts Unlesbares.
-                        if (SerializedWalker::hasObject((string) $value) !== false) {
+                        if (SerializedWalker::hasObject((string) $value) !== false || self::objectLike((string) $value)) {
                             $unsafe[] = ContentException::key($table, $key);
                             continue 2;
                         }
@@ -432,7 +432,7 @@ final class ContentCheck
                             $unknown[] = ContentException::key($table, $key);
                             continue 2;
                         }
-                        if ($new !== (string) $value && SerializedWalker::hasObject($new) !== false) {
+                        if ($new !== (string) $value && (SerializedWalker::hasObject($new) !== false || self::objectLike($new))) {
                             $unsafe[] = ContentException::key($table, $key);
                             continue 2;
                         }
@@ -463,7 +463,7 @@ final class ContentCheck
             }
         }
         if ($unsafe !== []) {
-            throw new ContentException(ContentException::UNSAFE, 'Ein Wert trägt ein serialisiertes Objekt oder sieht serialisiert aus und lässt sich nicht lesen.', $unsafe);
+            throw new ContentException(ContentException::UNSAFE, 'Ein Wert trägt ein serialisiertes Objekt, beginnt wie eines oder sieht serialisiert aus und lässt sich nicht lesen.', $unsafe);
         }
         if ($unknown !== []) {
             throw new ContentException(ContentException::INVALID, 'Das Paket ist ungültig: ein Wert trägt einen Platzhalter in unbekannter Form oder lässt sich nicht lesen.', $unknown);
@@ -804,6 +804,16 @@ final class ContentCheck
     private function termExists(string $id): bool
     {
         return ($this->state['terms'][$id] ?? null) !== null || isset($this->rows['terms'][$id]);
+    }
+
+    /**
+     * Beginnt der Wert – ohne Leerraum am Rand – wie ein serialisiertes Objekt (O:, C:, E:)? PHPs
+     * unserialize() liest ein Objekt auch dann, wenn dahinter noch etwas steht; is_serialized() und
+     * damit SerializedWalker sehen so einen Wert nicht als serialisiert. Gesperrt ist er trotzdem.
+     */
+    private static function objectLike(string $value): bool
+    {
+        return preg_match('/^[OCE]:\+?\d+:"/i', trim($value)) === 1;
     }
 
     /** Steht der Host im Wert – auch (mehrfach) URL-kodiert, gross/klein egal? */

@@ -673,7 +673,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `engine_unsupported` | eine der sieben Inhaltstabellen des Ziels ist nicht InnoDB (`error.tables`; geprüft werden immer alle, auch vor einer Rücknahme), oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
 | `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
 | `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
-| `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt) oder sieht serialisiert aus und lässt sich nicht lesen |
+| `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt), beginnt wie eines (auch mit Text dahinter, den `unserialize()` hinnähme) oder sieht serialisiert aus und lässt sich nicht lesen |
 | `local_origin_in_package` | im Wert steckt noch der Host der Arbeitskopie (`local_host`), auch URL-kodiert |
 | `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
 | `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |

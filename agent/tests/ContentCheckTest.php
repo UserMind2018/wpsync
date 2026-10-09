@@ -465,6 +465,51 @@ final class ContentCheckTest extends TestCase
         $this->check($rows)->run();
     }
 
+    /** @return array<string, array{0: string}> */
+    public static function objectsWithATail(): array
+    {
+        $values = [
+            'O:8:"stdClass":0:{}x',
+            " \n\tO:8:\"stdClass\":0:{} und Text",
+            'o:8:"stdClass":0:{}x',
+            'O:+8:"stdClass":0:{}x',
+            'C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}x',
+            'E:7:"Foo:Bar";x',
+            'O:8:"stdClass":0:{',
+            'O:8:"stdClass"',
+        ];
+        return array_combine($values, array_map(static function (string $value): array {
+            return [$value];
+        }, $values));
+    }
+
+    /**
+     * H1: unserialize() liest ein Objekt auch dann, wenn dahinter noch etwas steht – WordPress'
+     * is_serialized() sieht den Wert dann nicht als serialisiert, anderer Code vielleicht schon.
+     * Was getrimmt wie ein Objekt beginnt, ist unsafe_value, ob es sich lesen lässt oder nicht.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('objectsWithATail')]
+    public function testAValueThatStartsLikeAnObjectIsUnsafe(string $value): void
+    {
+        foreach ([
+            ContentFixtures::row('insert', 'postmeta', "219\0_x", 'absent', ['values' => ['harmlos', $value]]),
+            ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => $value]),
+            $this->updatePost(['post_content' => $value]),
+        ] as $row) {
+            $e = $this->refused('unsafe_value', [$row]);
+            $this->assertSame([['table' => $row['table'], 'key' => $row['key']]], $e->keys());
+        }
+    }
+
+    /** H1: gewöhnlicher Text, der so ähnlich aussieht, bleibt pushbar. */
+    public function testTextThatOnlyResemblesAnObjectPasses(): void
+    {
+        foreach (['O: 8 Stück', 'Ordnung:1:"x"', 'O:8:stdClass', 'x O:8:"stdClass":0:{}', 'E:mail', 'C:\\Users\\x', 'a:1:{i:0;s:1:"x";}'] as $value) {
+            $this->check([ContentFixtures::row('insert', 'postmeta', "219\0_x", 'absent', ['values' => [$value]])])->run();
+            $this->addToAssertionCount(1);
+        }
+    }
+
     /** AC-151: der Konflikt nennt alle abweichenden Schlüssel, nicht nur den ersten. */
     public function testConflictNamesEveryKey(): void
     {
