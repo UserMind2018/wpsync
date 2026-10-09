@@ -646,6 +646,11 @@ final class Push
             }
             PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
+            // Das Paket ist auf Live: die Ablage braucht niemand mehr. Nach Staging bleibt sie für den Push nach Live.
+            $record = PushRescue::read($dirs[1], $push['push_id']);
+            if ($push['target'] === 'live' && is_string($record['content']['sha256'] ?? null)) {
+                PushContent::forget($dirs[1], $keyId, $record['content']['sha256']);
+            }
             self::release($push['push_id']);
             // Die 10 Minuten des Stubs ab jetzt: eine verlorene confirm-Antwort braucht rescue.php (R5).
             self::touchStub(time());
@@ -700,6 +705,19 @@ final class Push
             if ($dirs instanceof \WP_Error) {
                 return $dirs;
             }
+            // DB → Code → Uploads (§7.6). Hat sich eine Zeile seit dem Push geändert, wird nichts
+            // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
+            $actions = [];
+            $record  = PushRescue::read($dirs[1], $pushId);
+            if ($record !== null && PushRescue::contentOpen($record)) {
+                try {
+                    $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
+                } catch (ContentException $e) {
+                    return $e->toError();
+                }
+                PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
+                $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
+            }
             list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
             if ($status !== 200) {
                 $why = ($body['error'] ?? '') === 'superseded'
@@ -710,10 +728,15 @@ final class Push
             self::finishRollback($pushId);
             self::touchStub(time()); // wie bei confirm (R5)
             self::scheduleTidy();
+            $answer = ['ok' => true, 'status' => PushRescue::ROLLED_BACK];
             // Seit dem Push geänderte Uploads bleiben liegen und werden genannt (Spec Content-Push §8.4).
             if (isset($body['warnings'])) {
-                return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []]);
+                $answer += ['warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []];
             }
+            if ($actions !== []) {
+                $answer['post_actions'] = $actions; // Nacharbeiten der Rücknahme (§7.7)
+            }
+            return new \WP_REST_Response($answer);
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
     }
@@ -748,7 +771,9 @@ final class Push
                 continue;
             }
             $record = PushRescue::read($content . '/' . $name, $push['push_id']);
-            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK) {
+            // Hat rescue.php nur Code und Uploads zurückgenommen, stehen die Inhalte noch (§7.6): der
+            // Push bleibt offen, sein Vorher-Abbild liegen – wpsync rollback holt sie über den Agent nach.
+            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
                 self::finishRollback($push['push_id']);
             }
         }
@@ -776,6 +801,9 @@ final class Push
         }
         self::pruneOrphans($now);
         self::tidyStub($now);
+        if (self::content() !== '') {
+            PushContent::expire(self::content() . '/' . Store::pushDirName(), $now);
+        }
     }
 
     /**
@@ -814,6 +842,10 @@ final class Push
                 if (file_exists(PushRescue::file($work, $name))) {
                     $record = PushRescue::read($work, $name);
                     if ($record === null || !in_array($record['status'], [PushRescue::ROLLED_BACK, PushRescue::CONFIRMED], true)) {
+                        continue;
+                    }
+                    // Code zurück, Inhalte nicht: das Vorher-Abbild ist der einzige Weg zurück.
+                    if ($record['status'] === PushRescue::ROLLED_BACK && PushRescue::contentOpen($record)) {
                         continue;
                     }
                 }

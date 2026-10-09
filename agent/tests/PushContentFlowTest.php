@@ -33,6 +33,8 @@ final class PushContentFlowTest extends TestCase
     private ContentMemory $stagingDb;
     /** @var list<string> Ziele, die PushContent aufgelöst hat */
     private array $resolved = [];
+    /** Salt des letzten echten Begin – daraus leitet die CLI den Schlüssel für rescue.php ab. */
+    private string $salt = '';
 
     protected function setUp(): void
     {
@@ -333,8 +335,9 @@ final class PushContentFlowTest extends TestCase
     {
         $begin = $this->begin($sha, ['target' => $target], $code, $uploads);
         $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
-        $id = (string) $begin->data['push_id'];
-        $u  = 0;
+        $id         = (string) $begin->data['push_id'];
+        $this->salt = (string) $begin->data['rescue']['salt'];
+        $u          = 0;
         if ($code !== null) {
             $this->assertInstanceOf(\WP_REST_Response::class, Push::upload(['push_id' => $id, 'unit' => $u++, 'files' => [['path' => 'main.php', 'data' => base64_encode($code), 'offset' => 0]]], self::KEY));
         }
@@ -477,5 +480,165 @@ final class PushContentFlowTest extends TestCase
             \WpSync\ContentState::desired('posts', '219', ContentFixtures::postRow('219', ['post_title' => 'Neu', 'post_content' => 'Link: ' . ContentOrigin::PLAIN . '/neu'])),
             $commit->data['content']['after'][0]['h']
         );
+    }
+
+    /** rescue.php, wie die CLI es ohne WordPress aufruft. */
+    private function rescuePhp(string $id): array
+    {
+        $key = \WpSync\PushRescue::key((string) Store::secretFor(self::KEY), $id, $this->salt);
+        return \WpSync\PushRescue::handle(\WpSync\PushRescue::contentDirs($this->live), ['action' => 'rollback', 'push_id' => $id, 'key' => $key], time());
+    }
+
+    /** §7.6, AC-153: DB → Code → Uploads; die Antwort nennt die Nacharbeiten der Rücknahme. */
+    public function testRollbackTakesContentBackFirst(): void
+    {
+        $old               = $this->liveDb->data;
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit);
+        Push::confirm(['push_id' => $id], self::KEY);
+        $GLOBALS['wpsync_post_actions'] = [];
+        $seen                           = null;
+        $this->liveDb->beforeLock       = function () use (&$seen): void {
+            $seen = file_get_contents($this->live . '/plugins/x/main.php');
+        };
+
+        $back = Push::rollback(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        $this->assertSame('new', $seen, 'als die Inhalte zurückgingen, lag der neue Code noch');
+        $this->assertSame(['ok', 'status', 'post_actions'], array_keys($back->data));
+        $this->assertSame(['object_cache', 'rewrite_rules', 'revisions'], array_column($back->data['post_actions'], 'step'));
+        $this->assertContains('clean_post_cache [1000001]', $GLOBALS['wpsync_post_actions']);
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->live . '/uploads/2026/10/neu.png');
+        $this->assertSame(['rolled_back', true], [Store::getPush($id)['status'], Store::getPush($id)['pruned']]);
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id, 'das Vorher-Abbild geht mit dem Snapshot');
+    }
+
+    /** AC-153: nach einer Änderung seit dem Push wird nichts zurückgenommen – auch Code und Uploads nicht. */
+    public function testChangedSincePushKeepsTheWholeSet(): void
+    {
+        list($id) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        $this->liveDb->data['posts']['219']['post_title'] = 'nach dem Push im WP-Admin geändert';
+        $pushed = $this->liveDb->data;
+
+        $error = $this->assertRefused('wpsync_content_changed_since_push', 409, Push::rollback(['push_id' => $id], self::KEY));
+        $this->assertSame([['table' => 'posts', 'key' => '219']], $error->data['keys']);
+        $this->assertSame($pushed, $this->liveDb->data);
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileExists($this->live . '/uploads/2026/10/neu.png');
+        $this->assertSame('committed', Store::getPush($id)['status']);
+        $this->assertSame('applied', $this->rescue($this->live, $id)['content']['state']);
+
+        // Stellt jemand die Zeile wieder auf den gepushten Stand, geht die Rücknahme.
+        $this->liveDb->data['posts']['219']['post_title'] = 'Neu';
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollback(['push_id' => $id], self::KEY));
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+    }
+
+    /**
+     * AC-157, C7: antwortet WordPress nicht, nimmt rescue.php Code und Uploads zurück und nennt die
+     * Inhalte. Der Push bleibt offen, bis der Agent die Inhalte nachholt.
+     */
+    public function testRescueLeavesTheContentAndTheAgentCatchesUp(): void
+    {
+        $old      = $this->liveDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $pushed   = $this->liveDb->data;
+
+        list($status, $body) = $this->rescuePhp($id);
+        $this->assertSame(200, $status);
+        $this->assertSame(['content_not_rolled_back'], $body['warnings']);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame($pushed, $this->liveDb->data, 'rescue.php kennt keine Datenbank');
+
+        // Der Agent übernimmt den Stand von rescue.php, schliesst den Push aber nicht ab und räumt nichts weg.
+        Push::sync();
+        Push::prune(time() + 30 * 86400);
+        $this->assertSame(['committed', false], [Store::getPush($id)['status'], Store::getPush($id)['pruned']]);
+        $this->assertFileExists($this->work($this->live) . '/' . $id . '/content/before.json');
+        $this->assertSame($id, Push::pending()['push_id'], 'solange blockiert er weitere Pushes (Exit 42)');
+        $this->assertRefused('wpsync_push_pending', 409, $this->begin(null, [], 'newer'));
+
+        $back = Push::rollback(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        $this->assertArrayNotHasKey('warnings', $back->data);
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+        $this->assertDirectoryDoesNotExist($this->work($this->live) . '/' . $id);
+        $this->assertNull(Push::pending());
+    }
+
+    /** Auch ohne Zeile im Protokoll: ein Arbeitsordner mit offenem DB-Anteil wird nie als Rest weggeräumt. */
+    public function testOrphanWithOpenContentIsKept(): void
+    {
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        $this->rescuePhp($id);
+        $dir = $this->work($this->live) . '/' . $id;
+        unset(Store::$pushes[$id]);
+        touch($dir, time() - 7200);
+        Push::prune(time());
+        $this->assertFileExists($dir . '/content/before.json');
+
+        \WpSync\PushRescue::setContent($this->work($this->live), $id, \WpSync\PushRescue::CONTENT_DONE);
+        touch($dir, time() - 7200);
+        Push::prune(time());
+        $this->assertDirectoryDoesNotExist($dir);
+    }
+
+    /** Starb PHP vor dem COMMIT, hat die Datenbank nichts behalten: die Rücknahme nimmt nur den Code zurück. */
+    public function testRollbackOfContentThatNeverArrived(): void
+    {
+        $old      = $this->liveDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new');
+        // Zustand wie nach einem Absturz mitten in der Transaktion: „pending“, Vorher-Abbild da, Daten alt.
+        $this->liveDb->data = $old;
+        \WpSync\PushRescue::setContent($this->work($this->live), $id, \WpSync\PushRescue::CONTENT_PENDING);
+        unlink($this->work($this->live) . '/' . $id . '/content/after.json');
+        $this->liveDb->log              = [];
+        $GLOBALS['wpsync_post_actions'] = [];
+
+        $back = Push::rollback(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        $this->assertSame(['ok' => true, 'status' => 'rolled_back'], $back->data);
+        $this->assertSame([], preg_grep('/^(write|delete|purge) /', $this->liveDb->log));
+        $this->assertSame([], $GLOBALS['wpsync_post_actions']);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+    }
+
+    /** Nach dem bestätigten Push nach Live ist die Ablage weg; nach Staging bleibt sie für den Push nach Live. */
+    public function testConfirmForgetsTheStagedPackageOnlyOnLive(): void
+    {
+        $sha    = $this->stage($this->rows());
+        $staged = $this->work($this->live) . '/packages/' . self::KEY . '/' . $sha . '.jsonl';
+        list($stg) = $this->push($sha, null, [], 'staging');
+        Push::confirm(['push_id' => $stg], self::KEY);
+        $this->assertFileExists($staged);
+
+        list($id) = $this->push($sha);
+        $this->assertFileExists($staged);
+        Push::confirm(['push_id' => $id], self::KEY);
+        $this->assertFileDoesNotExist($staged);
+        $this->assertSame('confirmed', Store::getPush($id)['status']);
+        $this->assertFileExists($this->work($this->live) . '/' . $id . '/content/before.json', 'das Vorher-Abbild bleibt, solange der Push sich zurücknehmen lässt');
+    }
+
+    /** §7.8: die Rücknahme eines Pushs nach Staging stellt die Tabellen der Kopie wieder her. */
+    public function testRollbackOnTheStagingCopy(): void
+    {
+        $old      = $this->stagingDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new', [], 'staging');
+        $this->assertNotSame($old, $this->stagingDb->data);
+        $back = Push::rollback(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        ksort($old['postmeta']);
+        ksort($this->stagingDb->data['postmeta']);
+        $this->assertSame($old, $this->stagingDb->data);
+        $this->assertSame('stg-old', file_get_contents($this->staging . '/plugins/x/main.php'));
+        $this->assertSame([], $this->liveDb->log);
     }
 }
