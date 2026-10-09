@@ -12,7 +12,7 @@
 # Werte, ein Fehler mitten im Schreiben. Was der Agent auf Commit und Rollback antwortet, hält das
 # mu-plugin e2e-tap der Quelle fest (content.after zeigt die CLI nicht).
 #
-# Voraussetzung: Docker, DDEV, jq (≥ 1.6), openssl, Go. Dauer rund 5 Minuten.
+# Voraussetzung: Docker, DDEV, jq (≥ 1.6), openssl, Go. Dauer rund 6 Minuten.
 # Eine fehlgeschlagene Prüfung zählt und der Lauf geht weiter; nur was den Rest sinnlos macht,
 # bricht ab. Die JSON-Zeilen der Befehle liegen danach unter ~/wpsync-e2e/cdb/json.
 # Am Ende werden beide Projekte gestoppt (nicht gelöscht); WPSYNC_E2E_KEEP=1 lässt sie laufen.
@@ -161,13 +161,16 @@ PHP
 }
 
 # seal <name>: setzt den Kopf vor $PKG/<name>.body – Zeilenende \n, JSON kompakt, sha256 über den Rumpf.
+# EXTENSIONS='{…}' seal <name> nennt Projekt-Erweiterungen im Kopf; sonst keine.
 seal() {
-  local name="$1" body="$PKG/$1.body" rows digest
+  local name="$1" body="$PKG/$1.body" rows digest ext="${EXTENSIONS:-}"
+  [ -n "$ext" ] || ext='{"post_types":[],"taxonomies":[],"meta_exceptions":[]}'
   rows="$(wc -l <"$body" | tr -d ' ')"
   digest="$(sha "$body")"
   jq -c -n --arg home "$(jq -r '.live.home' "$CONTENT/map.json")" --arg map "$(sha "$CONTENT/map.json")" --arg host "$LOCAL_HOST" \
     --argjson rows "$rows" --arg sha "$digest" --argjson lv "$LIST_VERSION" \
-    '{head: {list_version: $lv, extensions: {post_types: [], taxonomies: [], meta_exceptions: []},
+    --argjson ext "$ext" \
+    '{head: {list_version: $lv, extensions: $ext,
       corridor: {offset: 1000000, posts: [1000001, 9999999], terms: [1000001, 9999999], term_taxonomy: [1000001, 9999999]},
       canon_version: 1, variants: ["plain", "esc1", "esc2"], home: $home, map_id: $map, local_host: $host, rows: $rows, sha256: $sha}}' >"$PKG/$name.jsonl"
   cat "$body" >>"$PKG/$name.jsonl"
@@ -460,6 +463,14 @@ eq "Probelauf: keine Konflikte" "$(event dry plan | jq -c '.content.conflicts')"
 eq "Probelauf: Grenzen" "$(event dry plan | jq -c '[.content.limits.max_rows, .content.limits.max_bytes]')" '[5000,8388608]'
 eq "Probelauf: kein Messwert, nichts wurde angewandt" "$(last dry '.data | has("content")')" false
 eq "Probelauf: Fenster zu" "$(event dry plan | jq -r '.window_open')" false
+eq "N3: ohne Fenster ist der Probelauf nur ein Teil – plan.content.partial" "$(event dry plan | jq -r '.content.partial')" true
+ok "N3: die CLI sagt es in einer Zeile" hasF "$JSON/dry.err" "nur teilweise geprüft"
+eq "M1/N1: die Grenzen nennen den ID-Abstand und die Summe der Vorher-Zustände" "$(event dry plan | jq -c '[.content.limits.id_headroom, .content.limits.max_state_bytes]')" '[2000000,67108864]'
+# N3: ohne Fenster verrät der Probelauf nicht, ob es ein Objekt gibt – ein Verweis ins Leere sieht aus wie eine gesperrte Zeile.
+raw_pkg dangling "$(jq -c -n --arg v "$(b64 'x')" '{op: "insert", table: "postmeta", key: ("987654\u0000_e2e_ins_leere"), expected: "absent", row: {values: [$v]}}')"
+push_content dangling-closed dangling --dry-run
+refused "N3: Verweis ins Leere ohne Fenster" dangling-closed blocked_row
+eq "N3: ohne Fenster auch hier partial" "$(event dangling-closed plan | jq -r '.content.partial')" true
 eq "Probelauf: Live unverändert" "$(post src "$PAGE_A" post_title)" "E2E A"
 eq "Probelauf: die neue Option gibt es auf Live nicht" "$(opt src options_e2e_neu)" ""
 push_content no-window edit --yes
@@ -474,6 +485,7 @@ STG_URL="$(last staging-create '.data.url')"
 STG_DIR="${STG_URL##*/}"
 push_content push-staging edit --to staging --yes
 eq "Staging: Exit 0" "$RC" 0
+eq "N3: mit offenem Fenster ist die Prüfung vollständig – partial false" "$(event push-staging plan | jq -r '.content.partial')" false
 eq "Staging: Ziel und Status" "$(last push-staging '.data.target + " " + .data.status')" "staging confirmed"
 eq "Staging: Titel in der Kopie" "$(post stg "$PAGE_A" post_title)" "$TITLE_A"
 ok "Staging: Klartext mit der Adresse der Kopie" contains "$(post stg "$PAGE_A" post_content)" "$STG_URL/neu"
@@ -488,6 +500,10 @@ eq "Staging: die neue Option steht in der Kopie mit ihrer Adresse" "$(opt stg op
 ok "§10: Manifest nach Staging unverändert" cmp -s "$E2E/manifest.pulled" "$CONTENT/manifest.jsonl"
 ok "§10: Baseline nach Staging unverändert" cmp -s "$E2E/baseline.pulled" "$CONTENT/baseline.jsonl"
 ok "V8: Vorher-Abbild liegt im Arbeitsordner der Kopie" sh -c "find '$PUB/$STG_DIR/wp-content' -path '*wpsync-push-*' -name before.json | grep -q ."
+STG_BEFORE="$(find "$PUB/$STG_DIR/wp-content" -path '*wpsync-push-*' -name before.json | head -1)"
+no "N2: das Vorher-Abbild ist kein lesbares JSON (versiegelt mit dem Schlüssel der Installation)" jq -e . "$STG_BEFORE"
+ok "N2: es beginnt mit der Kennung des versiegelten Formats" sh -c "head -c 15 '$STG_BEFORE' | grep -qx 'wpsync-image:v1'"
+no "N2: kein Wert der Site steht darin, auch nicht base64 wie im Abbild" grep -qaF -e "E2E Untertitel" -e "$(b64 'E2E Untertitel')" "$STG_BEFORE"
 
 echo "== AC-150: derselbe Satz nach Live"
 REV_BEFORE="$(src wp post list --post_type=revision --post_parent="$PAGE_A" --format=count)"
@@ -661,6 +677,18 @@ eq "Papierkorb: Status" "$(post src "$DRAFT" post_status)" "trash"
 eq "Papierkorb: der Agent schreibt die Papierkorb-Meta (W8)" "$(meta src "$DRAFT" _wp_trash_meta_status)" "draft"
 eq "Papierkorb: __trashed am Namen wie in WordPress" "$(post src "$DRAFT" post_name)" "$(post tgt "$DRAFT" post_name)"
 eq "Papierkorb: der alte Name in _wp_desired_post_slug" "$(meta src "$DRAFT" _wp_desired_post_slug)" "e2e-entwurf"
+# M3: was nach dem Push an einem eingefügten Beitrag entstand, löscht die Rücknahme nicht mit – sie lehnt ab.
+COMMENT="$(src wp comment create --comment_post_ID="$NEW_ID" --comment_content="nach dem Push" --comment_author=e2e --porcelain)"
+src wp eval "add_post_meta($NEW_POST, '_e2e_nach_dem_push', 'bleibt'); update_post_meta($NEW_ID, '_edit_lock', time() . ':1'); update_post_meta($NEW_ID, '_edit_last', '1');" >/dev/null
+jrun rollback-grown "$WPSYNC" rollback "$TARGET" "$PUSH_NEU" --json
+refused "M3: eingefügte Objekte sind seit dem Push gewachsen" rollback-grown changed_since_push
+eq "M3: genannt werden der Kommentar und das neue Meta – nicht _edit_lock und _edit_last" \
+  "$(last rollback-grown '.error.keys | map(.table + ":" + (.key | gsub("\u0000"; "/"))) | sort | join(",")')" "comments:$NEW_ID,postmeta:$NEW_POST/_e2e_nach_dem_push"
+eq "M3: nichts wurde zurückgenommen – die neue Seite und der Kommentar stehen" "$(src mysql -N -e "SELECT (SELECT COUNT(*) FROM ${PREFIX}posts WHERE ID IN ($NEW_ID, $NEW_POST)) + (SELECT COUNT(*) FROM ${PREFIX}comments WHERE comment_post_ID = $NEW_ID)")" 3
+eq "M3: auch der Entwurf liegt noch im Papierkorb" "$(post src "$DRAFT" post_status)" "trash"
+src wp comment delete "$COMMENT" --force >/dev/null
+src wp eval "delete_post_meta($NEW_POST, '_e2e_nach_dem_push');" >/dev/null
+# _edit_lock und _edit_last bleiben: Meta der festen Sperrliste hindert die Rücknahme nicht und geht mit der Seite.
 jrun rollback-neu "$WPSYNC" rollback "$TARGET" "$PUSH_NEU" --json
 eq "AC-153 Rücknahme: Exit 0" "$RC" 0
 eq "AC-153: die neue Seite und der neue Beitrag sind samt Meta und Zuordnung wieder weg" \
@@ -709,6 +737,23 @@ refused "id_taken" id-taken id_taken
 eq "id_taken: keys" "$(last id-taken '.error.keys | map(.table + ":" + .key) | join(",")')" "posts:$TAKEN"
 eq "id_taken: die fremde Zeile bleibt" "$(post src "$TAKEN" post_title)" "fremd"
 src mysql -e "DELETE FROM ${PREFIX}posts WHERE ID = $TAKEN"
+
+echo "== H2: den Benutzer, der das Fenster geöffnet hat, gibt es nicht mehr – kein neuer Beitrag ohne Autor"
+src wp eval "WpSync\\Admin::openWindow('$KEY_ID', 28800, 987654);" >/dev/null
+push_content author-gone taken --yes
+refused "H2: Öffner des Fensters existiert nicht" author-gone author_unknown
+eq "H2: der Beitrag wurde nicht angelegt" "$(src mysql -N -e "SELECT COUNT(*) FROM ${PREFIX}posts WHERE ID = $TAKEN")" 0
+eq "H2: kein offener Push" "$(pending)" "null"
+open_window
+
+echo "== M1: eine ID im Korridor des Pakets, aber weit über der höchsten ID von Live"
+AI_BEFORE="$(src mysql -N -e "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '${PREFIX}posts'")"
+jq -c --arg k "$TAKEN" 'select(.t == "posts" and .k == $k) | {op: "insert", table: "posts", key: "9999999", expected: "absent", row: .row}' "$PKG/taken.export" >"$PKG/far.body"
+seal far
+push_content id-far far --yes
+refused "M1: ID weit über der höchsten des Ziels" id-far id_outside_corridor
+eq "M1: keys" "$(last id-far '.error.keys | map(.table + ":" + .key) | join(",")')" "posts:9999999"
+eq "M1: der Zähler von Live hat sich nicht bewegt" "$(src mysql -N -e "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '${PREFIX}posts'")" "$AI_BEFORE"
 tgt wp post delete "$TAKEN" --force --skip-plugins --skip-themes >/dev/null
 
 echo "== Sicherheit: Pseudonym, Sperrliste, Rest der lokalen Adresse, serialisiertes Objekt"
@@ -730,6 +775,30 @@ refused "Rest der lokalen Adresse, URL-kodiert" local-origin local_origin_in_pac
 raw_pkg unsafe "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 'O:8:"stdClass":1:{s:1:"a";i:1;}')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_e2e_objekt"), expected: "absent", row: {values: [$v]}}')"
 push_content unsafe unsafe --dry-run
 refused "S1: serialisiertes Objekt" unsafe unsafe_value
+raw_pkg unsafe-tail "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 'O:8:"stdClass":0:{}x')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_e2e_objekt"), expected: "absent", row: {values: [$v]}}')"
+push_content unsafe-tail unsafe-tail --dry-run
+refused "H1: Objekt mit Anhang" unsafe-tail unsafe_value
+# N3, Gegenprobe: mit offenem Fenster heisst der Verweis ins Leere wieder dangling_reference.
+seal dangling # neu versiegelt: seit dem Folge-Pull gilt eine andere map_id
+push_content dangling-open dangling --dry-run
+refused "N3: Verweis ins Leere mit offenem Fenster" dangling-open dangling_reference
+eq "N3: mit Fenster partial false" "$(event dangling-open plan | jq -r '.content.partial')" false
+# N4: der Schlüssel in anderer Schreibweise – WordPress läse ihn trotzdem als Datei des Attachments.
+raw_pkg file-case "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 '../../../wp-config.php')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_WP_Attached_File"), expected: "absent", row: {values: [$v]}}')"
+push_content file-case file-case --dry-run
+refused "N4: _WP_Attached_File mit einem Pfad aus uploads hinaus" file-case blocked_row
+# M4: was keine Projekt-Erweiterung freischaltet – und was sichtbar bleibt.
+for ext in '{"post_types":["wc_e2e"],"taxonomies":[],"meta_exceptions":[]}' '{"post_types":["e2e-snippet"],"taxonomies":[],"meta_exceptions":[]}' '{"post_types":[],"taxonomies":["user-group"],"meta_exceptions":[]}' '{"post_types":[],"taxonomies":["e2e_roles"],"meta_exceptions":[]}'; do
+  cp "$PKG/dangling.body" "$PKG/ext-bad.body"
+  EXTENSIONS="$ext" seal ext-bad
+  push_content ext-bad ext-bad --dry-run
+  refused "M4: Erweiterung $ext" ext-bad package_invalid
+done
+cp "$PKG/title-b.body" "$PKG/ext-ok.body"
+EXTENSIONS='{"post_types":["referenz"],"taxonomies":["branche"],"meta_exceptions":["design_token"]}' seal ext-ok
+push_content ext-ok ext-ok --dry-run
+eq "M4: ein Paket mit üblichen Erweiterungen geht durch den Probelauf" "$RC" 0
+eq "M4: der Probelauf nennt die Erweiterungen des Pakets" "$(event ext-ok plan | jq -c '.content.extensions')" '{"post_types":["referenz"],"taxonomies":["branche"],"meta_exceptions":["design_token"]}'
 raw_pkg unknown-placeholder "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 '⟦wpsync:origin:esc9⟧/x')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_e2e_ph"), expected: "absent", row: {values: [$v]}}')"
 push_content unknown-placeholder unknown-placeholder --dry-run
 refused "Platzhalter in unbekannter Form" unknown-placeholder package_invalid
@@ -743,7 +812,7 @@ push_content twin twin --dry-run
 refused "S4: Meta-Schlüssel, der sich nur in Gross/klein unterscheidet" twin blocked_row
 eq "S4: der Zwilling auf Live bleibt" "$(src mysql -N -e "SELECT CONCAT(meta_key, '=', meta_value) FROM ${PREFIX}postmeta WHERE post_id = $PAGE_B AND meta_key = '_e2e_twin'")" "_E2E_Twin=x"
 src wp eval "delete_post_meta($PAGE_B, '_E2E_Twin');" >/dev/null
-eq "Sicherheit: keine dieser Zeilen kam auf Live an" "$(src mysql -N -e "SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE meta_key IN ('_e2e_form', '_e2e_link', '_e2e_objekt', '_e2e_ph', '_e2e_twin')")" 0
+eq "Sicherheit: keine dieser Zeilen kam auf Live an" "$(src mysql -N -e "SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE meta_key IN ('_e2e_form', '_e2e_link', '_e2e_objekt', '_e2e_ph', '_e2e_twin', '_e2e_ins_leere', '_WP_Attached_File')")" 0
 eq "Sicherheit: siteurl unverändert" "$(opt src siteurl)" "$SOURCE_URL"
 
 echo "== §7.4/§7.6: Health-Check schlägt an – Rücknahme über den Agent, samt Inhalten"
@@ -846,8 +915,30 @@ eq "Fehler mittendrin: kein offener Push" "$(pending)" "null"
 eq "Fehler mittendrin: Manifest unverändert" "$(msum "$CONTENT/manifest.jsonl")" "$(msum "$E2E/manifest.before-satz")"
 ok "Fehler mittendrin: Baseline der Dateien unverändert" cmp -s "$E2E/baseline.before-satz" "$SITE/.wpsync/baseline.json"
 eq "Fehler mittendrin: Live antwortet" "$(code "$SOURCE_URL/e2e-voll/")" 200
+# M2: die gescheiterte Abfrage trug den Wert des Pakets – im Fehlerprotokoll des Servers steht er nicht.
+src logs -s web >"$E2E/web.log" 2>&1 || true
+no "M2: der Wert der gescheiterten Abfrage steht nicht im Fehlerprotokoll" grep -qF "kommt nie an" "$E2E/web.log"
+no "M2: auch die Abfrage selbst nicht" grep -qF "_e2e_boom" "$E2E/web.log"
+ok "M2: protokolliert ist nur die Fehlernummer der Datenbank" grep -qF "wpsync: a query of the content channel failed (MySQL error 1644)" "$E2E/web.log"
 src mysql -e "DROP TRIGGER IF EXISTS e2e_boom"
 tgt wp eval "delete_post_meta($PAGE_FULL, '_e2e_aaa'); delete_post_meta($PAGE_FULL, '_e2e_boom');" --skip-plugins --skip-themes
+
+echo "== N1: eine fremde Sitzung hält die Zeile länger als 10 Sekunden gesperrt – content_failed statt eines hängenden Requests"
+tgt wp post update "$PAGE_B" --post_title="E2E B wartet" --skip-plugins --skip-themes >/dev/null
+pkg lock-wait ".t == \"posts\" and .k == \"$PAGE_B\""
+SUM_B_BEFORE="$(rowsum "$PAGE_B")"
+(src mysql -e "START TRANSACTION; SELECT ID FROM ${PREFIX}posts WHERE ID = $PAGE_B FOR UPDATE; SELECT SLEEP(25); ROLLBACK" >/dev/null 2>&1) &
+LOCKER=$!
+sleep 2
+T0="$(date +%s)"
+push_content lock-wait lock-wait --yes
+WAITED=$(($(date +%s) - T0))
+wait "$LOCKER" || true
+refused "N1: Wartezeit auf eine Sperre abgelaufen" lock-wait content_failed
+ok "N1: der Push hat nicht auf das Ende der fremden Sitzung gewartet (${WAITED} s)" test "$WAITED" -lt 22
+eq "N1: an der Seite hat sich kein Byte geändert" "$(rowsum "$PAGE_B")" "$SUM_B_BEFORE"
+eq "N1: kein offener Push" "$(pending)" "null"
+tgt wp post update "$PAGE_B" --post_title="E2E B" --skip-plugins --skip-themes >/dev/null
 
 echo "== D7: die Datenbank schneidet einen Wert ab – write_mismatch, die Transaktion geht ganz zurück"
 # post_title ist TEXT und fasst 65.535 Bytes (kürzere Spalten wie post_name prüft schon die Form des
@@ -892,6 +983,8 @@ WORK="$(find "$WPC" -maxdepth 1 -name 'wpsync-push-*' | head -1)"
 ok "Arbeitsordner hat eine .htaccess" test -s "$WORK/.htaccess"
 PUSH_NEU2="$(last push-neu2 '.data.push_id')"
 ok "Vorher-Abbild des bestätigten Pushs liegt im Arbeitsordner" test -s "$WORK/$PUSH_NEU2/content/before.json"
+eq "N2: Vorher-Abbild und Paket sind nur für den Besitzer lesbar" "$(src exec stat -c %a "/var/www/html/public/wp-content/${WORK##*/}/$PUSH_NEU2/content/before.json" "/var/www/html/public/wp-content/${WORK##*/}/$PUSH_NEU2/content/after.json" "/var/www/html/public/wp-content/${WORK##*/}/$PUSH_NEU2/content/package.jsonl" | paste -sd' ' -)" "600 600 600"
+no "N2: das Vorher-Abbild auf Live ist kein lesbares JSON" jq -e . "$WORK/$PUSH_NEU2/content/before.json"
 eq "Vorher-Abbild ist von aussen nicht abrufbar" "$(code "$SOURCE_URL/wp-content/${WORK##*/}/$PUSH_NEU2/content/before.json")" 403
 eq "abgelegtes Paket ist nach dem bestätigten Push nach Live weg" "$(find "$WORK/packages" -name "$(sha "$PKG/neu.jsonl").jsonl" 2>/dev/null | wc -l | tr -d ' ')" 0
 no "kein Wert einer Zeile in den Fehlerausgaben" grep -rqF -- "boese.example" "$JSON"
