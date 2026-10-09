@@ -800,6 +800,12 @@ final class Push
             }
             PushRescue::setContentFields($work, $pushId, $done);
             PushRescue::unlock($lock);
+            if ($resolved !== null) {
+                // Der Vermerk im Protokoll zuerst – vor den Nacharbeiten, in denen fremder Code läuft: stirbt PHP
+                // dort, weiss die Zeile trotzdem, was der Push an der Liste geändert hat (Nach-Review NR-1).
+                $summary[count($summary) - 1] += ['activated' => $applied['plugins']['added'], 'deactivated' => $applied['plugins']['removed']];
+                Store::updatePush($pushId, ['units' => (string) wp_json_encode($summary)]);
+            }
             $answer['content'] = [
                 'rows'         => $applied['rows'],
                 'after'        => $applied['after'],
@@ -809,9 +815,7 @@ final class Push
                 'seconds'      => $applied['seconds'],
             ];
             if ($resolved !== null) {
-                $answer['plugins']            = PushPlugins::result($wish, $resolved, $applied['plugins']);
-                $summary[count($summary) - 1] += ['activated' => $applied['plugins']['added'], 'deactivated' => $applied['plugins']['removed']];
-                Store::updatePush($pushId, ['units' => (string) wp_json_encode($summary)]);
+                $answer['plugins'] = PushPlugins::result($wish, $resolved, $applied['plugins']);
             }
         }
         if ($target === 'staging') {
@@ -1067,8 +1071,8 @@ final class Push
 
     /**
      * Schaltet die Rücknahme dieses Pushs Plugins, und zwar ausserhalb des Notfallwegs? Ja für einen
-     * bestätigten Push, dessen Commit an der Liste etwas geändert hat (Einheit plugins des Protokolls:
-     * activated, deactivated). Für einen unbestätigten Push fragt niemand nach dem Recht (S1).
+     * bestätigten Push mit der Einheit plugins im Protokoll – ausser der Commit hat vermerkt, dass er an
+     * der Liste nichts geändert hat. Für einen unbestätigten Push fragt niemand nach dem Recht (S1).
      *
      * @param array<string, mixed> $push
      */
@@ -1078,8 +1082,15 @@ final class Push
             return false;
         }
         foreach ((array) ($push['units'] ?? []) as $unit) {
-            if (is_array($unit) && ($unit['path'] ?? '') === PushPlugins::UNIT
-                && ((array) ($unit['activated'] ?? []) !== [] || (array) ($unit['deactivated'] ?? []) !== [])) {
+            if (!is_array($unit) || ($unit['path'] ?? '') !== PushPlugins::UNIT) {
+                continue;
+            }
+            // Fail-closed (Nach-Review NR-1): „nichts geändert“ gilt nur, wenn der Commit genau das vermerkt hat
+            // – beide Listen da und leer. Fehlt der Vermerk (PHP starb nach dem COMMIT), ist er halb oder keine
+            // Liste, kann das Delta trotzdem in der Datenbank stehen.
+            $noted = array_key_exists('activated', $unit) && array_key_exists('deactivated', $unit)
+                && $unit['activated'] === [] && $unit['deactivated'] === [];
+            if (!$noted) {
                 return true;
             }
         }

@@ -407,4 +407,51 @@ final class PushPluginsRollbackTest extends PushPluginsFlowCase
         $this->assertNull($this->rescue($this->live, $a)['superseded_by']);
         $this->ok(Push::rollback(['push_id' => $a], self::KEY));
     }
+
+    /**
+     * Nach-Review NR-1: „hat der Push die Liste geändert?“ entscheidet fail-closed. Starb PHP im Commit nach
+     * dem COMMIT, aber vor dem Vermerk im Protokoll, trägt die Einheit plugins nur den Wunsch – das Delta
+     * steht trotzdem in der Datenbank. Ein solcher bestätigter Push gilt als „schaltet“.
+     */
+    public function testAConfirmedPushThatOnlyCarriesItsWishCountsAsSwitching(): void
+    {
+        $id = $this->pushed();
+        $this->ok(Push::confirm(['push_id' => $id], self::KEY));
+        $units = [];
+        foreach (Store::getPush($id)['units'] as $unit) {
+            if ($unit['path'] === 'plugins') {
+                unset($unit['activated'], $unit['deactivated']); // wie nach einem Tod vor dem Vermerk
+                $this->assertSame(['plugins/kunde'], $unit['activate']);
+            }
+            $units[] = $unit;
+        }
+        Store::updatePush($id, ['units' => (string) json_encode($units)]);
+        $stands = $this->liveDb->data;
+        $this->assertTrue(Push::switchesBack(Store::getPush($id)));
+        $this->assertRefused('wpsync_plugins_not_allowed', 403, Push::rollbackPush($id, null));
+        $this->assertRefused('wpsync_plugins_not_allowed', 403, Push::rollbackPush($id, 8));
+        $this->assertSame($stands, $this->liveDb->data);
+        $this->assertSame('rolled_back', $this->ok(Push::rollbackPush($id, 7))->data['status']);
+
+        $base = ['status' => 'confirmed', 'units' => []];
+        $unit = ['path' => 'plugins', 'activate' => ['plugins/x'], 'deactivate' => []];
+        $this->assertTrue(Push::switchesBack(['units' => [$unit]] + $base), 'nur der Wunsch');
+        $this->assertTrue(Push::switchesBack(['units' => [$unit + ['activated' => []]]] + $base), 'der Vermerk ist halb');
+        $this->assertTrue(Push::switchesBack(['units' => [$unit + ['activated' => 'kaputt', 'deactivated' => []]]] + $base), 'der Vermerk ist keine Liste');
+        $this->assertFalse(Push::switchesBack(['units' => [$unit + ['activated' => [], 'deactivated' => []]]] + $base), 'vermerkt: nichts geändert');
+        $this->assertTrue(Push::switchesBack(['units' => [$unit + ['activated' => ['x/x.php'], 'deactivated' => []]]] + $base));
+        $this->assertFalse(Push::switchesBack(['units' => [['path' => 'plugins/x']]] + $base), 'ein Push ohne Plugin-Zustand');
+        $this->assertFalse(Push::switchesBack(['status' => 'committed', 'units' => [$unit]]), 'unbestätigt: der Notfallweg');
+    }
+
+    /** NR-1: der Vermerk activated/deactivated steht im Protokoll, bevor die Nacharbeiten (fremder Code) laufen. */
+    public function testTheDeltaIsNotedBeforeThePostActionsRun(): void
+    {
+        $source = (string) file_get_contents(__DIR__ . '/../src/Push.php');
+        $note   = strpos($source, "'activated' => \$applied['plugins']['added']");
+        $post   = strpos($source, "'post_actions' => PushContent::postActions(\$target");
+        $this->assertNotFalse($note);
+        $this->assertNotFalse($post);
+        $this->assertLessThan($post, $note);
+    }
 }
