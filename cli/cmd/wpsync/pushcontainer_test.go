@@ -85,6 +85,8 @@ func TestPushContainerModeCombinations(t *testing.T) {
 		cargs(docroot, "push", "kunde", "code", "--local-url", "https://x.example"),
 		{"pushes", "kunde", "--secret-stdin"},
 		{"pushes", "kunde", "--driver", "container", "--docroot", docroot},
+		cargs(docroot, "push", "kunde", "code", "--no-code"),
+		cargs(docroot, "push", "kunde", "code", "plugins/x", "--no-code", "--content", "/tmp/package.jsonl"),
 		cargs(docroot, "rollback", "kunde"),
 		cargs(docroot, "rollback", "kunde", "--to", "staging"),
 		{"rollback", "kunde", testPushID, "--secret-stdin"},
@@ -309,5 +311,21 @@ func TestStagingWindowClosedNamesTheAdminPage(t *testing.T) {
 	res := stg(t, "open", "kunde", "--json")
 	if e := lastResult(t, res, "staging open", cliout.ExitPushWindowClosed)["error"].(map[string]any); e["admin_url"] != f.srv.URL+"/wp-admin/tools.php?page=wpsync" {
 		t.Errorf("error = %v", e)
+	}
+}
+
+// Spec Content-Push §10: --content und --no-code gelten auch im Container-Modus. Ein Paket, das
+// keines ist, endet mit Exit 1 und error.reason, ohne Anfrage an die Site.
+func TestPushContainerContentIsCheckedBeforeAnyRequest(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	bad := filepath.Join(t.TempDir(), "package.jsonl")
+	os.WriteFile(bad, []byte("kein paket\n"), 0o644)
+	res := runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", cargs(docroot, "push", "kunde", "code", "--no-code", "--content", bad, "--dry-run", "--json")...)
+	m := lastResult(t, res, "push", cliout.ExitUnknown)
+	if e := m["error"].(map[string]any); e["reason"] != "package_invalid" {
+		t.Errorf("error = %v", e)
+	}
+	if len(f.routes) != 0 {
+		t.Errorf("routes = %v", f.routes)
 	}
 }
