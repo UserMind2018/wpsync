@@ -103,7 +103,7 @@ final class ContentListsTest extends TestCase
         $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0_elementor_screenshot_failed", $page));
         $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0_billing_email", $page), 'pseudonymisiert: fest gesperrt');
         $this->assertSame('meta_key', ContentLists::blocked('postmeta', "219\0", $page), 'leerer Meta-Schlüssel');
-        $this->assertSame('meta_key', ContentLists::blocked('postmeta', '219', $page), 'Schlüssel ohne Trenner');
+        $this->assertSame('key', ContentLists::blocked('postmeta', '219', $page), 'Schlüssel ohne Trenner');
         $this->assertSame('meta_word', ContentLists::blocked('postmeta', "219\0design_token", $page));
         $this->assertNull(ContentLists::blocked('postmeta', "219\0design_token", $page, ['meta_exceptions' => ['design_token']]));
         $this->assertNull(ContentLists::blocked('postmeta', "219\0a\0b", $page), 'nur der erste Trenner teilt');
@@ -142,5 +142,45 @@ final class ContentListsTest extends TestCase
             $this->assertSame('meta_key', ContentLists::blocked('postmeta', "1\0" . $key, ['post_type' => 'page']), $key);
             $this->assertSame('meta_key', ContentLists::blocked('postmeta', "1\0" . $key, ['post_type' => 'page'], ['meta_exceptions' => [$key]]), $key);
         }
+    }
+
+    /** @return array<string, array{0: string, 1: string}> Tabelle, Schlüssel */
+    public static function badKeys(): array
+    {
+        $out = [];
+        foreach (['posts', 'terms', 'term_taxonomy'] as $table) {
+            foreach (['219abc', 'abc', '', '0', '0219', '-1', '+219', ' 219', "219\n", '2.19', '1e3', "219\0", "219\0_x", str_repeat('9', 21)] as $key) {
+                $out[$table . ' ' . json_encode($key)] = [$table, $key];
+            }
+        }
+        foreach (['postmeta', 'termmeta', 'term_relationships'] as $table) {
+            foreach (["219abc\0_x", "abc\0_x", "\0_x", "0\0_x", "0219\0_x", "-1\0_x", " 219\0_x", "219\n\0_x", "2.19\0_x", '219', '219abc', '', '_x', str_repeat('9', 21) . "\0_x"] as $key) {
+                $out[$table . ' ' . json_encode($key)] = [$table, $key];
+            }
+        }
+        return $out;
+    }
+
+    /** Security-Review H3.3: die Objekt-ID im Schlüssel ist eine Zahl und nichts sonst – auch wenn alles andere erlaubt wäre */
+    #[\PHPUnit\Framework\Attributes\DataProvider('badKeys')]
+    public function testAKeyWithoutACleanObjectIdIsBlocked(string $table, string $key): void
+    {
+        $ctx = ['post_type' => 'page', 'taxonomies' => ['nav_menu']];
+        $this->assertSame('key', ContentLists::blocked($table, $key, $ctx));
+        $this->assertSame('key', ContentLists::blocked($table, $key, []), 'vor jedem anderen Grund');
+    }
+
+    public function testCleanObjectIdsPass(): void
+    {
+        $ctx = ['post_type' => 'page', 'taxonomies' => ['nav_menu']];
+        foreach (['1', '219', '18446744073709551615', str_repeat('9', 20)] as $id) {
+            $this->assertNull(ContentLists::blocked('posts', $id, $ctx), $id);
+            $this->assertNull(ContentLists::blocked('terms', $id, $ctx), $id);
+            $this->assertNull(ContentLists::blocked('term_taxonomy', $id, $ctx), $id);
+            $this->assertNull(ContentLists::blocked('postmeta', $id . "\0_x", $ctx), $id);
+            $this->assertNull(ContentLists::blocked('termmeta', $id . "\0farbe", $ctx), $id);
+            $this->assertNull(ContentLists::blocked('term_relationships', $id . "\0nav_menu", $ctx), $id);
+        }
+        $this->assertSame('option', ContentLists::blocked('options', '219abc', ['prefix' => 'wp_']), 'Optionen haben keinen Zahlenschlüssel');
     }
 }

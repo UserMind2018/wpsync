@@ -22,7 +22,7 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
 - `wpsync content export <site>`: normalisierte Zeilen und Fingerabdrücke der Arbeitskopie als
   JSON-Lines auf stdout – dieselbe PHP-Implementierung wie auf der Site, per `wp eval-file -`;
   je Zeile `p` (pushbar laut Listen des Agents, ohne Projekt-Erweiterungen) und sonst `why`
-  (`post_type`, `taxonomy`, `meta_key`, `meta_word`, `option`, `no_object`, `unnormalizable`,
+  (`key`, `post_type`, `taxonomy`, `meta_key`, `meta_word`, `option`, `no_object`, `unnormalizable`,
   `key_encoding`). Läuft ohne Request an die Site, auch im Container-Modus (PHP-Version und
   Tabellenpräfix aus `env.json`); Meldungen immer auf stderr, mit `--json` das Ergebnisobjekt
   als letzte Zeile. Braucht einen aktuellen Inhaltsstand (sonst Exit 2)

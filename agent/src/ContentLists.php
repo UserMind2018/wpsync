@@ -50,6 +50,12 @@ final class ContentLists
     public const BLOCKED_OPTION_PREFIXES = ['_transient_', '_site_transient_', 'mailserver_', 'elementor_css_', 'wpsync_'];
     public const BLOCKED_OPTION_WORDS = ['license', 'key', 'secret', 'token', 'password'];
 
+    /** Objekt-ID in einem Schlüssel: dezimal, ohne Vorzeichen, führende Null und Zusatz. */
+    private const OBJECT_ID = '/^[1-9][0-9]{0,19}\z/';
+    /** Tabellen, deren Schlüssel die ID ist – und die, deren Schlüssel <ID>\0<Name> ist. */
+    private const ID_KEYS   = ['posts', 'terms', 'term_taxonomy'];
+    private const PAIR_KEYS = ['postmeta', 'termmeta', 'term_relationships'];
+
     private const NO_EXTENSIONS = ['post_types' => [], 'taxonomies' => [], 'meta_exceptions' => []];
 
     /** @var list<string>|null */
@@ -125,13 +131,21 @@ final class ContentLists
      *
      * @param array{post_type?: string|null, taxonomies?: list<string>, prefix?: string, stylesheet?: string} $ctx
      * @param array<string, list<string>> $ext
-     * @return string|null null: pushbar; sonst der Grund – post_type, taxonomy, meta_key (fest),
-     *                     meta_word (ausnehmbar, W11), option, no_object, table
+     * @return string|null null: pushbar; sonst der Grund – key (die Objekt-ID im Schlüssel ist keine
+     *                     Zahl ohne Zusatz oder der Trenner eines Paars fehlt), post_type, taxonomy,
+     *                     meta_key (fest), meta_word (ausnehmbar, W11), option, no_object, table
      */
     public static function blocked(string $table, string $key, array $ctx, array $ext = []): ?string
     {
         $cut  = strpos($key, "\0");
         $name = $cut === false ? '' : (string) substr($key, $cut + 1); // Meta-Schlüssel bzw. Taxonomie eines Paars
+        // Wer den Schlüssel später als Zahl liest, läse aus "219abc" die 219: nur die reine ID zählt.
+        if (in_array($table, self::ID_KEYS, true) && preg_match(self::OBJECT_ID, $key) !== 1) {
+            return 'key';
+        }
+        if (in_array($table, self::PAIR_KEYS, true) && ($cut === false || preg_match(self::OBJECT_ID, substr($key, 0, $cut)) !== 1)) {
+            return 'key';
+        }
         switch ($table) {
             case 'posts':
                 return self::blockedType($ctx, $ext);
