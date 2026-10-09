@@ -48,6 +48,13 @@ final class ContentCheck
     private $dangling = [];
     /** @var bool der laufende run() ist ein Probelauf ohne offenes Push-Fenster */
     private $partial = false;
+    /** @var list<array{table: string, key: string, check: string}> was der Probelauf ohne Fenster nicht geprüft hat */
+    private $unchecked = [];
+    /**
+     * @var array<string, array<string, bool>> posts, terms, term_taxonomy → Schlüssel, die der Probelauf ohne
+     *      Fenster wie fehlende behandelt: es gibt sie, aber mit gesperrtem Typ bzw. gesperrter Taxonomie
+     */
+    private $masked = ['posts' => [], 'terms' => [], 'term_taxonomy' => []];
     /** @var array<string, int> Zähler-Tabelle → höchste ID, die ein neues Objekt auf diesem Ziel haben darf */
     private $ceilings = [];
 
@@ -68,14 +75,18 @@ final class ContentCheck
      * @param array<string, mixed> $uploads Dateien der Einheit uploads desselben Pushs, relativ zu uploads/ (nur die Schlüssel zählen)
      * @param bool                 $lock    beim Anwenden: jede Zeile wird mit FOR UPDATE gelesen
      * @param bool                 $partial Probelauf ohne offenes Push-Fenster: die Antwort verrät nicht, welche Objekte
-     *                                      und Dateien es auf dem Ziel gibt – was ins Leere zeigt, gilt als gesperrte
-     *                                      Zeile (blocked_row), Dateien von Attachments werden nicht geprüft
+     *                                      und Dateien es auf dem Ziel gibt. Ein Objekt mit gesperrtem Typ oder gesperrter
+     *                                      Taxonomie gilt in jeder Prüfung als fehlend (mask()); was auf ein fehlendes
+     *                                      Objekt zeigt, ist kein Fehler, sondern ungeprüft (unchecked()), ebenso die
+     *                                      Dateien von Attachments
      * @throws ContentException
      */
     public function run(array $uploads = [], bool $lock = false, bool $partial = false): void
     {
-        $this->partial  = $partial;
-        $this->dangling = [];
+        $this->partial   = $partial;
+        $this->unchecked = [];
+        $this->masked    = ['posts' => [], 'terms' => [], 'term_taxonomy' => []];
+        $this->dangling  = [];
         $this->inserted = [];
         $this->ceilings = [];
         $this->head();
@@ -89,6 +100,22 @@ final class ContentCheck
         if (!$partial) {
             $this->files($uploads);
         }
+    }
+
+    /**
+     * Was ein Probelauf ohne offenes Push-Fenster nicht geprüft hat, in der Reihenfolge des Pakets,
+     * jede Zeile höchstens einmal – auch nach einer Ablehnung, soweit run() kam:
+     *   reference         die Zeile hängt an einem Objekt (Beitrag, Term, term_taxonomy-Zeile) oder zeigt
+     *                     auf eines, das nicht im Paket liegt und das es auf dem Ziel nicht gibt – oder
+     *                     nur mit gesperrtem Typ bzw. gesperrter Taxonomie; welches von beiden, bleibt offen
+     *   attachment_files  die Zeile nennt Dateien eines Attachments; ob sie auf dem Ziel liegen, ist offen
+     * Mit offenem Fenster und beim Anwenden immer leer.
+     *
+     * @return list<array{table: string, key: string, check: string}>
+     */
+    public function unchecked(): array
+    {
+        return $this->unchecked;
     }
 
     /**
@@ -212,16 +239,73 @@ final class ContentCheck
             $this->state[$table] = $wanted === [] ? [] : $this->target->store->read($table, $wanted, $lock);
             // Nach jeder Tabelle: was bis hier gelesen ist, steht schon im Speicher des Requests.
             $bytes += self::bytes($this->state[$table]);
-            if ($bytes > self::$maxStateBytes) {
-                throw new ContentException(
-                    ContentException::TOO_LARGE,
-                    'Die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen zu gross für einen Push – in mehreren Pushes übertragen.',
-                    [],
-                    ['limits' => ContentPackage::limits(), 'state_bytes' => $bytes]
-                );
+            if (!$this->partial) {
+                self::bounded($bytes);
             }
         }
         $this->termTaxonomies = $this->target->store->taxonomies(array_map('strval', array_keys($this->state['terms'])));
+        if ($this->partial) {
+            // Erst ausblenden, dann zählen: auch die Grösse gesperrter Zeilen verrät der Probelauf nicht.
+            $this->mask();
+            self::bounded(array_sum(array_map([self::class, 'bytes'], $this->state)));
+        }
+    }
+
+    /** @throws ContentException package_too_large */
+    private static function bounded(int $bytes): void
+    {
+        if ($bytes > self::$maxStateBytes) {
+            throw new ContentException(
+                ContentException::TOO_LARGE,
+                'Die Zeilen, die das Paket auf dem Ziel trifft, sind zusammen zu gross für einen Push – in mehreren Pushes übertragen.',
+                [],
+                ['limits' => ContentPackage::limits(), 'state_bytes' => $bytes]
+            );
+        }
+    }
+
+    /**
+     * Probelauf ohne offenes Push-Fenster: blendet aus dem gelesenen Zustand alles aus, was es auf
+     * dem Ziel nur mit gesperrtem Typ oder gesperrter Taxonomie gibt – Beiträge, Terme und
+     * term_taxonomy-Zeilen samt ihrer Meta und Zuordnungen. Jede Prüfung danach sieht sie wie
+     * fehlende Objekte; so ist die Antwort für „fehlt“ und „existiert, aber gesperrt“ dieselbe,
+     * und niemand zählt über den Probelauf die IDs von Bestellungen oder Formular-Einträgen ab.
+     * Der echte Push (immer mit Fenster) sieht den ganzen Zustand.
+     */
+    private function mask(): void
+    {
+        $ext    = $this->package->head()['extensions'];
+        $locked = function (string $taxonomy) use ($ext): bool {
+            return !ContentLists::taxonomy($taxonomy, $ext) || $this->foreignTaxonomy($taxonomy, null);
+        };
+        foreach ($this->state['posts'] as $id => $raw) {
+            if ($raw !== null && !ContentLists::postType((string) ($raw['post_type'] ?? ''), $ext)) {
+                $this->masked['posts'][(string) $id] = true;
+                $this->state['posts'][$id]           = null;
+            }
+        }
+        foreach ($this->termTaxonomies as $id => $taxonomies) {
+            if (array_filter(array_map('strval', $taxonomies), $locked) !== []) {
+                $this->masked['terms'][(string) $id] = true;
+                unset($this->termTaxonomies[$id]);
+                if (array_key_exists($id, $this->state['terms'])) {
+                    $this->state['terms'][$id] = null;
+                }
+            }
+        }
+        foreach ($this->state['term_taxonomy'] as $id => $raw) {
+            if ($raw !== null && $locked((string) ($raw['taxonomy'] ?? ''))) {
+                $this->masked['term_taxonomy'][(string) $id] = true;
+                $this->state['term_taxonomy'][$id]           = null;
+            }
+        }
+        foreach (['postmeta' => 'posts', 'term_relationships' => 'posts', 'termmeta' => 'terms'] as $table => $owner) {
+            foreach ($this->state[$table] as $key => $raw) {
+                if ($raw !== null && isset($this->masked[$owner][ContentState::split((string) $key)[0]])) {
+                    $this->state[$table][$key] = null;
+                }
+            }
+        }
     }
 
     /**
@@ -299,6 +383,10 @@ final class ContentCheck
             foreach ($why === null && isset($ctx['taxonomies']) ? $ctx['taxonomies'] : [] as $taxonomy) {
                 $why = $this->foreignTaxonomy((string) $taxonomy, null) ? 'taxonomy' : $why;
             }
+            // Der Schlüssel entscheidet auch dort, wo das Objekt fehlt: was allein aus der Zeile folgt, ist nie ungeprüft.
+            if ($why === 'no_object' && $this->partial && in_array($table, ['postmeta', 'termmeta'], true) && !ContentLists::metaKey($name, $ext)) {
+                $why = 'meta_key';
+            }
             if ($why === 'no_object') {
                 $this->dangling[] = ContentException::key($table, $key);
             } elseif ($why === 'key') {
@@ -310,33 +398,64 @@ final class ContentCheck
         // Ein Zwilling auf dem Ziel (gleich für die Datenbank, andere Bytes) wäre ein Weg an den Listen vorbei.
         foreach ($named as $table => $keys) {
             foreach ($keys === [] ? [] : $this->target->store->aliases($table, $keys) as $key) {
+                // Ein ausgeblendetes Objekt hat auch keinen Zwilling (mask()).
+                $owner = ['postmeta' => 'posts', 'termmeta' => 'terms'][$table] ?? '';
+                if ($owner !== '' && isset($this->masked[$owner][ContentState::split((string) $key)[0]])) {
+                    continue;
+                }
                 $entry = ContentException::key($table, (string) $key);
                 if (!in_array($entry, $blocked, true)) {
                     $blocked[] = $entry;
                 }
             }
         }
+        // Ohne Fenster kein Orakel: was ins Leere zeigt, ist ungeprüft – kein Fehler, und nicht zu
+        // unterscheiden von dem, was auf ein gesperrtes Objekt zeigt (mask()).
+        if ($this->partial) {
+            $this->unchecked = $this->notChecked(array_merge($blocked, $invalid));
+            $this->dangling  = [];
+        }
         if ($invalid !== []) {
             throw new ContentException(ContentException::INVALID, 'Das Paket ist ungültig: ein Schlüssel hat nicht die Form der Tabelle, oder ein Beitrag soll ohne op trash in den Papierkorb.', $invalid);
-        }
-        // Ohne Fenster kein Orakel: was ins Leere zeigt, steht zwischen den gesperrten Zeilen – eine
-        // Ablehnung, die Schlüssel in der Reihenfolge des Pakets.
-        if ($this->partial) {
-            $hidden = [];
-            foreach (array_merge($blocked, $this->dangling, $this->unreferenced()) as $entry) {
-                $hidden[$entry['table'] . "\0\0" . $entry['key']] = true;
-            }
-            $blocked = [];
-            foreach ($this->package->rows() as $row) {
-                if (isset($hidden[$row['table'] . "\0\0" . $row['key']])) {
-                    $blocked[] = ContentException::key($row['table'], $row['key']);
-                }
-            }
-            $this->dangling = [];
         }
         if ($blocked !== []) {
             throw new ContentException(ContentException::BLOCKED, count($blocked) . ' Zeile(n) stehen auf der Sperrliste des Agents oder nicht auf seiner Whitelist.', $blocked);
         }
+    }
+
+    /**
+     * Probelauf ohne offenes Push-Fenster: was er nicht prüft, in der Reihenfolge des Pakets und
+     * jede Zeile einmal – Verweise ins Leere (reference) vor den Dateien eines Attachments
+     * (attachment_files). Eine Zeile, die schon abgelehnt ist, steht nicht dabei.
+     *
+     * @param list<array{table: string, key: string}> $refused
+     * @return list<array{table: string, key: string, check: string}>
+     */
+    private function notChecked(array $refused): array
+    {
+        $id = static function (string $table, string $key): string {
+            return $table . "\0\0" . $key;
+        };
+        $checks = [];
+        foreach ($this->rows['postmeta'] ?? [] as $key => $row) {
+            if ($row['values'] !== [] && in_array(strtolower(ContentState::split((string) $key)[1]), self::FILE_META, true)) {
+                $checks[$id('postmeta', (string) $key)] = 'attachment_files';
+            }
+        }
+        foreach (array_merge($this->dangling, $this->unreferenced()) as $entry) {
+            $checks[$id($entry['table'], $entry['key'])] = 'reference';
+        }
+        foreach ($refused as $entry) {
+            unset($checks[$id($entry['table'], $entry['key'])]);
+        }
+        $out = [];
+        foreach ($this->package->rows() as $row) {
+            $check = $checks[$id($row['table'], $row['key'])] ?? null;
+            if ($check !== null) {
+                $out[] = ContentException::key($row['table'], $row['key']) + ['check' => $check];
+            }
+        }
+        return $out;
     }
 
     /**
@@ -559,6 +678,13 @@ final class ContentCheck
             return;
         }
         $raw = $this->target->store->relations($objects, $lock);
+        // Ausgeblendetes (mask()) steht auch hier nicht im Weg: weder die Zuordnungen eines gesperrten
+        // Beitrags noch die auf eine gesperrte term_taxonomy-Zeile.
+        foreach ($raw as $object => $ids) {
+            $raw[$object] = isset($this->masked['posts'][(string) $object]) ? [] : array_values(array_filter($ids, function ($id): bool {
+                return !isset($this->masked['term_taxonomy'][(string) $id]);
+            }));
+        }
         $bad = [];
         foreach ($this->rows['term_relationships'] ?? [] as $key => $row) {
             $key   = (string) $key;
@@ -583,7 +709,7 @@ final class ContentCheck
     /** Nr. 8: Zeilen ohne Objekt, term_taxonomy ohne Term, Optionen, die ins Leere zeigen. */
     private function references(): void
     {
-        // Im Probelauf ohne Fenster hat lists() das schon als gesperrte Zeilen gemeldet.
+        // Im Probelauf ohne Fenster sind sie ungeprüft, kein Fehler (unchecked()).
         $dangling = $this->partial ? [] : array_merge($this->dangling, $this->unreferenced());
         if ($dangling !== []) {
             throw new ContentException(ContentException::DANGLING, 'Zeilen verweisen auf Objekte, die es auf dem Ziel nicht gibt und die nicht mitgepusht werden.', $dangling);

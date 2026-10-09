@@ -76,6 +76,16 @@ type ContentFailure struct {
 	Paths   []string     `json:"paths,omitempty"` // upload_missing: relative to wp-content/uploads/
 }
 
+// ContentUnchecked names one row a dry run without an open push window left unchecked, and what
+// was not checked: "reference" – the row hangs on or points to an object outside the package that
+// the site does not have, or has only with a blocked type or taxonomy (the agent does not say
+// which); "attachment_files" – the row names files of an attachment. Never an error.
+type ContentUnchecked struct {
+	Table string `json:"table"`
+	Key   string `json:"key"`
+	Check string `json:"check"`
+}
+
 // ContentPlan is the part "content" of the answer to /push/begin.
 type ContentPlan struct {
 	OK         bool            `json:"ok"`
@@ -85,9 +95,13 @@ type ContentPlan struct {
 	Conflicts  []ContentKey    `json:"conflicts"`
 	HealthURLs []string        `json:"health_urls"` // published pages the package changes, at most 10
 	// Partial: the dry run ran without an open push window. The agent then does not tell which
-	// objects and files exist on the site: references into nothing look like blocked rows and files
-	// of attachments are not checked. The whole check needs the window.
+	// objects and files exist on the site: references to objects outside the package and files of
+	// attachments are not checked but listed in Unchecked. The whole check needs the window.
 	Partial bool `json:"partial"`
+	// Unchecked holds at most 200 rows, UncheckedTotal counts all; empty and 0 with an open window
+	// and from an agent that does not name them.
+	Unchecked      []ContentUnchecked `json:"unchecked"`
+	UncheckedTotal int                `json:"unchecked_total"`
 	// Extensions: only when the package names project extensions.
 	Extensions *ContentExtensions `json:"extensions,omitempty"`
 }
@@ -152,6 +166,21 @@ func CleanKeys(keys []ContentKey) []ContentKey {
 	return out
 }
 
+// CleanUnchecked keeps at most 200 rows whose table and check look like the agent's names and
+// whose key is of a sane length; never nil.
+func CleanUnchecked(rows []ContentUnchecked) []ContentUnchecked {
+	out := []ContentUnchecked{}
+	for _, r := range rows {
+		if len(out) == maxContentKeys {
+			break
+		}
+		if tableRe.MatchString(r.Table) && r.Key != "" && len(r.Key) <= 512 && stepRe.MatchString(r.Check) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // CleanActions keeps at most 30 steps that look like the agent's names.
 func CleanActions(actions []PostAction) []PostAction {
 	var out []PostAction
@@ -181,6 +210,10 @@ func (p *ContentPlan) Clean() {
 		p.Error.Clean()
 	}
 	p.Conflicts = CleanKeys(p.Conflicts)
+	p.Unchecked = CleanUnchecked(p.Unchecked)
+	if p.UncheckedTotal < len(p.Unchecked) {
+		p.UncheckedTotal = len(p.Unchecked)
+	}
 	if len(p.HealthURLs) > 10 {
 		p.HealthURLs = p.HealthURLs[:10]
 	}

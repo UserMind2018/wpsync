@@ -19,7 +19,8 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Vorher-Abbild, Nacharbeiten (`data.post_actions`), Messwert (`data.content: {rows, seconds}`)
   und Health-Check der geänderten Seiten.
   `--dry-run` prüft das Paket ohne Push-Fenster (vollständig nur mit offenem Fenster, siehe
-  „Sicherheit“); das `plan`-Ereignis nennt `content: {rows, conflicts, limits, partial}`. Auch
+  „Sicherheit“); das `plan`-Ereignis nennt `content: {rows, conflicts, limits, partial,
+  unchecked, unchecked_total}`. Auch
   nach `--to staging`
 - `--no-code`: ein Satz nur aus `--uploads` und `--content`
 - `wpsync rollback` nimmt den ganzen Satz zurück (Inhalte → Code → Uploads) – oder nichts, wenn
@@ -162,11 +163,17 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   `content_failed`. Abgelegte Pakete und ihre Kopie im Push sind nur noch für den Besitzer
   lesbar; scheitert das Schreiben, steht kein Pfad im Fehlerprotokoll
 - Agent: Der Probelauf eines Inhalts-Pakets ist ohne offenes Push-Fenster kein Weg mehr, die
-  Site auszufragen. Ist das Fenster der Kopplung zu, meldet er einen Verweis auf ein fehlendes
-  Objekt wie eine gesperrte Zeile (`blocked_row` statt `dangling_reference`, eine Meldung, die
-  Schlüssel in der Reihenfolge des Pakets) und prüft die Dateien von Attachments
-  (`upload_missing`) nicht. Die Antwort nennt `content.partial: true`; die CLI reicht `partial`
-  im `plan`-Ereignis durch und sagt es in einer Zeile. Mit offenem Fenster unverändert
+  Site auszufragen. Ist das Fenster der Kopplung zu, behandelt er ein Objekt mit gesperrtem Typ
+  oder gesperrter Taxonomie in jeder Prüfung wie ein fehlendes – die Antwort ist für „fehlt“ und
+  „existiert, aber gesperrt“ dieselbe – und prüft die Dateien von Attachments (`upload_missing`)
+  nicht. Was er deshalb offen lässt, ist kein Fehler: es steht in `content.unchecked` als
+  `[{table, key, check}]` mit `check` `reference` (Verweis auf ein Objekt ausserhalb des Pakets,
+  das fehlt oder gesperrt ist) oder `attachment_files`, höchstens 200 Einträge, dazu
+  `unchecked_total`. `blocked_row` bleibt, was allein aus der Zeile oder dem Paket folgt. Die
+  Antwort nennt `content.partial: true`; die CLI reicht `partial`, `unchecked` und
+  `unchecked_total` im `plan`-Ereignis durch und sagt beides in je einer Zeile; der Probelauf
+  endet damit nicht mit einem Fehler. Mit offenem Fenster unverändert vollständig, `unchecked`
+  leer
 - Agent: Die Dateiprüfung von Attachments erkennt ihre Meta-Schlüssel in jeder
   Gross-/Kleinschreibung (`_WP_Attached_File` umging sie; WordPress liest den Schlüssel
   trotzdem), prüft den Pfad am Wert, wie er geschrieben wird (nach dem Einsetzen der Adresse des

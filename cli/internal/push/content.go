@@ -233,6 +233,9 @@ func printContent(out io.Writer, pkg *Package, plan *agentapi.ContentPlan) {
 	if plan.Partial {
 		fmt.Fprintln(out, "  ! Push-Fenster geschlossen: Inhalte nur teilweise geprüft – Verweise auf Objekte der Site und die Dateien von Attachments prüft der Agent erst mit offenem Fenster")
 	}
+	if plan.UncheckedTotal > 0 {
+		fmt.Fprintf(out, "  ! %d Zeilen werden erst mit offenem Push-Fenster geprüft (Verweise/Dateien)\n", plan.UncheckedTotal)
+	}
 }
 
 // printActions names the steps after applying or taking back content that did not work.

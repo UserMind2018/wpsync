@@ -450,7 +450,7 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, m
 			rows = map[string]int{}
 		}
 		content := map[string]any{"rows": rows, "conflicts": append([]agentapi.ContentKey{}, ct.Conflicts...), "limits": ct.Limits,
-			"partial": ct.Partial}
+			"partial": ct.Partial, "unchecked": append([]agentapi.ContentUnchecked{}, ct.Unchecked...), "unchecked_total": ct.UncheckedTotal}
 		if ct.Extensions != nil {
 			content["extensions"] = ct.Extensions
 		}

@@ -357,22 +357,59 @@ final class PushContentFlowTest extends TestCase
         $this->assertTrue($open['window_open']);
         $this->assertFalse($open['content']['partial']);
         $this->assertSame('dangling_reference', $open['content']['error']['code']);
+        $this->assertSame([], $open['content']['unchecked'], 'mit Fenster ist nichts ungeprüft');
+        $this->assertSame(0, $open['content']['unchecked_total']);
         $this->assertSame('upload_missing', $this->begin($file, ['dry' => true])->data['content']['error']['code']);
 
         Store::$until = 0;
         $closed       = $this->begin($missing, ['dry' => true])->data;
         $this->assertFalse($closed['window_open']);
         $this->assertTrue($closed['content']['partial']);
-        $this->assertSame('blocked_row', $closed['content']['error']['code']);
-        $this->assertSame([['table' => 'postmeta', 'key' => "999\0_x"]], $closed['content']['error']['keys']);
+        $this->assertTrue($closed['content']['ok'], 'ungeprüft ist kein Fehler');
+        $this->assertNull($closed['content']['error']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "999\0_x", 'check' => 'reference']], $closed['content']['unchecked']);
+        $this->assertSame(1, $closed['content']['unchecked_total']);
         $files = $this->begin($file, ['dry' => true])->data['content'];
         $this->assertTrue($files['ok'], 'Dateien werden ohne Fenster nicht geprüft');
         $this->assertTrue($files['partial']);
         $this->assertNull($files['error']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "1000002\0_wp_attached_file", 'check' => 'attachment_files']], $files['unchecked']);
+        $this->assertSame(1, $files['unchecked_total']);
         $whole = $this->begin($ok, ['dry' => true])->data['content'];
         $this->assertTrue($whole['ok']);
         $this->assertTrue($whole['partial'], 'auch ein Paket ohne Befund ist ohne Fenster nur teilweise geprüft');
+        $this->assertSame([], $whole['unchecked']);
+        $this->assertSame(0, $whole['unchecked_total']);
         $this->assertSame([], Store::$pushes);
+    }
+
+    /** Die Liste des Ungeprüften ist begrenzt wie error.keys: höchstens 200 Einträge, unchecked_total nennt alle. */
+    public function testWhatADryRunLeavesUncheckedIsBounded(): void
+    {
+        $rows = [];
+        for ($i = 0; $i < 201; $i++) {
+            $rows[] = ContentFixtures::row('insert', 'postmeta', "999\0_x" . $i, 'absent', ['values' => ['x']]);
+        }
+        // Eine Ablehnung aus der Zeile selbst steht daneben, nicht statt der Liste.
+        $rows[]       = ContentFixtures::row('insert', 'postmeta', "219\0_edit_lock", 'absent', ['values' => ['1:1']]);
+        $sha          = $this->stage($rows);
+        Store::$until = 0;
+        $content      = $this->begin($sha, ['dry' => true])->data['content'];
+        $this->assertFalse($content['ok']);
+        $this->assertSame('blocked_row', $content['error']['code']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "219\0_edit_lock"]], $content['error']['keys']);
+        $this->assertCount(200, $content['unchecked']);
+        $this->assertSame(['table' => 'postmeta', 'key' => "999\0_x0", 'check' => 'reference'], $content['unchecked'][0]);
+        $this->assertSame(201, $content['unchecked_total']);
+
+        // Mit offenem Fenster ist nichts ungeprüft: die Verweise sind dann der Fehler.
+        Store::$until = time() + 3600;
+        $content      = $this->begin($this->stage(array_slice($rows, 0, 201)), ['dry' => true])->data['content'];
+        $this->assertFalse($content['partial']);
+        $this->assertSame('dangling_reference', $content['error']['code']);
+        $this->assertSame(201, $content['error']['total']);
+        $this->assertSame([], $content['unchecked']);
+        $this->assertSame(0, $content['unchecked_total']);
     }
 
     /** Nr. 9: die Dateien eines neuen Attachments dürfen mit der Einheit uploads desselben Satzes kommen. */

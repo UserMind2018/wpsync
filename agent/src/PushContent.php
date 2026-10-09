@@ -295,12 +295,16 @@ final class PushContent
      * @param array<string, mixed> $uploads Dateien der Einheit uploads desselben Pushs (nur die Schlüssel zählen)
      * @param bool                 $real    echter Begin: neue Beiträge brauchen den Öffner des Fensters (§9)
      * @param bool                 $window  das Push-Fenster dieser Kopplung ist offen; sonst prüft der Probelauf nur
-     *                                      teilweise (partial) und verrät nicht, welche Objekte und Dateien es gibt
-     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>, partial: bool, extensions?: array<string, list<string>>}
+     *                                      teilweise (partial) und verrät nicht, welche Objekte und Dateien es gibt:
+     *                                      was er deshalb offen lässt, steht in unchecked ({table, key, check} –
+     *                                      ContentCheck::unchecked()), höchstens MAX_KEYS Einträge, unchecked_total
+     *                                      nennt alle. Mit Fenster leer und 0.
+     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>, partial: bool, unchecked: list<array<string, string>>, unchecked_total: int, extensions?: array<string, list<string>>}
      */
     public static function plan(?string $file, string $name, string $content, array $uploads, bool $real, ?int $opener, bool $window = true): array
     {
-        $out = ['ok' => false, 'error' => null, 'rows' => new \stdClass(), 'limits' => ContentPackage::limits(), 'conflicts' => [], 'health_urls' => [], 'partial' => !$window];
+        $out = ['ok' => false, 'error' => null, 'rows' => new \stdClass(), 'limits' => ContentPackage::limits(), 'conflicts' => [], 'health_urls' => [], 'partial' => !$window, 'unchecked' => [], 'unchecked_total' => 0];
+        $check = null;
         try {
             if ($file === null) {
                 throw new ContentException(ContentException::MISSING, 'Das Paket liegt nicht auf dem Server – zuerst über /content/stage ablegen.');
@@ -330,6 +334,10 @@ final class PushContent
             // Kein vorgesehener Grund: auch der steht in der Antwort, statt den Begin scheitern zu lassen.
             $out['error'] = (new ContentException(ContentException::FAILED, 'Das Paket liess sich nicht prüfen.'))->toArray();
         }
+        // Neben einer Ablehnung, nicht statt ihrer: ungeprüft ist kein Fehler.
+        $unchecked              = $check === null ? [] : $check->unchecked();
+        $out['unchecked']       = array_slice($unchecked, 0, ContentException::MAX_KEYS);
+        $out['unchecked_total'] = count($unchecked);
         return $out;
     }
 

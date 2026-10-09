@@ -654,11 +654,35 @@ danach für diesen Beitrag nicht mehr von der Site ab.
 Im Probelauf (`--dry-run`) und beim Anwenden dasselbe, beim Anwenden unter
 Sperre noch einmal. Der Probelauf braucht kein Push-Fenster – **ohne offenes Fenster prüft er
 aber nur einen Teil**: die Antwort soll niemandem, der nur das Secret hat, verraten, welche
-Beiträge, Terme und Dateien es auf der Site gibt. Eine Zeile, die auf ein fehlendes Objekt zeigt,
-erscheint dann wie eine gesperrte (`blocked_row` statt `dangling_reference`, dieselbe Meldung,
-die Schlüssel in der Reihenfolge des Pakets), und die Dateien von Attachments (`upload_missing`)
-prüft der Agent gar nicht. Das `plan`-Ereignis sagt es mit `content.partial: true`, ohne `--json`
-eine Zeile; mit offenem Fenster ist `partial` `false` und die Prüfung vollständig. Die CLI legt das Paket dafür vor dem Begin auf der Site ab (`/content/stage`,
+Beiträge, Terme und Dateien es auf der Site gibt. Was er deshalb offen lässt, ist kein Fehler,
+sondern steht in einer eigenen Liste – getrennt von `content.conflicts` und einer Ablehnung:
+
+```json
+"content": {"partial": true, "unchecked_total": 2, "unchecked": [
+  {"table": "postmeta", "key": "999\u0000_farbe", "check": "reference"},
+  {"table": "postmeta", "key": "300\u0000_wp_attached_file", "check": "attachment_files"}
+]}
+```
+
+- `reference`: die Zeile hängt an einem Objekt oder zeigt auf eines (Beitrag einer Meta oder
+  Zuordnung, Term einer Term-Meta oder `term_taxonomy`-Zeile, `term_taxonomy`-Zeile einer
+  Zuordnung, Beitrag oder Term aus einer Option), das nicht im Paket liegt und das es auf dem Ziel
+  nicht gibt – **oder nur mit einem gesperrten Typ bzw. einer gesperrten Taxonomie**. Welches von
+  beiden, sagt der Agent ohne Fenster bewusst nicht: ein solches Objekt gilt in jeder Prüfung als
+  fehlend, die Antwort ist in beiden Fällen dieselbe. Sonst liessen sich die IDs von Bestellungen
+  oder Formular-Einträgen abzählen. Mit Fenster wäre die Zeile `dangling_reference` oder
+  `blocked_row`
+- `attachment_files`: die Zeile nennt Dateien eines Attachments (`upload_missing` und die Prüfung
+  ihrer Pfade entfallen)
+
+Jede Zeile steht höchstens einmal in der Liste (`reference` vor `attachment_files`), in der
+Reihenfolge des Pakets; höchstens 200 Einträge, `unchecked_total` nennt alle – wie `error.keys`
+und `error.total`. `blocked_row` bleibt auch ohne Fenster, was sich allein aus der Zeile oder dem
+Paket ergibt (gesperrter Meta-Schlüssel, gesperrte Option, Typ eines im Paket eingefügten
+Objekts, Erweiterungen, Form des Schlüssels); `conflict` bleibt, wobei eine Zeile an einem
+gesperrten Objekt wie eine an einem gelöschten erscheint. Ungeprüftes allein lässt den Probelauf
+mit Exit 0 enden; ohne `--json` nennt eine Zeile die Zahl. Mit offenem Fenster ist `partial`
+`false`, `unchecked` leer und die Prüfung vollständig; der echte Push läuft immer so. Die CLI legt das Paket dafür vor dem Begin auf der Site ab (`/content/stage`,
 in Stücken, je Kopplung getrennt im geschützten Push-Arbeitsordner, adressiert über die sha256
 der Datei; es verfällt nach dem bestätigten Push nach Live, spätestens nach 24 Stunden). Jede
 Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffenen Zeilen als

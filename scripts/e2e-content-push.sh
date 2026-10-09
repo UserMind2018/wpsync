@@ -466,11 +466,15 @@ eq "Probelauf: Fenster zu" "$(event dry plan | jq -r '.window_open')" false
 eq "N3: ohne Fenster ist der Probelauf nur ein Teil – plan.content.partial" "$(event dry plan | jq -r '.content.partial')" true
 ok "N3: die CLI sagt es in einer Zeile" hasF "$JSON/dry.err" "nur teilweise geprüft"
 eq "M1/N1: die Grenzen nennen den ID-Abstand und die Summe der Vorher-Zustände" "$(event dry plan | jq -c '[.content.limits.id_headroom, .content.limits.max_state_bytes]')" '[2000000,67108864]'
-# N3: ohne Fenster verrät der Probelauf nicht, ob es ein Objekt gibt – ein Verweis ins Leere sieht aus wie eine gesperrte Zeile.
+eq "N3: dieses Paket lässt nichts ungeprüft" "$(event dry plan | jq -c '[.content.unchecked, .content.unchecked_total]')" '[[],0]'
+# N3: ohne Fenster verrät der Probelauf nicht, ob es ein Objekt gibt – ein Verweis ins Leere ist kein Fehler, sondern ungeprüft.
 raw_pkg dangling "$(jq -c -n --arg v "$(b64 'x')" '{op: "insert", table: "postmeta", key: ("987654\u0000_e2e_ins_leere"), expected: "absent", row: {values: [$v]}}')"
 push_content dangling-closed dangling --dry-run
-refused "N3: Verweis ins Leere ohne Fenster" dangling-closed blocked_row
+eq "N3: Verweis ins Leere ohne Fenster: Exit 0, kein Fehler" "$RC $(last dangling-closed '.data.status')" "0 dry_run"
 eq "N3: ohne Fenster auch hier partial" "$(event dangling-closed plan | jq -r '.content.partial')" true
+eq "N3: die Zeile steht in plan.content.unchecked" "$(event dangling-closed plan | jq -r '.content.unchecked | map(.table + ":" + (.key | split("\u0000") | join("/")) + ":" + .check) | join(",")')" "postmeta:987654/_e2e_ins_leere:reference"
+eq "N3: unchecked_total" "$(event dangling-closed plan | jq -r '.content.unchecked_total')" 1
+ok "N3: die CLI nennt die Zahl in einer Zeile" hasF "$JSON/dangling-closed.err" "1 Zeilen werden erst mit offenem Push-Fenster geprüft"
 eq "Probelauf: Live unverändert" "$(post src "$PAGE_A" post_title)" "E2E A"
 eq "Probelauf: die neue Option gibt es auf Live nicht" "$(opt src options_e2e_neu)" ""
 push_content no-window edit --yes
@@ -485,7 +489,7 @@ STG_URL="$(last staging-create '.data.url')"
 STG_DIR="${STG_URL##*/}"
 push_content push-staging edit --to staging --yes
 eq "Staging: Exit 0" "$RC" 0
-eq "N3: mit offenem Fenster ist die Prüfung vollständig – partial false" "$(event push-staging plan | jq -r '.content.partial')" false
+eq "N3: mit offenem Fenster ist die Prüfung vollständig – partial false, nichts ungeprüft" "$(event push-staging plan | jq -c '[.content.partial, .content.unchecked, .content.unchecked_total]')" '[false,[],0]'
 eq "Staging: Ziel und Status" "$(last push-staging '.data.target + " " + .data.status')" "staging confirmed"
 eq "Staging: Titel in der Kopie" "$(post stg "$PAGE_A" post_title)" "$TITLE_A"
 ok "Staging: Klartext mit der Adresse der Kopie" contains "$(post stg "$PAGE_A" post_content)" "$STG_URL/neu"
@@ -782,7 +786,7 @@ refused "H1: Objekt mit Anhang" unsafe-tail unsafe_value
 seal dangling # neu versiegelt: seit dem Folge-Pull gilt eine andere map_id
 push_content dangling-open dangling --dry-run
 refused "N3: Verweis ins Leere mit offenem Fenster" dangling-open dangling_reference
-eq "N3: mit Fenster partial false" "$(event dangling-open plan | jq -r '.content.partial')" false
+eq "N3: mit Fenster partial false, nichts ungeprüft" "$(event dangling-open plan | jq -c '[.content.partial, .content.unchecked_total]')" '[false,0]'
 # N4: der Schlüssel in anderer Schreibweise – WordPress läse ihn trotzdem als Datei des Attachments.
 raw_pkg file-case "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 '../../../wp-config.php')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_WP_Attached_File"), expected: "absent", row: {values: [$v]}}')"
 push_content file-case file-case --dry-run

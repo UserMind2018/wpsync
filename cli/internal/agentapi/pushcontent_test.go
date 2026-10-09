@@ -104,6 +104,8 @@ func TestPushBeginCarriesTheContentAndItsPlan(t *testing.T) {
 "content":{"ok":false,"partial":true,"error":{"code":"conflict","message":"ge\u0007ändert","keys":[{"table":"posts","key":"219"},{"table":"postmeta","key":"219\u0000_x"},{"table":"../x","key":"1"}],"total":3},
 "rows":{"posts":2,"postmeta":1},"limits":{"max_rows":5000,"max_bytes":8388608,"budget_seconds":12,"id_headroom":2000000,"max_state_bytes":67108864},
 "conflicts":[{"table":"posts","key":"219"}],"health_urls":["https://kunde.de/a/"],
+"unchecked":[{"table":"postmeta","key":"999\u0000_x","check":"reference"},{"table":"postmeta","key":"300\u0000_wp_attached_file","check":"attachment_files"},
+{"table":"../x","key":"1","check":"reference"},{"table":"posts","key":"1","check":"Not A Check"}],"unchecked_total":7,
 "extensions":{"post_types":["referenz","../x"],"taxonomies":[],"meta_exceptions":["design_token"]}}}`))
 	}))
 	defer srv.Close()
@@ -123,6 +125,10 @@ func TestPushBeginCarriesTheContentAndItsPlan(t *testing.T) {
 	}
 	if e := ct.Extensions; e == nil || !reflect.DeepEqual(*e, ContentExtensions{PostTypes: []string{"referenz"}, Taxonomies: []string{}, MetaExceptions: []string{"design_token"}}) {
 		t.Errorf("extensions = %+v", e)
+	}
+	open := []ContentUnchecked{{Table: "postmeta", Key: "999\x00_x", Check: "reference"}, {Table: "postmeta", Key: "300\x00_wp_attached_file", Check: "attachment_files"}}
+	if !reflect.DeepEqual(ct.Unchecked, open) || ct.UncheckedTotal != 7 {
+		t.Errorf("unchecked = %q, total %d", ct.Unchecked, ct.UncheckedTotal)
 	}
 	want := []ContentKey{{Table: "posts", Key: "219"}, {Table: "postmeta", Key: "219\x00_x"}}
 	if !reflect.DeepEqual(ct.Error.Keys, want) {

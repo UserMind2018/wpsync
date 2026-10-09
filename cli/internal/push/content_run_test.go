@@ -78,6 +78,7 @@ func (f *fakeSite) contentPlan(req agentapi.PushBeginRequest) *agentapi.ContentP
 		return plan
 	}
 	plan.OK, plan.HealthURLs = true, f.contentHealth
+	plan.Unchecked, plan.UncheckedTotal = f.unchecked, f.uncheckedTotal
 	return plan
 }
 
@@ -324,12 +325,13 @@ func TestRunDryRunWithContentNeedsNoWindow(t *testing.T) {
 		t.Errorf("routes = %s", got)
 	}
 	want := map[string]any{"rows": map[string]int{"posts": 2, "postmeta": 2}, "conflicts": []agentapi.ContentKey{},
-		"limits": agentapi.ContentLimits{MaxRows: 5000, MaxBytes: 8 << 20, BudgetSeconds: 12}, "partial": true}
+		"limits": agentapi.ContentLimits{MaxRows: 5000, MaxBytes: 8 << 20, BudgetSeconds: 12}, "partial": true,
+		"unchecked": []agentapi.ContentUnchecked{}, "unchecked_total": 0}
 	if !reflect.DeepEqual(plan["content"], want) {
 		t.Errorf("plan.content = %#v", plan["content"])
 	}
 	// N3: without a window the check is partial, and the output says so.
-	if !strings.Contains(out.String(), "Inhalte nur teilweise geprüft") {
+	if !strings.Contains(out.String(), "Inhalte nur teilweise geprüft") || strings.Contains(out.String(), "erst mit offenem Push-Fenster geprüft") {
 		t.Errorf("output:\n%s", out)
 	}
 	if report.Status != "dry_run" || contentFile(t, siteDir, "manifest.jsonl") != manifestBefore {
@@ -340,6 +342,38 @@ func TestRunDryRunWithContentNeedsNoWindow(t *testing.T) {
 	f.routes = nil
 	if err := Run(o); err != nil || strings.Join(f.routes, " ") != "begin" {
 		t.Errorf("second run: %v, routes = %v", err, f.routes)
+	}
+}
+
+// Was der Agent ohne Fenster nicht prüft, ist kein Fehler: der Probelauf nennt es im plan und in
+// einer Zeile und endet ohne Fehler.
+func TestRunDryRunNamesWhatTheAgentLeftUnchecked(t *testing.T) {
+	f := newFakeSite(t)
+	f.window = false
+	f.unchecked = []agentapi.ContentUnchecked{
+		{Table: "postmeta", Key: "999\x00_x", Check: "reference"},
+		{Table: "postmeta", Key: "300\x00_wp_attached_file", Check: "attachment_files"},
+	}
+	f.uncheckedTotal = 250 // the agent names at most 200
+	o, _, out := contentSite(t, f)
+	o.NoCode, o.DryRun = true, true
+	var plan map[string]any
+	o.Event = func(name string, data any) { plan, _ = data.(map[string]any) }
+	var report Result
+	o.Report = &report
+
+	if err := Run(o); err != nil {
+		t.Fatalf("a dry run with unchecked rows is no failure: %v", err)
+	}
+	content, _ := plan["content"].(map[string]any)
+	if !reflect.DeepEqual(content["unchecked"], f.unchecked) || content["unchecked_total"] != 250 || content["partial"] != true {
+		t.Errorf("plan.content = %#v", content)
+	}
+	if !strings.Contains(out.String(), "250 Zeilen werden erst mit offenem Push-Fenster geprüft (Verweise/Dateien)") {
+		t.Errorf("output:\n%s", out)
+	}
+	if report.Status != "dry_run" {
+		t.Errorf("report = %+v", report)
 	}
 }
 

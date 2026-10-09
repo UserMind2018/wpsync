@@ -580,60 +580,238 @@ final class ContentCheckTest extends TestCase
     }
 
     /**
-     * N3: ohne offenes Push-Fenster sagt der Probelauf nicht, welche Objekte es auf dem Ziel gibt.
-     * Was ins Leere zeigt, sieht aus wie eine gesperrte Zeile – ein Code, eine Meldung, die Schlüssel
-     * in der Reihenfolge des Pakets – und die Dateien von Attachments prüft er gar nicht.
+     * Probelauf ohne offenes Push-Fenster: Ablehnung (null: keine) und was er ungeprüft lässt.
+     *
+     * @param list<array<string, mixed>> $rows
+     * @param array<string, mixed>       $head
+     * @return array{error: array<string, mixed>|null, unchecked: list<array<string, string>>, published: list<int>}
      */
-    public function testAPartialRunDoesNotTellWhichObjectsExist(): void
+    private function partial(array $rows, array $head = [], ?ContentTarget $target = null): array
     {
-        $dangling = [
+        $check = $this->check($rows, $head, $target);
+        $error = null;
+        try {
+            $check->run([], false, true);
+        } catch (ContentException $e) {
+            $error = $e->toArray();
+        }
+        $this->assertSame([], $this->store->log, 'eine Prüfung schreibt nie');
+        return ['error' => $error, 'unchecked' => $check->unchecked(), 'published' => $error === null ? $check->published() : []];
+    }
+
+    /**
+     * N3: ohne offenes Push-Fenster sagt der Probelauf nicht, welche Objekte es auf dem Ziel gibt.
+     * Was er deshalb nicht prüft – Verweise auf Objekte ausserhalb des Pakets, Dateien von
+     * Attachments –, ist kein Fehler: es steht in unchecked, in der Reihenfolge des Pakets.
+     * blocked_row bleibt, was sich allein aus der Zeile ergibt.
+     */
+    public function testAPartialRunListsWhatItLeavesUnchecked(): void
+    {
+        $open = [
             ContentFixtures::row('insert', 'postmeta', "999\0_x", 'absent', ['values' => ['x']]),
+            ContentFixtures::row('insert', 'postmeta', "400\0_x", 'absent', ['values' => ['x']]),
             ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => ['777:0']]),
             ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '888', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
             ContentFixtures::row('insert', 'options', 'page_on_front', 'absent', ['option_value' => '999']),
         ];
-        $blocked = [
-            ContentFixtures::row('insert', 'postmeta', "400\0_x", 'absent', ['values' => ['x']]),
-            ContentFixtures::row('insert', 'postmeta', "219\0_edit_lock2_token", 'absent', ['values' => ['x']]),
-        ];
-        $mixed = [$dangling[0], $blocked[0], $dangling[1], $dangling[2], $blocked[1], $dangling[3]];
-        $error = function (array $rows): array {
-            try {
-                $this->check($rows)->run([], false, true);
-            } catch (ContentException $e) {
-                $this->assertSame([], $this->store->log);
-                return $e->toArray();
-            }
-            $this->fail('accepted');
+        $fine    = ContentFixtures::row('insert', 'postmeta', "219\0_neu", 'absent', ['values' => ['x']]);
+        $blocked = ContentFixtures::row('insert', 'postmeta', "219\0_edit_lock2_token", 'absent', ['values' => ['x']]);
+        $want    = static function (array $rows): array {
+            return array_map(static function (array $row): array {
+                return ['table' => $row['table'], 'key' => $row['key'], 'check' => 'reference'];
+            }, $rows);
         };
-        $both = $error($mixed);
-        $this->assertSame('blocked_row', $both['code']);
-        $this->assertSame(array_column($mixed, 'key'), array_column($both['keys'], 'key'), 'in der Reihenfolge des Pakets, ohne Unterschied');
-        $this->assertSame(6, $both['total']);
-        // Dieselbe Form, ob das Objekt fehlt oder gesperrt ist.
-        $missing = $error([$dangling[0]]);
-        $locked  = $error([$blocked[0]]);
-        $this->assertSame(['code', 'message', 'keys', 'total'], array_keys($missing));
-        $this->assertSame(array_keys($locked), array_keys($missing));
-        $this->assertSame($locked['message'], $missing['message']);
-        $this->assertSame($locked['code'], $missing['code']);
-        foreach ($dangling as $row) {
-            $this->assertSame('blocked_row', $error([$row])['code'], $row['table']);
-        }
-        // Mit offenem Fenster bleibt es bei dangling_reference.
-        $this->refused('dangling_reference', [$dangling[0]]);
 
-        // Dateien von Attachments: gar nicht geprüft – weder ob sie fehlen noch ob sie da sind.
+        $result = $this->partial([$open[0], $fine, $open[1], $open[2], $open[3], $open[4]]);
+        $this->assertNull($result['error'], 'ungeprüft ist kein Fehler');
+        $this->assertSame($want($open), $result['unchecked'], 'in der Reihenfolge des Pakets');
+        foreach ($open as $row) {
+            $alone = $this->partial([$row]);
+            $this->assertNull($alone['error'], $row['table'] . ' ' . $row['key']);
+            $this->assertSame($want([$row]), $alone['unchecked'], $row['table'] . ' ' . $row['key']);
+        }
+
+        // Was allein aus der Zeile folgt, bleibt eine Ablehnung – und nennt nur diese Zeile.
+        $result = $this->partial([$open[0], $blocked, $open[1]]);
+        $this->assertSame('blocked_row', $result['error']['code']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "219\0_edit_lock2_token"]], $result['error']['keys']);
+        $this->assertSame($want([$open[0], $open[1]]), $result['unchecked']);
+        // Auch an einem Objekt, das es nicht gibt oder das gesperrt ist: der Schlüssel entscheidet zuerst.
+        foreach (['999', '400'] as $id) {
+            $result = $this->partial([ContentFixtures::row('insert', 'postmeta', $id . "\0_edit_lock", 'absent', ['values' => ['1:1']])]);
+            $this->assertSame('blocked_row', $result['error']['code'], $id);
+            $this->assertSame([], $result['unchecked'], $id);
+        }
+
+        // Mit offenem Fenster bleibt die Prüfung vollständig, und nichts ist ungeprüft.
+        $this->refused('dangling_reference', [$open[0]]);
+        $this->refused('blocked_row', [$open[1]]);
+        $check = $this->check([$fine]);
+        $check->run();
+        $this->assertSame([], $check->unchecked());
+    }
+
+    /**
+     * Paare von Paketen, die sich nur darin unterscheiden, ob das Objekt auf dem Ziel fehlt oder
+     * mit gesperrtem Typ bzw. gesperrter Taxonomie existiert. Beitrag 999 und Term 777 fehlen,
+     * Beitrag 400 ist eine Bestellung, Term 9 und term_taxonomy 9 gehören zu language.
+     *
+     * @return array<string, array{0: callable(string): list<array<string, mixed>>, 1: string, 2: string, 3?: array<string, mixed>}>
+     */
+    public static function missingOrLocked(): array
+    {
+        $post = static function (callable $rows, array $head = []): array {
+            return [$rows, '999', '400', $head];
+        };
+        $term = static function (callable $rows): array {
+            return [$rows, '777', '9', []];
+        };
+        $wide = ['corridor' => ['offset' => 1, 'posts' => [1, 1999999], 'terms' => [1, 1999999], 'term_taxonomy' => [1, 1999999]]];
+        return [
+            'meta insert' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'postmeta', $id . "\0_x", 'absent', ['values' => ['x']])];
+            }),
+            'meta insert at a key the locked post has' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'postmeta', $id . "\0_order_total", 'absent', ['values' => ['x']])];
+            }),
+            'meta update' => $post(static function (string $id): array {
+                return [ContentFixtures::row('update', 'postmeta', $id . "\0_order_total", str_repeat('a', 64), ['values' => ['x']])];
+            }),
+            'meta with a twin on the target' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'postmeta', $id . "\0_Order_Total", 'absent', ['values' => ['x']])];
+            }),
+            'meta with a twin, post in the package' => $post(static function (string $id): array {
+                return [
+                    ContentFixtures::row('update', 'posts', $id, str_repeat('a', 64), ContentFixtures::postRow($id)),
+                    ContentFixtures::row('insert', 'postmeta', $id . "\0_Order_Total", 'absent', ['values' => ['x']]),
+                ];
+            }),
+            'attachment file' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'postmeta', $id . "\0_wp_attached_file", 'absent', ['values' => ['2026/10/a.jpg']])];
+            }),
+            'relationship of the post' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'term_relationships', $id . "\0category", 'absent', ['values' => ['5:0']])];
+            }),
+            'relationship, post in the package' => $post(static function (string $id): array {
+                return [
+                    ContentFixtures::row('update', 'posts', $id, str_repeat('a', 64), ContentFixtures::postRow($id)),
+                    ContentFixtures::row('insert', 'term_relationships', $id . "\0category", 'absent', ['values' => ['5:0']]),
+                ];
+            }),
+            'post update' => $post(static function (string $id): array {
+                return [ContentFixtures::row('update', 'posts', $id, str_repeat('a', 64), ContentFixtures::postRow($id))];
+            }),
+            'post trash' => $post(static function (string $id): array {
+                return [ContentFixtures::row('trash', 'posts', $id, str_repeat('a', 64))];
+            }),
+            'post insert' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'posts', $id, 'absent', ContentFixtures::postRow($id))];
+            }, $wide),
+            'option to a post' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'options', 'page_on_front', 'absent', ['option_value' => $id])];
+            }),
+            'option to a post (theme mods)' => $post(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'options', 'theme_mods_hello-child', 'absent', ['option_value' => serialize(['custom_css_post_id' => (int) $id])])];
+            }),
+            'term meta' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'termmeta', $id . "\0farbe", 'absent', ['values' => ['rot']])];
+            }),
+            'term meta at a key the locked term has' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'termmeta', $id . "\0flagge", 'absent', ['values' => ['rot']])];
+            }),
+            'term meta with a twin on the target' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'termmeta', $id . "\0Flagge", 'absent', ['values' => ['rot']])];
+            }),
+            'term update' => $term(static function (string $id): array {
+                return [ContentFixtures::row('update', 'terms', $id, str_repeat('a', 64), ['name' => 'X', 'slug' => 'x', 'term_group' => '0'])];
+            }),
+            'term_taxonomy update' => $term(static function (string $id): array {
+                return [ContentFixtures::row('update', 'term_taxonomy', $id, str_repeat('a', 64), ['term_id' => '5', 'taxonomy' => 'category', 'description' => '', 'parent' => '0'])];
+            }),
+            'term_taxonomy of the term' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => $id, 'taxonomy' => 'category', 'description' => '', 'parent' => '0'])];
+            }),
+            'relationship to the term_taxonomy' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => [$id . ':0']])];
+            }),
+            'relationship to a term_taxonomy the post already has' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'term_relationships', "220\0category", 'absent', ['values' => [$id . ':0']])];
+            }),
+            'option to a term' => $term(static function (string $id): array {
+                return [ContentFixtures::row('insert', 'options', 'theme_mods_hello-child', 'absent', ['option_value' => serialize(['nav_menu_locations' => ['main' => (int) $id]])])];
+            }),
+        ];
+    }
+
+    /**
+     * Ohne Fenster unterscheidet der Agent bewusst nicht, ob ein Objekt fehlt oder mit gesperrtem
+     * Typ existiert – sonst liessen sich die IDs von Bestellungen, Formular-Einträgen oder Benutzer-
+     * Taxonomien abzählen. Die Antwort ist in beiden Fällen dieselbe: Ablehnung, unchecked,
+     * Reihenfolge, Form.
+     *
+     * @param callable(string): list<array<string, mixed>> $rows
+     * @param array<string, mixed>                         $head
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('missingOrLocked')]
+    public function testAPartialRunAnswersTheSameForAMissingAndALockedObject(callable $rows, string $missing, string $locked, array $head = []): void
+    {
+        // Alles, woran sich die Bestellung und der gesperrte Term verraten könnten.
+        $this->store->data['posts']['400']['post_content']        = str_repeat('x', 5000);
+        $this->store->data['postmeta']["400\0_order_total"]         = ['values' => [str_repeat('9', 5000)]];
+        $this->store->data['termmeta']["9\0flagge"]                 = ['values' => ['de']];
+        $this->store->data['term_relationships']["400\0category"]   = ['values' => ['5:0']];
+        $this->store->data['term_relationships']["220\0language"]   = ['values' => ['9:0']];
+        $this->store->orphans                                       = ['400' => ['5']];
+        ContentCheck::$maxStateBytes                                = 4000; // die Zeilen der Bestellung zählen nicht mit
+        try {
+            $name = static function (array $result, string $id): string {
+                return str_replace(['"' . $id . '"', '"' . $id . '\u0000', 'Seite ' . $id], ['"ID"', '"ID\u0000', 'Seite ID'], (string) json_encode($result));
+            };
+            $a = $this->partial($rows($missing), $head);
+            $b = $this->partial($rows($locked), $head);
+            $this->assertSame($name($a, $missing), $name($b, $locked));
+            if ($a['error'] !== null) {
+                $this->assertNotSame('dangling_reference', $a['error']['code'], 'ohne Fenster nie');
+                $this->assertNotSame('package_too_large', $a['error']['code']);
+            }
+        } finally {
+            ContentCheck::$maxStateBytes = ContentCheck::MAX_STATE_BYTES;
+        }
+    }
+
+    /** Dateien von Attachments prüft der Probelauf ohne Fenster nicht – und nennt die Zeilen, die sie tragen. */
+    public function testAPartialRunListsAttachmentFilesAsUnchecked(): void
+    {
         $dir = sys_get_temp_dir() . '/wpsync-check-' . bin2hex(random_bytes(4));
         mkdir($dir . '/2026/10', 0777, true);
         file_put_contents($dir . '/2026/10/da.jpg', 'x');
         $target = ContentFixtures::live($this->store, $dir);
-        foreach (['2026/10/da.jpg', '2026/10/fehlt.jpg'] as $file) {
-            $rows = [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => [$file]])];
-            $this->check($rows, [], $target)->run([], false, true);
+        try {
+            foreach (['2026/10/da.jpg', '2026/10/fehlt.jpg'] as $file) {
+                $rows = [
+                    ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => [$file]]),
+                    ContentFixtures::row('insert', 'postmeta', "300\0_WP_Attachment_Metadata", 'absent', ['values' => [serialize(['file' => $file])]]),
+                    ContentFixtures::row('insert', 'postmeta', "300\0_alt", 'absent', ['values' => ['Bild']]),
+                    ContentFixtures::row('insert', 'postmeta', "999\0_wp_attached_file", 'absent', ['values' => [$file]]),
+                ];
+                $this->assertSame([
+                    'error'     => null,
+                    'unchecked' => [
+                        ['table' => 'postmeta', 'key' => "300\0_wp_attached_file", 'check' => 'attachment_files'],
+                        ['table' => 'postmeta', 'key' => "300\0_WP_Attachment_Metadata", 'check' => 'attachment_files'],
+                        ['table' => 'postmeta', 'key' => "999\0_wp_attached_file", 'check' => 'reference'], // jede Zeile einmal
+                    ],
+                    'published' => [],
+                ], $this->partial($rows, [], $target), $file);
+            }
+            $missing = [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => ['2026/10/fehlt.jpg']])];
+            $this->refused('upload_missing', $missing, [], $target);
+            $check = $this->check([ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => ['2026/10/da.jpg']])], [], $target);
+            $check->run();
+            $this->assertSame([], $check->unchecked(), 'mit Fenster geprüft');
+        } finally {
+            exec('rm -rf ' . escapeshellarg($dir));
         }
-        $this->refused('upload_missing', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => ['2026/10/fehlt.jpg']])], [], $target);
-        exec('rm -rf ' . escapeshellarg($dir));
     }
 
     /**

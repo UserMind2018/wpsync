@@ -104,14 +104,16 @@ type fakeSite struct {
 	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
 
 	// The content channel (agent 0.7.0, content_run_test.go).
-	staged        map[string][]byte              // sha256 → what /content/stage holds
-	noContent     bool                           // an agent without the channel: no route, no answer for content
-	contentFail   *agentapi.ContentFailure       // the check refuses the package: in the dry run's answer, as an error of the real begin
-	contentHealth []string                       // published pages the package changes
-	commitCode    string                         // /push/commit refuses with this code and swaps nothing
-	noApply       bool                           // /push/commit answers without content
-	actions       []agentapi.PostAction          // post actions of the commit
-	tamper        func(*agentapi.ContentApplied) // changes what the commit answers about the content
+	staged         map[string][]byte           // sha256 → what /content/stage holds
+	noContent      bool                        // an agent without the channel: no route, no answer for content
+	contentFail    *agentapi.ContentFailure    // the check refuses the package: in the dry run's answer, as an error of the real begin
+	contentHealth  []string                    // published pages the package changes
+	unchecked      []agentapi.ContentUnchecked // what a dry run without a window leaves unchecked
+	uncheckedTotal int
+	commitCode     string                         // /push/commit refuses with this code and swaps nothing
+	noApply        bool                           // /push/commit answers without content
+	actions        []agentapi.PostAction          // post actions of the commit
+	tamper         func(*agentapi.ContentApplied) // changes what the commit answers about the content
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
