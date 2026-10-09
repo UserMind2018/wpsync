@@ -331,6 +331,7 @@ ok "V8: Vorher-Abbild liegt im Arbeitsordner der Kopie" sh -c "find '$PUB/$STG_D
 echo "== AC-150: derselbe Satz nach Live"
 REV_BEFORE="$(src wp post list --post_type=revision --post_parent="$PAGE_A" --format=count)"
 MOD_BEFORE="$(post src "$PAGE_A" post_modified_gmt)"
+AUTHOR_BEFORE="$(post src "$PAGE_A" post_author)" # WP-CLI legt die Fixtures ohne Benutzer an: 0, nicht 1
 push_content push-live edit --yes
 eq "Live: Exit 0" "$RC" 0
 cat "$JSON/push-live.err"
@@ -344,7 +345,7 @@ ok "Live: \\\\\\/ mit der Adresse von Live" contains "$(meta src "$PAGE_A" _e2e_
 eq "Live: keine Adresse der Arbeitskopie in der Datenbank" "$(src mysql -N -e "SELECT (SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE meta_value LIKE '%$LOCAL_HOST%') + (SELECT COUNT(*) FROM ${PREFIX}posts WHERE post_content LIKE '%$LOCAL_HOST%')")" 0
 eq "Live: gelöschtes Paar ist weg" "$(meta src "$PAGE_A" _e2e_weg)" ""
 ok "Live: post_modified ist die Zeit des Pushs" test "$(post src "$PAGE_A" post_modified_gmt)" != "$MOD_BEFORE"
-eq "Live: post_author bleibt" "$(post src "$PAGE_A" post_author)" 1
+eq "Live: post_author bleibt" "$(post src "$PAGE_A" post_author)" "$AUTHOR_BEFORE"
 eq "AC-154: Nacharbeiten im Ergebnis, Object-Cache gelungen" "$(last push-live '.data.post_actions | map(select(.step == "object_cache" and .ok)) | length')" 1
 ok "AC-154: Revision der geänderten Seite angelegt" test "$(src wp post list --post_type=revision --post_parent="$PAGE_A" --format=count)" -gt "$REV_BEFORE"
 eq "Live: geänderte Seite antwortet" "$(code "$SOURCE_URL/e2e-a/")" 200
