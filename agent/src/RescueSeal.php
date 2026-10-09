@@ -6,13 +6,13 @@ defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 /**
  * Der versiegelte Umschlag eines Pushs mit Inhalten (Spec Content-Push P3 §5.1): was rescue.php
  * für die Rücknahme der Datenbank braucht, verschlüsselt und authentisiert mit einem Schlüssel,
- * der aus den 32 Byte des Rescue-Keys des Pushs abgeleitet ist (secret()). Auf dem Server liegt nur sha256() dieses
- * Schlüssels – daraus lässt sich der Umschlag nicht öffnen. Zwei Verfahren, die beide ohne
+ * der aus den 32 Byte des Rescue-Keys des Pushs abgeleitet ist (secret()). Auf dem Server liegt
+ * nur sha256() dieses Schlüssels – daraus lässt sich der Umschlag nicht öffnen. Zwei Verfahren, die beide ohne
  * WordPress (und damit ohne sodium_compat) auskommen:
  *   wpsync-rescue:v1:sodium   XSalsa20-Poly1305 mit der Erweiterung sodium
  *   wpsync-rescue:v1:gcm      AES-256-GCM mit openssl, die Push-ID als zusätzliche Daten
  * seal() und open() werfen nie; open() liefert null bei falschem Schlüssel, Veränderung, fremdem
- * Format oder fremder Push-ID.
+ * Format, fremder Push-ID – und für jeden Umschlag, der älter ist als MAX_AGE.
  */
 final class RescueSeal
 {
@@ -28,6 +28,14 @@ final class RescueSeal
     private const SODIUM_MAC   = 16;
     private const GCM_NONCE    = 12;
     private const GCM_TAG      = 16;
+    /**
+     * Harte Altersgrenze (Security-Review P3, N3): älter als sieben Tage öffnet ein Umschlag nie,
+     * für niemanden – gemessen an created, das authentisiert in ihm steht, nicht an der Uhr der
+     * Datei. Unabhängig vom Verfall nach 24 Stunden (Push::RESCUE_DB_TTL, R14): den räumt der Cron
+     * von WordPress, und der läuft gerade dann nicht, wenn die Site unten ist.
+     */
+    public const MAX_AGE = 604800;
+
     /** Mehr trägt kein Umschlag; eine grössere Datei ist keiner. */
     private const MAX_BYTES    = 65536;
 
@@ -60,7 +68,8 @@ final class RescueSeal
             $method = $method ?? self::method();
             $secret = self::secret($key, $pushId);
             $json   = json_encode(['push_id' => $pushId] + $data, JSON_UNESCAPED_SLASHES);
-            if ($secret === null || !is_string($json)) {
+            // Ohne lesbares Alter liesse sich der Umschlag nie öffnen (MAX_AGE): dann gar keiner.
+            if ($secret === null || !is_string($json) || !is_int($data['created'] ?? null) || $data['created'] < 0) {
                 return null;
             }
             if ($method === 'sodium' && function_exists('sodium_crypto_secretbox')) {
@@ -79,8 +88,11 @@ final class RescueSeal
         return null;
     }
 
-    /** @return array<string, mixed>|null */
-    public static function open(string $raw, string $key, string $pushId): ?array
+    /**
+     * @param int|null $now für Tests: die Zeit anstelle von time()
+     * @return array<string, mixed>|null null auch, wenn der Umschlag älter ist als MAX_AGE oder sein Alter nicht nennt
+     */
+    public static function open(string $raw, string $key, string $pushId, ?int $now = null): ?array
     {
         try {
             $secret = self::secret($key, $pushId);
@@ -110,7 +122,11 @@ final class RescueSeal
                 );
             }
             $data = is_string($json) ? json_decode($json, true) : null;
-            return is_array($data) && ($data['push_id'] ?? null) === $pushId ? $data : null;
+            if (!is_array($data) || ($data['push_id'] ?? null) !== $pushId) {
+                return null;
+            }
+            $created = $data['created'] ?? null;
+            return is_int($created) && $created >= 0 && ($now ?? time()) - $created <= self::MAX_AGE ? $data : null;
         } catch (\Throwable $e) {
             return null;
         }

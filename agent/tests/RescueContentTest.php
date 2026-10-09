@@ -394,8 +394,11 @@ final class RescueContentTest extends ContentApplyCase
         file_put_contents($file, substr($raw, 0, -3) . 'xyz');
         $this->assertSame($unavailable, RescueContent::run($this->content, $this->work, self::ID, $this->key), 'verändert');
         // Ein gültig versiegelter Umschlag, dessen Inhalt nicht zum Ordner passt (Ziel Staging in wp-content von Live).
-        file_put_contents($file, (string) RescueSeal::seal(['v' => 1, 'created' => 1] + $this->collected(['target' => 'staging']), $this->key, self::ID));
+        file_put_contents($file, (string) RescueSeal::seal(['v' => 1, 'created' => time()] + $this->collected(['target' => 'staging']), $this->key, self::ID));
         $this->assertSame($unavailable, RescueContent::run($this->content, $this->work, self::ID, $this->key), 'passt nicht zum Ordner');
+        // N3: gültig versiegelt, passt zum Ordner – aber älter als sieben Tage.
+        file_put_contents($file, (string) RescueSeal::seal(['v' => 1, 'created' => time() - RescueSeal::MAX_AGE - 60] + $this->collected(), $this->key, self::ID));
+        $this->assertSame($unavailable, RescueContent::run($this->content, $this->work, self::ID, $this->key), 'zu alt');
         unlink($file);
         symlink($this->work . '/woanders', $file);
         $this->assertSame($unavailable, RescueContent::run($this->content, $this->work, self::ID, $this->key), 'ein Symlink ist kein Umschlag');

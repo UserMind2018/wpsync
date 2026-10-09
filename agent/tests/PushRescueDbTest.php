@@ -347,6 +347,29 @@ final class PushRescueDbTest extends ContentApplyCase
         $this->assertTrue(PushRescue::contentOpen($this->record()));
     }
 
+    /**
+     * Security-Review P3, N3: ein Umschlag, der älter ist als sieben Tage, wird nie angewandt – auch
+     * wenn seine Datei frisch aussieht (mtime) und der Cron ihn nie gelöscht hat. Code und Uploads
+     * gehen zurück wie ohne Umschlag.
+     */
+    public function testAnEnvelopeOlderThanSevenDaysIsNeverApplied(): void
+    {
+        $this->applied();
+        $pushed = $this->store->data;
+        $file   = RescueSeal::file($this->work, self::ID);
+        file_put_contents($file, (string) RescueSeal::seal(['v' => 1, 'created' => time() - RescueSeal::MAX_AGE - 60] + $this->collected(), $this->key, self::ID));
+        touch($file); // die Uhr der Datei sagt „eben erst“
+        $this->connected = 0;
+        list($status, $body) = $this->rescue();
+        $this->assertSame(200, $status);
+        $this->assertSame(['state' => 'kept', 'error' => ['code' => 'rescue_db_unavailable']], $body['content']);
+        $this->assertSame(['content_not_rolled_back'], $body['warnings']);
+        $this->assertSame(0, $this->connected, 'keine Verbindung');
+        $this->assertSame($pushed, $this->store->data);
+        $this->assertSame('old', $this->code());
+        $this->assertTrue(PushRescue::contentOpen($this->record()));
+    }
+
     /** AC-161: mit falschem Schlüssel wird kein Umschlag gelesen und nicht verbunden; nichts ändert sich. */
     public function testAWrongKeyReachesNeitherEnvelopeNorDatabase(): void
     {

@@ -76,6 +76,10 @@ sich wie bisher (`content_not_rolled_back`).
   (`HMAC-SHA256(hex2bin(K), "wpsync-rescue-envelope-v1\0" + push_id)`), nicht aus seiner
   Hex-Schreibweise; als Rollback-Schlüssel gilt dem Umschlag nur, was genau 64 kleine Hex-Zeichen
   hat
+- Harte Altersgrenze des Umschlags: älter als 7 Tage wird er nie mehr angewandt
+  (`content_error.code: "rescue_db_unavailable"`) – unabhängig vom Verfall nach 24 h, den die
+  tägliche Wartung des Agents besorgt und der ausbleibt, solange WordPress unten ist. Das Alter
+  steht authentisiert im Umschlag
 - Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
   (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
 

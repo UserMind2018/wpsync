@@ -16,7 +16,8 @@ final class RescueSealTest extends TestCase
 {
     private const ID    = 'p_20261009_0123456789ab';
     private const OTHER = 'p_20261009_ba9876543210';
-    private const DATA  = ['v' => 1, 'db' => ['user' => 'wp', 'password' => "geh\"eim\0'", 'name' => 'wordpress'], 'prefix' => 'wp_'];
+    /** created weit in der Zukunft: dieser Umschlag gilt in keinem Testlauf als zu alt. */
+    private const DATA  = ['v' => 1, 'created' => 4102444800, 'db' => ['user' => 'wp', 'password' => "geh\"eim\0'", 'name' => 'wordpress'], 'prefix' => 'wp_'];
 
     private string $key;
 
@@ -82,6 +83,31 @@ final class RescueSealTest extends TestCase
         $label = "wpsync-rescue-envelope-v1\0" . self::ID;
         $this->assertSame(json_encode(['push_id' => self::ID] + self::DATA, JSON_UNESCAPED_SLASHES), $open(hash_hmac('sha256', $label, (string) hex2bin($this->key), true)));
         $this->assertFalse($open(hash_hmac('sha256', $label, $this->key, true)), 'nicht aus der Hex-Zeichenkette');
+    }
+
+    /**
+     * Security-Review P3, N3: älter als sieben Tage öffnet ein Umschlag nie – gleich, wer fragt und
+     * was die Uhr der Datei (mtime, R14) sagt. Das Alter steht authentisiert im Umschlag (created).
+     */
+    #[DataProvider('methods')]
+    public function testAnEnvelopeOlderThanSevenDaysOpensNothing(string $method): void
+    {
+        $this->assertSame(7 * 86400, RescueSeal::MAX_AGE);
+        $born   = 1790000000;
+        $sealed = (string) RescueSeal::seal(['created' => $born] + self::DATA, $this->key, self::ID, $method);
+        $this->assertSame($born, RescueSeal::open($sealed, $this->key, self::ID, $born)['created'] ?? null);
+        $this->assertNotNull(RescueSeal::open($sealed, $this->key, self::ID, $born + RescueSeal::MAX_AGE), 'genau sieben Tage: noch');
+        $this->assertNull(RescueSeal::open($sealed, $this->key, self::ID, $born + RescueSeal::MAX_AGE + 1));
+        $this->assertNull(RescueSeal::open($sealed, $this->key, self::ID), 'ohne Angabe gilt die Uhr des Servers');
+        $this->assertNotNull(RescueSeal::open($sealed, $this->key, self::ID, $born - 3600), 'eine nachgehende Uhr macht ihn nicht alt');
+        // Ohne lesbares Alter gibt es keinen Umschlag: weder versiegelt noch geöffnet.
+        foreach ([null, '1790000000', 1.5, -1, true] as $bad) {
+            $data = ['created' => $bad] + self::DATA;
+            if ($bad === null) {
+                unset($data['created']);
+            }
+            $this->assertNull(RescueSeal::seal($data, $this->key, self::ID, $method), var_export($bad, true));
+        }
     }
 
     /** Jedes einzelne Byte zählt: Kopfzeile, Nonce, Chiffrat, Prüfsumme. */

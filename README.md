@@ -869,7 +869,10 @@ Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren
   authentisiert (XSalsa20-Poly1305 mit `sodium`, sonst AES-256-GCM mit `openssl`) mit einem
   Schlüssel, der aus dem Rollback-Schlüssel des Pushs abgeleitet ist; auf dem Server liegt nur
   dessen Hash. Öffnen kann ihn also nur, wer pushen darf. Er verschwindet nach gelungener
-  Rücknahme, bei `confirm`, mit dem Arbeitsordner und spätestens nach 24 Stunden.
+  Rücknahme, bei `confirm`, mit dem Arbeitsordner und spätestens nach 24 Stunden (tägliche
+  Wartung des Agents). Unabhängig davon gilt eine harte Altersgrenze: ein Umschlag, der älter ist
+  als **7 Tage**, wird nie mehr angewandt – auch wenn er noch liegt, weil die Wartung nicht lief
+  (WordPress war unten). Das Alter steht authentisiert im Umschlag, nicht in der Uhr der Datei.
 - **Vor dem Push geprüft.** Der Agent probiert die Verbindung des Umschlags beim Begin aus (zweite
   Verbindung, Datenbank, Sitzung, die sieben Tabellen) und antwortet mit `rescue.db: {ok, reason?}`.
   Gibt es keinen Umschlag, wird **trotzdem gepusht** – die CLI sagt „Notfall-Rücknahme der Inhalte
@@ -902,7 +905,7 @@ Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren
   | `before_image_invalid` | Das Vorher-Abbild fehlt nicht, lässt sich aber nicht öffnen oder wurde verändert |
   | `engine_unsupported` | Eine der sieben Tabellen ist nicht (mehr) InnoDB |
   | `content_failed` | Die Datenbank hat versagt (Sperre, Verbindung verloren) – nichts ist geschrieben |
-  | `rescue_db_unavailable` | Kein Umschlag, oder er passt nicht zu Push, Schlüssel oder Ordner |
+  | `rescue_db_unavailable` | Kein Umschlag, er passt nicht zu Push, Schlüssel oder Ordner – oder er ist älter als 7 Tage |
   | `db_unreachable` | Die Datenbank war mit den Daten des Umschlags nicht erreichbar |
 
 - **Was an neuen Objekten hängt.** Über den Agent lehnt die Rücknahme ab, sobald an einem vom
@@ -935,8 +938,8 @@ Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren
 - **Grenzen.** Kein Überschreiben geänderter Zeilen: ist der Inhalt die Ursache des Ausfalls
   **und** wurde eine seiner Zeilen seit dem Push geändert, bleibt die Site unten, bis jemand die
   Zeile von Hand richtet. Bestätigte Pushes nimmt `rescue.php` nie zurück. Der Umschlag gilt
-  24 Stunden – ein Push, der länger unbestätigt liegt, hat danach nur noch den Rückweg für Code
-  und Uploads. Multisite, HyperDB/LudicrousDB und andere Treiber als `mysqli`: wie beim Push
+  24 Stunden, nie länger als 7 Tage – ein Push, der länger unbestätigt liegt, hat danach nur noch
+  den Rückweg für Code und Uploads (`content_error.code: "rescue_db_unavailable"`). Multisite, HyperDB/LudicrousDB und andere Treiber als `mysqli`: wie beim Push
   nicht unterstützt. Der Cache-Schritt setzt das Standardlayout voraus (`wp-load.php` im Webroot).
 
 | CLI | Agent | Verhalten |

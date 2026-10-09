@@ -123,7 +123,7 @@ ContentImage::$encrypt = extension_loaded('sodium');
 ContentImage::put($dir, ContentImage::BEFORE, ['keys' => $keysBefore]);
 ContentImage::put($dir, ContentImage::AFTER, ['keys' => $keysAfter, 'changes' => ['posts' => [219]]]);
 $envelope = [
-    'v' => 1, 'created' => 1791500000, 'target' => 'live',
+    'v' => 1, 'created' => time(), 'target' => 'live',
     'db' => ['host' => 'localhost', 'port' => null, 'socket' => null, 'user' => 'u', 'password' => 'p', 'name' => 'wordpress', 'flags' => 0, 'charset' => 'utf8mb4', 'collate' => '', 'sql_mode' => ''],
     'prefix' => 'wp_', 'home' => ContentFixtures::HOME, 'siteurl' => ContentFixtures::HOME, 'staging' => null,
     'image_keys' => [
