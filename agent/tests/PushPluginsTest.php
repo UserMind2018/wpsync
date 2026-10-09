@@ -30,6 +30,8 @@ final class PushPluginsTest extends TestCase
         PushPlugins::$can  = null;
         \WpSync\PushUnits::$agent = 'wpsync-agent';
         \WpSync\ContentPlugins::$agent = 'wpsync-agent';
+        \WpSync\PushUnits::$agentLink = '';
+        \WpSync\ContentPlugins::$agentLink = '';
         exec('rm -rf ' . escapeshellarg($this->dir));
     }
 
@@ -220,5 +222,26 @@ final class PushPluginsTest extends TestCase
         $this->assertTrue(\WpSync\PushUnits::valid('plugins/wpsync-agent-main-addon'));
         $this->assertTrue(\WpSync\PushUnits::valid('themes/wpsync-agent-main'));
         $this->assertNotNull(PushPlugins::request(['deactivate' => ['plugins/anderes']]));
+    }
+
+    /**
+     * Nach-Review NR-7: ist der Agent über einen Symlink in plugins/ eingebunden, kennt WordPress ihn unter
+     * dem Namen des Links (plugin_basename()) – auch dieser Ordner ist als Schalter und Einheit tabu, und
+     * sein Eintrag wird nie gestrichen.
+     */
+    public function testTheNameWordPressKnowsTheAgentByIsProtectedToo(): void
+    {
+        \WpSync\PushUnits::$agent          = 'agent-real';
+        \WpSync\PushUnits::$agentLink      = 'agent-link';
+        \WpSync\ContentPlugins::$agent     = 'agent-real';
+        \WpSync\ContentPlugins::$agentLink = 'agent-link';
+        foreach (['plugins/agent-link', 'plugins/Agent-Link', 'plugins/agent-real', 'plugins/wpsync-agent'] as $unit) {
+            $this->assertSame(ContentException::PLUGINS_INVALID, $this->refused(['deactivate' => [$unit]])->reason(), $unit);
+            $this->assertFalse(\WpSync\PushUnits::valid($unit), $unit);
+        }
+        $list = ['agent-link/wpsync-agent.php', 'old/old.php'];
+        $this->assertSame(['added' => [], 'removed' => ['old/old.php']], \WpSync\ContentPlugins::change($list, [], ['agent-link', 'old']));
+        $source = (string) file_get_contents(__DIR__ . '/../src/Push.php');
+        $this->assertStringContainsString("plugin_basename(\$pluginDir . '/wpsync-agent.php')", $source, 'Push::register() fragt WordPress nach dem Namen');
     }
 }

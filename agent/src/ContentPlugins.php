@@ -24,6 +24,8 @@ final class ContentPlugins
      *             nicht – dort streicht ohnehin nur undo(), nach dem authentisierten Abbild.
      */
     public static $agent = 'wpsync-agent';
+    /** @var string der Name, unter dem WordPress den Agent führt, wenn er über einen Symlink eingebunden ist; leer ohne */
+    public static $agentLink = '';
 
     /** Mehr liest parse() nicht: die Liste einer echten Site hat wenige Kilobyte. */
     private const MAX_BYTES = 1048576;
@@ -112,7 +114,7 @@ final class ContentPlugins
         foreach ($list as $entry) {
             // Der Agent schaltet sich nie selbst ab – was immer der Auftrag nennt (Security-Review P4 S3).
             $own = strtolower(self::slug((string) $entry));
-            if ($own === 'wpsync-agent' || $own === strtolower(self::$agent)) {
+            if ($own === 'wpsync-agent' || $own === strtolower(self::$agent) || (self::$agentLink !== '' && $own === strtolower(self::$agentLink))) {
                 continue;
             }
             foreach ($slugs as $slug) {

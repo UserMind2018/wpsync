@@ -23,7 +23,8 @@ Agent ≥ 0.9.0 wie bisher.
   Commit vor dem Tausch, an der gebauten Datei
 - Nur in einem Push-Fenster, das ein Benutzer mit `activate_plugins` im WP-Admin geöffnet hat
   (`plugins_not_allowed` sonst); nie `plugins/wpsync-agent`, kein Theme, nicht `mu-plugins` (Exit 2)
-- Der Agent schützt den Ordner, in dem er wirklich liegt (nicht nur den Namen `wpsync-agent`): nie
+- Der Agent schützt den Ordner, in dem er wirklich liegt, und den Namen, unter dem WordPress ihn
+  bei einem Symlink führt (nicht nur den Namen `wpsync-agent`): nie
   als Schalter, nie als Einheit eines Pushs, und sein Eintrag wird nie aus `active_plugins` gestrichen
 - Die Rücknahme eines **bestätigten** Pushs, der Plugins geschaltet hat, braucht dasselbe Recht
   (`plugins_not_allowed` sonst; auf der Admin-Seite fehlt der Knopf); ein unbestätigter Push geht

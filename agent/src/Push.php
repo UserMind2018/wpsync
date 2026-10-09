@@ -57,6 +57,14 @@ final class Push
             PushUnits::$agent      = $folder;
             ContentPlugins::$agent = $folder;
         }
+        // Über einen Symlink in plugins/ eingebunden, führt WordPress den Agent unter dem Namen des Links (NR-7).
+        if (function_exists('plugin_basename')) {
+            $known = dirname((string) plugin_basename($pluginDir . '/wpsync-agent.php'));
+            if ($known !== $folder && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*\z/', $known) === 1) {
+                PushUnits::$agentLink      = $known;
+                ContentPlugins::$agentLink = $known;
+            }
+        }
         add_action(self::CRON, [self::class, 'maintain']);
         // Früh: hat rescue.php einen Push zurückgenommen, holt der Agent nach, was WordPress braucht (P3 §8.1).
         add_action('init', [self::class, 'catchUp'], 1);
