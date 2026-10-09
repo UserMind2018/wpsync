@@ -10,7 +10,7 @@
 # Es ist der einzige Test, in dem ContentSql eine echte Datenbank sieht: Transaktion und
 # Sitzungsmarke, FOR UPDATE gegen eine zweite Sitzung, BINARY-Vergleiche, Zeichensätze, grosse
 # Werte, ein Fehler mitten im Schreiben. Was der Agent auf Commit und Rollback antwortet, hält das
-# mu-plugin e2e-tap der Quelle fest (content.after, content.seconds zeigt die CLI nicht).
+# mu-plugin e2e-tap der Quelle fest (content.after zeigt die CLI nicht).
 #
 # Voraussetzung: Docker, DDEV, jq (≥ 1.6), openssl, Go. Dauer rund 5 Minuten.
 # Eine fehlgeschlagene Prüfung zählt und der Lauf geht weiter; nur was den Rest sinnlos macht,
@@ -90,7 +90,7 @@ hash_of() { # hash_of <datei> <tabelle> <objekt> [name]
 }
 
 # Was der Agent zuletzt auf /push/commit oder /push/rollback geantwortet hat – das hält das
-# mu-plugin e2e-tap der Quelle fest; die CLI zeigt content.seconds und content.after nicht.
+# mu-plugin e2e-tap der Quelle fest; die CLI zeigt content.after nicht.
 tap() { tail -n 1 "$SRC/e2e-tap.jsonl" | jq -r "$1"; }
 # after_diff <export>: Schlüssel aus content.after der letzten Commit-Antwort, deren Abdruck auf dem
 # Ziel nicht der der Arbeitskopie ist (AC-147: Ziel ↔ Arbeitskopie; ein gelöschter Schlüssel: null ↔ fehlt).
@@ -177,7 +177,8 @@ seal() {
 # Nur pushbare Zeilen (p), wie das Studio. Für einen Beitrag, der lokal in den Papierkorb ging,
 # entsteht nur die Zeile trash: was der Papierkorb an ihm hinterlässt (__trashed am Namen,
 # _wp_desired_post_slug, _wp_trash_meta_*), schreibt der Agent selbst – solche Meta-Zeilen im
-# Paket wären package_invalid. Liefert die Zahl der Zeilen in ROWS.
+# Paket wären package_invalid. Hat WordPress dabei das Datum gesetzt (nie veröffentlichter Entwurf),
+# trägt trash row mit post_date und post_date_gmt. Liefert die Zahl der Zeilen in ROWS.
 pkg() {
   local name="$1" only="${2:-true}"
   "$WPSYNC" content export "$TARGET" >"$PKG/$name.export" 2>"$PKG/$name.export.err" </dev/null || fail "content export für $name (siehe $PKG/$name.export.err)"
@@ -196,7 +197,10 @@ pkg() {
         | . as $x | $B[id] as $old
         | if $old == null then {op: "insert", table: .t, key: .k, expected: "absent", row: .row}
           elif $old.h == .h then empty
-          elif .t == "posts" and status == "trash" and ($old | status) != "trash" then {op: "trash", table: .t, key: .k, expected: $M[id]}
+          elif .t == "posts" and status == "trash" and ($old | status) != "trash" then
+            {op: "trash", table: .t, key: .k, expected: $M[id]}
+            + (if .row.post_date != $old.row.post_date or .row.post_date_gmt != $old.row.post_date_gmt
+               then {row: {post_date: .row.post_date, post_date_gmt: .row.post_date_gmt}} else {} end)
           else {op: "update", table: .t, key: .k, expected: $M[id], row: .row} end
       ),
       (
@@ -454,6 +458,7 @@ eq "Probelauf: Status und Einheiten" "$(last dry '.data.status + " " + (.data.un
 eq "Probelauf: plan.content.rows" "$(event dry plan | jq -c '.content.rows')" '{"options":3,"postmeta":6,"posts":1}'
 eq "Probelauf: keine Konflikte" "$(event dry plan | jq -c '.content.conflicts')" '[]'
 eq "Probelauf: Grenzen" "$(event dry plan | jq -c '[.content.limits.max_rows, .content.limits.max_bytes]')" '[5000,8388608]'
+eq "Probelauf: kein Messwert, nichts wurde angewandt" "$(last dry '.data | has("content")')" false
 eq "Probelauf: Fenster zu" "$(event dry plan | jq -r '.window_open')" false
 eq "Probelauf: Live unverändert" "$(post src "$PAGE_A" post_title)" "E2E A"
 eq "Probelauf: die neue Option gibt es auf Live nicht" "$(opt src options_e2e_neu)" ""
@@ -509,7 +514,10 @@ ok "AC-154: Revision der geänderten Seite angelegt" test "$(src wp post list --
 eq "Live: geänderte Seite antwortet" "$(code "$SOURCE_URL/e2e-a/")" 200
 eq "AC-147 Live: jeder Wert auf Live ist der der Arbeitskopie – Emoji, 100 KB, serialisiert, mehrere Werte, Optionen" "$(probe src "$SOURCE_URL")" "$PROBE_TGT"
 eq "AC-147 Live: der Agent meldet für jeden Schlüssel den Abdruck der Arbeitskopie (wie für die Kopie)" "$(after_diff "$PKG/edit.export")" 0
-echo "INFO: 10 Zeilen (darunter zwei Meta über 100 KB) angewandt in $(tap '.data.content.seconds') s"
+eq "D14: das Ergebnis nennt Zeilen und Sekunden des Anwendens" "$(last push-live '.data.content | [.rows, (.seconds | type), (.seconds >= 0)] | @csv')" '10,"number",true'
+eq "D14: es sind die Sekunden, die der Agent gemessen hat" "$(last push-live '.data.content.seconds')" "$(tap '.data.content.seconds')"
+ok "D14: ohne --json eine Zeile für Menschen" grep -Eq 'Inhalte: 10 Zeilen in [0-9.]+ s angewandt' "$JSON/push-live.err"
+echo "INFO: 10 Zeilen (darunter zwei Meta über 100 KB) angewandt in $(last push-live '.data.content.seconds') s"
 eq "§10: Manifest trägt für jeden Schlüssel des Pakets den Abdruck der Arbeitskopie" "$(keys_diff "$PKG/edit.body" "$PKG/edit.export")" 0
 
 echo "== AC-153: der reiche Satz wieder zurück – Byte für Byte der Stand davor – und noch einmal nach Live"
@@ -630,6 +638,8 @@ tgt wp eval "update_post_meta($NEW_ID, '_wp_page_template', 'default'); wp_set_o
 pkg neu "(.k | split(\"\u0000\")[0]) as \$o | ((.t == \"posts\" or .t == \"postmeta\" or .t == \"term_relationships\") and (\$o == \"$NEW_ID\" or \$o == \"$NEW_POST\" or \$o == \"$DRAFT\")) or ((.t == \"terms\" or .t == \"termmeta\") and \$o == \"$NEW_TERM\") or (.t == \"term_taxonomy\" and \$o == \"$NEW_TT\")"
 eq "Paket neu: insert des Beitrags, seiner Meta, des Terms mit Meta und Taxonomie, der Zuordnung und trash" "$(jq -r '.op + ":" + .table' "$PKG/neu.body" | LC_ALL=C sort -u | paste -sd' ' -)" "insert:postmeta insert:posts insert:term_relationships insert:term_taxonomy insert:termmeta insert:terms trash:posts"
 SUM_DRAFT_BEFORE="$(rowsum "$DRAFT")"
+eq "Paket neu: trash des nie veröffentlichten Entwurfs trägt genau post_date und post_date_gmt" "$(jq -r --arg d "$DRAFT" 'select(.op == "trash" and .key == $d) | .row | keys | join(",")' "$PKG/neu.body")" "post_date,post_date_gmt"
+no "Paket neu: das neue Datum ist nicht mehr die Null der Baseline" test "$(jq -r --arg d "$DRAFT" 'select(.op == "trash" and .key == $d) | .row.post_date_gmt' "$PKG/neu.body" | openssl base64 -d -A)" = "0000-00-00 00:00:00"
 eq "Paket neu: für den Entwurf nur die Zeile trash, keine Meta des Papierkorbs" "$(jq -r --arg d "$DRAFT" 'select(.key | split("\u0000")[0] == $d) | .op + ":" + .table' "$PKG/neu.body" | paste -sd' ' -)" "trash:posts"
 push_content push-neu neu --yes
 eq "Neu: Exit 0" "$RC" 0
@@ -658,7 +668,7 @@ eq "AC-153: die neue Seite und der neue Beitrag sind samt Meta und Zuordnung wie
 eq "AC-153: der Entwurf ist aus dem Papierkorb zurück" "$(post src "$DRAFT" post_status)" "draft"
 eq "AC-153: die Papierkorb-Meta sind wieder weg" "$(meta src "$DRAFT" _wp_trash_meta_status)$(meta src "$DRAFT" _wp_desired_post_slug)" ""
 eq "AC-153: der Name ist wieder der alte" "$(post src "$DRAFT" post_name)" "e2e-entwurf"
-eq "AC-153: der Entwurf Byte für Byte wie vor dem Push" "$(rowsum "$DRAFT")" "$SUM_DRAFT_BEFORE"
+eq "AC-153: der Entwurf Byte für Byte wie vor dem Push – auch sein altes Datum" "$(rowsum "$DRAFT")" "$SUM_DRAFT_BEFORE"
 eq "AC-153: der neue Term ist samt Meta und Taxonomie-Zeile wieder weg" \
   "$(src mysql -N -e "SELECT (SELECT COUNT(*) FROM ${PREFIX}terms WHERE term_id = $NEW_TERM) + (SELECT COUNT(*) FROM ${PREFIX}termmeta WHERE term_id = $NEW_TERM) + (SELECT COUNT(*) FROM ${PREFIX}term_taxonomy WHERE term_taxonomy_id = $NEW_TT)")" 0
 eq "AC-154: der Zähler der alten Kategorie ist wieder 0" "$(src mysql -N -e "SELECT count FROM ${PREFIX}term_taxonomy WHERE term_taxonomy_id = $CAT_TT")" 0
@@ -666,22 +676,8 @@ eq "AC-154: der Zähler der alten Kategorie ist wieder 0" "$(src mysql -N -e "SE
 push_content push-neu2 neu --yes
 eq "Neu (zweiter Push desselben Pakets): Exit 0" "$RC" 0
 pkg nach-papierkorb "(.k | split(\"\u0000\")[0]) == \"$DRAFT\""
-if [ "$ROWS" = 0 ]; then
-  pass
-else
-  # Offen (nicht in diesem Skript zu lösen): wp_trash_post() gibt einem nie
-  # veröffentlichten Entwurf (post_date_gmt = 0000-00-00) das Datum des Verschiebens; op trash trägt
-  # keine Spalten, der Agent lässt post_date stehen. Die Arbeitskopie weicht danach in post_date und
-  # post_date_gmt ab, ein zweiter Push (update) gleicht es aus.
-  echo "SKIP: Papierkorb eines nie veröffentlichten Entwurfs – nach dem Push weicht die Arbeitskopie in post_date/post_date_gmt von Live ab (WordPress setzt das Datum beim Verschieben, op trash überträgt es nicht); geprüft wird, dass es nur das ist und ein Folge-Push es ausgleicht"
-  eq "Papierkorb (Entwurf): die Abweichung ist ein update des Beitrags" "$(jq -r '.op + ":" + .table' "$PKG/nach-papierkorb.body" | paste -sd' ' -)" "update:posts"
-  eq "Papierkorb (Entwurf): es weichen nur post_date und post_date_gmt ab" \
-    "$(jq -r -n --arg d "$DRAFT" --slurpfile b "$CONTENT/baseline.jsonl" --slurpfile e "$PKG/nach-papierkorb.export" '($b[] | select(.t == "posts" and .k == $d) | .row) as $old | ($e[] | select(.t == "posts" and .k == $d) | .row) as $new | [$new | keys[] | select($new[.] != $old[.])] | sort | join(",")')" "post_date,post_date_gmt"
-  push_content push-papierkorb nach-papierkorb --yes
-  eq "Papierkorb (Entwurf): der Folge-Push geht durch" "$RC" 0
-  pkg nach-papierkorb2 "(.k | split(\"\u0000\")[0]) == \"$DRAFT\""
-  eq "Papierkorb (Entwurf): danach weicht nichts mehr ab" "$ROWS" 0
-fi
+eq "Papierkorb: nach dem Push weicht die Arbeitskopie für den Entwurf nicht mehr von Live ab – auch nicht im Datum" "$ROWS" 0
+eq "Papierkorb: der Entwurf trägt auf Live das Datum, das WordPress ihm lokal beim Verschieben gab" "$(post src "$DRAFT" "CONCAT(post_date, ' ', post_date_gmt)")" "$(post tgt "$DRAFT" "CONCAT(post_date, ' ', post_date_gmt)")"
 src wp eval "wp_untrash_post($DRAFT);" >/dev/null
 no "Papierkorb: „Wiederherstellen“ in WordPress funktioniert" test "$(post src "$DRAFT" post_status)" = trash
 eq "Papierkorb: nach dem Wiederherstellen trägt der Entwurf wieder seinen Namen" "$(post src "$DRAFT" post_name)" "e2e-entwurf"
@@ -690,6 +686,7 @@ echo "== Papierkorb einer veröffentlichten Seite: Manifest und Baseline ziehen 
 tgt wp eval "wp_trash_post($PAGE_TRASH);" --skip-plugins --skip-themes
 pkg papierkorb "(.k | split(\"\u0000\")[0]) == \"$PAGE_TRASH\""
 eq "Paket papierkorb: nur die Zeile trash" "$(jq -r '.op + ":" + .table' "$PKG/papierkorb.body" | paste -sd' ' -)" "trash:posts"
+eq "Paket papierkorb: eine veröffentlichte Seite behält ihr Datum – trash ohne row" "$(jq -c 'has("row")' "$PKG/papierkorb.body")" false
 SUM_TRASH_BEFORE="$(rowsum "$PAGE_TRASH")"
 push_content push-papierkorb-seite papierkorb --yes
 eq "Papierkorb (Seite): Exit 0" "$RC" 0
@@ -736,6 +733,9 @@ refused "S1: serialisiertes Objekt" unsafe unsafe_value
 raw_pkg unknown-placeholder "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 '⟦wpsync:origin:esc9⟧/x')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_e2e_ph"), expected: "absent", row: {values: [$v]}}')"
 push_content unknown-placeholder unknown-placeholder --dry-run
 refused "Platzhalter in unbekannter Form" unknown-placeholder package_invalid
+raw_pkg trash-row "$(jq -c -n --arg k "$PAGE_B" --arg h "$(hash_of "$CONTENT/manifest.jsonl" posts "$PAGE_B")" --arg d "$(b64 '2026-10-09 12:00:00')" --arg t "$(b64 'eingeschmuggelt')" '{op: "trash", table: "posts", key: $k, expected: $h, row: {post_date: $d, post_date_gmt: $d, post_title: $t}}')"
+push_content trash-row trash-row --dry-run
+refused "trash mit einer Spalte ausser den beiden Daten" trash-row package_invalid
 # D15: denselben Schlüssel gibt es auf Live in anderer Schreibweise – für die Datenbank gleich, in Bytes verschieden.
 src wp eval "add_post_meta($PAGE_B, '_E2E_Twin', 'x');" >/dev/null
 raw_pkg twin "$(jq -c -n --arg k "$PAGE_B" --arg v "$(b64 'y')" '{op: "insert", table: "postmeta", key: ($k + "\u0000_e2e_twin"), expected: "absent", row: {values: [$v]}}')"
@@ -755,6 +755,7 @@ eq "Health: Exit 43" "$RC" 43
 cat "$JSON/health-rollback.err"
 eq "Health: Status" "$(last health-rollback '.data.status')" rolled_back
 eq "Health: die geänderte Seite ist die verschlechterte" "$(last health-rollback '.data.health | map(.url) | join(",")')" "$SOURCE_URL/e2e-b/"
+eq "Health: kein Messwert mehr – die Inhalte stehen nicht auf der Site" "$(last health-rollback '.data | has("content")')" false
 eq "Health: ohne Warnung – die Inhalte sind zurück" "$(last health-rollback '.data | has("warnings")')" false
 no "Health: Rücknahme über den Agent, nicht über rescue.php" hasF "$JSON/health-rollback.err" "rescue.php"
 no "Health: der Inhalt ist nicht mehr auf Live" contains "$(post src "$PAGE_B" post_content)" "Fatal error"
@@ -779,6 +780,7 @@ ok "Stumm: Weg über rescue.php" hasF "$JSON/broken.err" "rescue.php"
 ok "Stumm: Hinweis auf wpsync rollback (mit --json in error.message)" contains "$(last broken '.error.message')" "wpsync rollback $TARGET $PUSH_BROKEN"
 no "Stumm: kaputter Code auf Live" grep -q "this is not php" "$WPC/plugins/e2e-health/e2e-health.php"
 eq "Stumm: Live antwortet wieder" "$(code "$SOURCE_URL/")" 200
+eq "Stumm: der Messwert bleibt – die Inhalte stehen noch" "$(last broken '.data.content.rows')" 1
 eq "Stumm: die Inhalte stehen noch" "$(post src "$PAGE_FULL" post_title)" "E2E VOLL mit kaputtem Code"
 cp -p "$E2E/e2e-health.good" "$HEALTH"
 jrun pending "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/broken.jsonl" --dry-run --json
@@ -874,7 +876,8 @@ T0="$(date +%s)"
 push_content push-bulk bulk --yes
 eq "Bulk: Exit 0" "$RC" 0
 cat "$JSON/push-bulk.err"
-echo "INFO: 2000 Zeilen (je ein Meta, rund 200 Bytes) angewandt in $(tap '.data.content.seconds') s; der ganze Push dauerte $(($(date +%s) - T0)) s"
+eq "Bulk: das Ergebnis nennt 2.000 Zeilen" "$(last push-bulk '.data.content.rows')" 2000
+echo "INFO: 2000 Zeilen (je ein Meta, rund 200 Bytes) angewandt in $(last push-bulk '.data.content.seconds') s; der ganze Push dauerte $(($(date +%s) - T0)) s"
 eq "Bulk: 2.000 Meta auf Live" "$(src mysql -N -e "SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE post_id = $PAGE_B AND meta_key LIKE '\\_e2e\\_bulk\\_%'")" 2000
 eq "Bulk: nach dem Push ist nichts mehr zu pushen" "$(pkg bulk-danach ".t == \"postmeta\" and (.k | contains(\"_e2e_bulk_\"))"; echo "$ROWS")" 0
 T0="$(date +%s)"
