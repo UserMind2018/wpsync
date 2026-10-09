@@ -750,6 +750,8 @@ final class Push
                 } catch (ContentException $e) {
                     return $e->toError();
                 }
+                // Ab hier steht in rescue.json, dass die Inhalte zurück sind: scheitert danach der Code,
+                // überspringt ein zweiter Lauf die Datenbank und holt nur Code und Uploads nach.
                 PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
                 $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
             }
@@ -758,6 +760,9 @@ final class Push
                 $why = ($body['error'] ?? '') === 'superseded'
                     ? self::superseded((string) ($body['by'] ?? ''))
                     : 'Rollback fehlgeschlagen: ' . ($body['error'] ?? 'unbekannt');
+                if ($record !== null && is_array($record['content'] ?? null)) {
+                    $why .= ' – Die Inhalte sind zurückgenommen, Code und Uploads noch nicht: die Rücknahme wiederholen.';
+                }
                 return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
             }
             self::finishRollback($pushId);

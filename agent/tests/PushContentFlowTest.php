@@ -756,4 +756,37 @@ final class PushContentFlowTest extends TestCase
         $this->assertSame('rolled_back', Store::getPush($id)['status']);
         $this->assertInstanceOf(\WP_REST_Response::class, Push::rollback(['push_id' => $id], self::KEY), 'ohne angenommene Inhalte bleibt die Rücknahme wiederholbar');
     }
+
+    /**
+     * Scheitert die Rücknahme des Codes, nachdem die Inhalte schon zurück sind, hält rescue.json das
+     * fest und die Meldung sagt es: ein zweiter Lauf fasst die Datenbank nicht mehr an und holt nur
+     * Code und Uploads nach.
+     */
+    public function testAFailedCodeRollbackAfterTheContentCanBeRepeated(): void
+    {
+        $old      = $this->liveDb->data;
+        list($id) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        chmod($this->live . '/plugins', 0555); // der Tausch zurück scheitert
+
+        $error = $this->assertRefused('wpsync_push_rollback', 500, Push::rollback(['push_id' => $id], self::KEY));
+        $this->assertStringContainsString('Die Inhalte sind zurückgenommen', $error->message);
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame('rolled_back', $this->rescue($this->live, $id)['content']['state']);
+        $this->assertSame('committed', Store::getPush($id)['status']);
+
+        chmod($this->live . '/plugins', 0755);
+        $this->liveDb->log              = [];
+        $GLOBALS['wpsync_post_actions'] = [];
+        $back                           = Push::rollback(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        $this->assertSame(['ok' => true, 'status' => 'rolled_back'], $back->data);
+        $this->assertSame([], $this->liveDb->log, 'die Datenbank wird nicht noch einmal angefasst');
+        $this->assertSame([], $GLOBALS['wpsync_post_actions']);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->live . '/uploads/2026/10/neu.png');
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+    }
 }

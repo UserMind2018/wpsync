@@ -692,7 +692,9 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
   Zuordnungen und holt Beiträge aus dem Papierkorb – aber nur, wenn jede betroffene Zeile noch
   den Abdruck trägt, den der Push hinterlassen hat. Sonst `error.reason: "changed_since_push"`
   mit `error.keys`: **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über
-  `rescue.php`.
+  `rescue.php`. Scheitert umgekehrt die Rücknahme des Codes, nachdem die Inhalte schon zurück
+  sind, sagt die Meldung das; ein zweiter `rollback` fasst die Datenbank nicht mehr an und holt
+  nur Code und Uploads nach.
 - **Manifest und Baseline:** Nach einem bestätigten Push nach Live schreibt die CLI die neuen
   Abdrücke nach `manifest.jsonl` und die Zeilen des Pakets nach `baseline.jsonl` – das Gepushte
   ist danach keine lokale Änderung mehr. `rollback` nimmt das zurück. Bei `--to staging` bleiben
