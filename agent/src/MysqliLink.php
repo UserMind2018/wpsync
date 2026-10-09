@@ -7,8 +7,8 @@ defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
  * RescueLink auf mysqli (Spec Content-Push P3 §6.2): verbindet wie wpdb::db_connect() –
  * mysqli_real_connect(host, user, password, null, port, socket, flags) –, mit kurzen Wartezeiten
  * und ohne jede Ausgabe. mysqli meldet Fehler hier nie selbst (MYSQLI_REPORT_OFF), und jeder
- * Aufruf ist still: die Warnung eines gescheiterten Verbindungsaufbaus nennte Benutzer und Host
- * und stünde sonst im Fehlerprotokoll. Eine echte Datenbank sieht diese Klasse nur im E2E.
+ * Aufruf ist still (quiet()): die Warnung eines gescheiterten Verbindungsaufbaus nennte Benutzer
+ * und Host und stünde sonst im Fehlerprotokoll. Eine echte Datenbank sieht diese Klasse nur im E2E.
  */
 final class MysqliLink implements RescueLink
 {
@@ -31,26 +31,23 @@ final class MysqliLink implements RescueLink
         if (!function_exists('mysqli_init') || !function_exists('mysqli_real_connect')) {
             return null;
         }
-        try {
+        $handle = self::quiet(static function () use ($db) {
             mysqli_report(MYSQLI_REPORT_OFF);
-            $handle = @mysqli_init();
+            $handle = mysqli_init();
             if (!$handle instanceof \mysqli) {
                 return null;
             }
-            @mysqli_options($handle, MYSQLI_OPT_CONNECT_TIMEOUT, self::CONNECT_SECONDS);
+            mysqli_options($handle, MYSQLI_OPT_CONNECT_TIMEOUT, self::CONNECT_SECONDS);
             if (defined('MYSQLI_OPT_READ_TIMEOUT')) {
-                @mysqli_options($handle, (int) constant('MYSQLI_OPT_READ_TIMEOUT'), self::READ_SECONDS);
+                mysqli_options($handle, (int) constant('MYSQLI_OPT_READ_TIMEOUT'), self::READ_SECONDS);
             }
             $port   = isset($db['port']) && is_int($db['port']) ? $db['port'] : null;
             $socket = isset($db['socket']) && is_string($db['socket']) ? $db['socket'] : null;
-            $ok     = @mysqli_real_connect($handle, (string) ($db['host'] ?? ''), (string) ($db['user'] ?? ''), (string) ($db['password'] ?? ''), null, $port, $socket, (int) ($db['flags'] ?? 0));
-            if (!$ok || mysqli_connect_errno() !== 0) {
-                return null;
-            }
-            return new self($handle);
-        } catch (\Throwable $e) {
-            return null; // nie die Meldung: sie nennt Benutzer und Host
-        }
+            $flags  = isset($db['flags']) && is_int($db['flags']) ? $db['flags'] : 0;
+            $ok     = mysqli_real_connect($handle, (string) ($db['host'] ?? ''), (string) ($db['user'] ?? ''), (string) ($db['password'] ?? ''), null, $port, $socket, $flags);
+            return $ok && mysqli_connect_errno() === 0 ? $handle : null;
+        });
+        return $handle instanceof \mysqli ? new self($handle) : null;
     }
 
     /** Für ContentSql::note(): die Fehlernummer fürs Protokoll kommt von hier. */
@@ -61,8 +58,9 @@ final class MysqliLink implements RescueLink
 
     public function query(string $sql)
     {
-        try {
-            $result = @mysqli_query($this->handle, $sql);
+        $handle = $this->handle;
+        $rows   = self::quiet(static function () use ($handle, $sql) {
+            $result = mysqli_query($handle, $sql);
             if (!$result instanceof \mysqli_result) {
                 return $result === true;
             }
@@ -72,9 +70,8 @@ final class MysqliLink implements RescueLink
             }
             mysqli_free_result($result);
             return $rows;
-        } catch (\Throwable $e) {
-            return false;
-        }
+        });
+        return is_array($rows) ? $rows : $rows === true;
     }
 
     public function escape(string $value): string
@@ -84,37 +81,56 @@ final class MysqliLink implements RescueLink
 
     public function errno(): int
     {
-        try {
-            return (int) @mysqli_errno($this->handle);
-        } catch (\Throwable $e) {
-            return 0;
-        }
+        $handle = $this->handle;
+        return (int) self::quiet(static function () use ($handle): int {
+            return (int) mysqli_errno($handle);
+        });
     }
 
     public function charset(string $charset): bool
     {
-        try {
-            return (bool) @mysqli_set_charset($this->handle, $charset);
-        } catch (\Throwable $e) {
-            return false;
-        }
+        $handle = $this->handle;
+        return true === self::quiet(static function () use ($handle, $charset): bool {
+            return (bool) mysqli_set_charset($handle, $charset);
+        });
     }
 
     public function select(string $database): bool
     {
-        try {
-            return (bool) @mysqli_select_db($this->handle, $database);
-        } catch (\Throwable $e) {
-            return false;
-        }
+        $handle = $this->handle;
+        return true === self::quiet(static function () use ($handle, $database): bool {
+            return (bool) mysqli_select_db($handle, $database);
+        });
     }
 
     public function close(): void
     {
+        $handle = $this->handle;
+        self::quiet(static function () use ($handle): bool {
+            return mysqli_close($handle);
+        });
+    }
+
+    /**
+     * Ruft mysqli, ohne dass eine Warnung den Prozess verlässt: nicht in die Antwort, nicht ins
+     * Fehlerprotokoll, nicht in error_get_last() und nicht zu einem Fehler-Handler, den ein Plugin
+     * gesetzt hat (ein @ allein hielte sie von den beiden letzten nicht fern). Die Meldung eines
+     * gescheiterten Verbindungsaufbaus nennt Benutzer und Host.
+     *
+     * @param callable(): mixed $call
+     * @return mixed was $call liefert; null, wenn es wirft
+     */
+    private static function quiet(callable $call)
+    {
+        set_error_handler(static function (): bool {
+            return true;
+        });
         try {
-            @mysqli_close($this->handle);
+            return $call();
         } catch (\Throwable $e) {
-            // schon geschlossen
+            return null;
+        } finally {
+            restore_error_handler();
         }
     }
 }
