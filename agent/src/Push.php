@@ -177,7 +177,9 @@ final class Push
     /**
      * Prüft Einheiten, Konflikte, Rechte und Platz. Mit dry nur Auskunft; sonst legt es den Push
      * an und nimmt die Sperre. Ziel live oder staging (Spec 2b 5.8): der Client nennt nur das Wort,
-     * das Verzeichnis kommt aus dem Staging-Datensatz.
+     * das Verzeichnis kommt aus dem Staging-Datensatz. Mit activate/deactivate trägt der Satz einen
+     * Plugin-Zustand (Spec Content-Push P4 §4.2): die Antwort nennt ihn unter plugins, und ohne Umschlag
+     * für rescue.php lehnt der echte Begin ab (A9).
      *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
@@ -205,7 +207,15 @@ final class Push
                 return self::error('wpsync_push_content', 'content nennt keine gültige sha256 eines Pakets.', 400);
             }
         }
-        $units = self::parseUnits($params['units'] ?? null, $contentSha !== null);
+        // Der Plugin-Zustand (Spec Content-Push P4 §4.2): ebenfalls keine Einheit, sondern ein Auftrag an den
+        // Agent. Aus dem Request kommen nur Namen von Einheiten – nie ein Wert der Option, nie eine Datei, die zählt.
+        try {
+            $wish = PushPlugins::request($params);
+        } catch (ContentException $e) {
+            return $e->toError();
+        }
+        // Ein Satz mit DB-Anteil darf ohne Einheit kommen: nur Inhalte, oder nur --deactivate (§8.1).
+        $units = self::parseUnits($params['units'] ?? null, $contentSha !== null || $wish !== null);
         if ($units instanceof \WP_Error) {
             return $units;
         }
@@ -275,6 +285,9 @@ final class Push
             // Ohne offenes Fenster nur ein Teil der Prüfung: der Probelauf ist kein Weg, die Site auszufragen.
             $contentPlan = PushContent::plan($staged, $target, $content, $uploadFiles, empty($params['dry']), Store::pushOpener($keyId), $open);
         }
+        // Auch der Plugin-Zustand wird im Probelauf wie im echten Begin geprüft – und auch ohne offenes
+        // Fenster: die Liste der aktiven Plugins nennt Rest::env() einem gekoppelten Gerät ohnehin (§4.2).
+        $pluginPlan = $wish === null ? null : PushPlugins::plan($wish, array_column($units, 'path'), $target, $content);
         $pending = self::pending();
         $answer  = [
             'push_id'       => '',
@@ -296,9 +309,13 @@ final class Push
         if ($contentPlan !== null) {
             $answer['content'] = $contentPlan;
         }
+        if ($pluginPlan !== null) {
+            $answer['plugins'] = $pluginPlan;
+        }
         if (!empty($params['dry'])) {
-            if ($contentSha !== null) {
-                // Was ein echter Begin ergäbe – ohne Probe und ohne Datei (Spec Content-Push P3 §5.3).
+            if ($contentSha !== null || $wish !== null) {
+                // Was ein echter Begin ergäbe – ohne Probe und ohne Datei (Spec Content-Push P3 §5.3). Für einen
+                // Satz mit Plugin-Zustand bricht die CLI bei ok: false ab, bevor sie etwas überträgt (P4 §8.2).
                 $answer['rescue']['db'] = PushContent::rescueDb($target, $content, '', null, '');
             }
             return new \WP_REST_Response($answer);
@@ -313,6 +330,15 @@ final class Push
         // Was der Probelauf als content.error nennt, lehnt der echte Begin ab – mit denselben Einzelheiten.
         if ($contentPlan !== null && !$contentPlan['ok']) {
             return ContentException::fromArray((array) $contentPlan['error'])->toError();
+        }
+        // Dasselbe für den Plugin-Zustand: plugins.error des Probelaufs ist die Ablehnung des echten Begin.
+        if ($pluginPlan !== null && !$pluginPlan['ok']) {
+            return ContentException::fromArray((array) $pluginPlan['error'])->toError();
+        }
+        // A12: nur ein Fenster mit Öffner, und der darf Plugins schalten. Wie author_unknown erst hier – der
+        // Probelauf sagt über den Öffner nichts.
+        if ($wish !== null && !PushPlugins::allowed(Store::pushOpener($keyId))) {
+            return PushPlugins::refuse(ContentException::PLUGINS_NOT_ALLOWED, PushPlugins::NOT_ALLOWED_TEXT)->toError();
         }
         // Ein Push ersetzt nie eine Datei unter uploads – auch nicht mit force (Spec Content-Push §8.2, W3).
         if ($upConflicts !== []) {
@@ -370,7 +396,7 @@ final class Push
         }
         wp_mkdir_p($work . '/' . $pushId . '/stage');
         // Der Rescue-Key entsteht nur hier: der Server behält seinen Hash – und, für einen Push mit
-        // Inhalten, den Umschlag, den nur dieser Schlüssel öffnet (P3 R1, R2).
+        // DB-Anteil (Inhalte oder Plugin-Zustand), den Umschlag, den nur dieser Schlüssel öffnet (P3 R1, R2).
         $rescueKey = PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt);
         $plan      = [
             'push_id'  => $pushId,
@@ -388,10 +414,32 @@ final class Push
             $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows] + $extensions;
             $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows] + $extensions;
             $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
-            // Ohne Umschlag wird trotzdem gepusht (R12): die CLI warnt oder bricht mit --require-rescue-db ab.
+        }
+        if ($wish !== null) {
+            // Nur die Einheiten – die mitgeschickten Köpfe werden nie gespeichert (§12); im Commit zählt die gebaute Datei.
+            $plan['plugins'] = ['activate' => $wish['activate'], 'deactivate' => $wish['deactivate']];
+            $summary[]       = ['path' => PushPlugins::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => 0, 'uploaded' => 0]
+                + $plan['plugins'];
+        }
+        if ($contentSha !== null || $wish !== null) {
+            // Der Umschlag für rescue.php (P3 R1, R2) – für jeden Satz mit DB-Anteil. Ohne ihn wird ein Satz
+            // nur aus Inhalten trotzdem gepusht (R12): die CLI warnt oder bricht mit --require-rescue-db ab.
             $answer['rescue']['db'] = $taken ? PushContent::rescueDb($target, $content, $work, $pushId, $rescueKey) : ['ok' => false, 'reason' => RescueContent::WRITE_FAILED];
         }
         unset($rescueKey);
+        if ($wish !== null && empty($answer['rescue']['db']['ok'])) {
+            // Für einen Satz mit Plugin-Zustand ist der Umschlag Pflicht (P4 A9): ein Plugin, das beim Laden
+            // wirft – oder dessen Fehlen ein anderes zum Absturz bringt –, lässt sich nur über die Datenbank
+            // zurückdrehen, und der Agent antwortet dann nicht mehr. Der eben angelegte Push verschwindet.
+            PushSwap::remove($work . '/' . $pushId);
+            self::release($pushId);
+            return PushPlugins::refuse(
+                ContentException::PLUGINS_RESCUE_DB,
+                PushPlugins::NO_ENVELOPE_TEXT,
+                [],
+                ['detail' => (string) ($answer['rescue']['db']['reason'] ?? RescueContent::PROBE_FAILED)]
+            )->toError();
+        }
         $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
             && Store::addPush([
                 'push_id' => $pushId,
