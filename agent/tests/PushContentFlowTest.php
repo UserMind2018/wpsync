@@ -340,6 +340,41 @@ final class PushContentFlowTest extends TestCase
         $this->assertFileExists($this->work($this->live) . '/packages/' . self::KEY . '/' . $sha . '.jsonl', 'die Ablage bleibt für den Push nach Live');
     }
 
+    /**
+     * N3: der Probelauf braucht kein Push-Fenster – wer nur das Secret hat, erfährt aus ihm aber
+     * nicht, welche Objekte und Dateien es auf der Site gibt. Die Antwort sagt, dass sie Teil ist.
+     */
+    public function testADryRunWithoutAWindowIsPartial(): void
+    {
+        $missing = $this->stage([ContentFixtures::row('insert', 'postmeta', "999\0_x", 'absent', ['values' => ['x']])]);
+        $file    = $this->stage([
+            ContentFixtures::row('insert', 'posts', '1000002', 'absent', ContentFixtures::postRow('1000002', ['post_type' => 'attachment', 'post_status' => 'inherit', 'post_mime_type' => 'image/png'])),
+            ContentFixtures::row('insert', 'postmeta', "1000002\0_wp_attached_file", 'absent', ['values' => ['2026/10/bild.png']]),
+        ]);
+        $ok = $this->stage($this->rows());
+
+        $open = $this->begin($missing, ['dry' => true])->data;
+        $this->assertTrue($open['window_open']);
+        $this->assertFalse($open['content']['partial']);
+        $this->assertSame('dangling_reference', $open['content']['error']['code']);
+        $this->assertSame('upload_missing', $this->begin($file, ['dry' => true])->data['content']['error']['code']);
+
+        Store::$until = 0;
+        $closed       = $this->begin($missing, ['dry' => true])->data;
+        $this->assertFalse($closed['window_open']);
+        $this->assertTrue($closed['content']['partial']);
+        $this->assertSame('blocked_row', $closed['content']['error']['code']);
+        $this->assertSame([['table' => 'postmeta', 'key' => "999\0_x"]], $closed['content']['error']['keys']);
+        $files = $this->begin($file, ['dry' => true])->data['content'];
+        $this->assertTrue($files['ok'], 'Dateien werden ohne Fenster nicht geprüft');
+        $this->assertTrue($files['partial']);
+        $this->assertNull($files['error']);
+        $whole = $this->begin($ok, ['dry' => true])->data['content'];
+        $this->assertTrue($whole['ok']);
+        $this->assertTrue($whole['partial'], 'auch ein Paket ohne Befund ist ohne Fenster nur teilweise geprüft');
+        $this->assertSame([], Store::$pushes);
+    }
+
     /** Nr. 9: die Dateien eines neuen Attachments dürfen mit der Einheit uploads desselben Satzes kommen. */
     public function testAttachmentFilesMayComeWithTheSameSet(): void
     {

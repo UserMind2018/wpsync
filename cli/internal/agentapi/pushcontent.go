@@ -84,6 +84,10 @@ type ContentPlan struct {
 	Limits     ContentLimits   `json:"limits"`
 	Conflicts  []ContentKey    `json:"conflicts"`
 	HealthURLs []string        `json:"health_urls"` // published pages the package changes, at most 10
+	// Partial: the dry run ran without an open push window. The agent then does not tell which
+	// objects and files exist on the site: references into nothing look like blocked rows and files
+	// of attachments are not checked. The whole check needs the window.
+	Partial bool `json:"partial"`
 	// Extensions: only when the package names project extensions.
 	Extensions *ContentExtensions `json:"extensions,omitempty"`
 }

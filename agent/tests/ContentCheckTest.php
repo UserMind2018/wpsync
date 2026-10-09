@@ -506,6 +506,63 @@ final class ContentCheckTest extends TestCase
         ], $e->keys());
     }
 
+    /**
+     * N3: ohne offenes Push-Fenster sagt der Probelauf nicht, welche Objekte es auf dem Ziel gibt.
+     * Was ins Leere zeigt, sieht aus wie eine gesperrte Zeile – ein Code, eine Meldung, die Schlüssel
+     * in der Reihenfolge des Pakets – und die Dateien von Attachments prüft er gar nicht.
+     */
+    public function testAPartialRunDoesNotTellWhichObjectsExist(): void
+    {
+        $dangling = [
+            ContentFixtures::row('insert', 'postmeta', "999\0_x", 'absent', ['values' => ['x']]),
+            ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => ['777:0']]),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '888', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('insert', 'options', 'page_on_front', 'absent', ['option_value' => '999']),
+        ];
+        $blocked = [
+            ContentFixtures::row('insert', 'postmeta', "400\0_x", 'absent', ['values' => ['x']]),
+            ContentFixtures::row('insert', 'postmeta', "219\0_edit_lock2_token", 'absent', ['values' => ['x']]),
+        ];
+        $mixed = [$dangling[0], $blocked[0], $dangling[1], $dangling[2], $blocked[1], $dangling[3]];
+        $error = function (array $rows): array {
+            try {
+                $this->check($rows)->run([], false, true);
+            } catch (ContentException $e) {
+                $this->assertSame([], $this->store->log);
+                return $e->toArray();
+            }
+            $this->fail('accepted');
+        };
+        $both = $error($mixed);
+        $this->assertSame('blocked_row', $both['code']);
+        $this->assertSame(array_column($mixed, 'key'), array_column($both['keys'], 'key'), 'in der Reihenfolge des Pakets, ohne Unterschied');
+        $this->assertSame(6, $both['total']);
+        // Dieselbe Form, ob das Objekt fehlt oder gesperrt ist.
+        $missing = $error([$dangling[0]]);
+        $locked  = $error([$blocked[0]]);
+        $this->assertSame(['code', 'message', 'keys', 'total'], array_keys($missing));
+        $this->assertSame(array_keys($locked), array_keys($missing));
+        $this->assertSame($locked['message'], $missing['message']);
+        $this->assertSame($locked['code'], $missing['code']);
+        foreach ($dangling as $row) {
+            $this->assertSame('blocked_row', $error([$row])['code'], $row['table']);
+        }
+        // Mit offenem Fenster bleibt es bei dangling_reference.
+        $this->refused('dangling_reference', [$dangling[0]]);
+
+        // Dateien von Attachments: gar nicht geprüft – weder ob sie fehlen noch ob sie da sind.
+        $dir = sys_get_temp_dir() . '/wpsync-check-' . bin2hex(random_bytes(4));
+        mkdir($dir . '/2026/10', 0777, true);
+        file_put_contents($dir . '/2026/10/da.jpg', 'x');
+        $target = ContentFixtures::live($this->store, $dir);
+        foreach (['2026/10/da.jpg', '2026/10/fehlt.jpg'] as $file) {
+            $rows = [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => [$file]])];
+            $this->check($rows, [], $target)->run([], false, true);
+        }
+        $this->refused('upload_missing', [ContentFixtures::row('insert', 'postmeta', "300\0_wp_attached_file", 'absent', ['values' => ['2026/10/fehlt.jpg']])], [], $target);
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
     /** Nr. 9, S10: die Dateimenge eines Attachments ist genau festgelegt. */
     public function testUploadMissing(): void
     {

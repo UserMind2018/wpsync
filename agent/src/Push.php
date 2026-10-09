@@ -192,6 +192,7 @@ final class Push
                 $bytes += $file['size'];
             }
         }
+        $open = PushWindow::open(Store::pushUntil($keyId), $now);
         // Das Paket wird im Probelauf wie im echten Begin vollständig geprüft (§7.2) – ohne zu schreiben.
         $staged      = null;
         $contentPlan = null;
@@ -203,10 +204,10 @@ final class Push
                 }
             }
             $staged      = PushContent::staged($live . '/' . Store::pushDirName(), $keyId, $contentSha, $now);
-            $contentPlan = PushContent::plan($staged, $target, $content, $uploadFiles, empty($params['dry']), Store::pushOpener($keyId));
+            // Ohne offenes Fenster nur ein Teil der Prüfung: der Probelauf ist kein Weg, die Site auszufragen.
+            $contentPlan = PushContent::plan($staged, $target, $content, $uploadFiles, empty($params['dry']), Store::pushOpener($keyId), $open);
         }
         $pending = self::pending();
-        $open    = PushWindow::open(Store::pushUntil($keyId), $now);
         $answer  = [
             'push_id'       => '',
             'target'        => $target,

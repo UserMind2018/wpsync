@@ -229,6 +229,9 @@ func printContent(out io.Writer, pkg *Package, plan *agentapi.ContentPlan) {
 	if !plan.OK && plan.Error != nil {
 		fmt.Fprintf(out, "  ! %v\n", contentFailure(plan.Error))
 	}
+	if plan.Partial {
+		fmt.Fprintln(out, "  ! Push-Fenster geschlossen: Inhalte nur teilweise geprüft – Verweise auf Objekte der Site und die Dateien von Attachments prüft der Agent erst mit offenem Fenster")
+	}
 }
 
 // printActions names the steps after applying or taking back content that did not work.

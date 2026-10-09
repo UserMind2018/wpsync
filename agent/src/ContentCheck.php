@@ -44,6 +44,8 @@ final class ContentCheck
     private $inserted = [];
     /** @var list<array{table: string, key: string}> Zeilen ohne Objekt auf dem Ziel oder im Paket */
     private $dangling = [];
+    /** @var bool der laufende run() ist ein Probelauf ohne offenes Push-Fenster */
+    private $partial = false;
     /** @var array<string, int> Zähler-Tabelle → höchste ID, die ein neues Objekt auf diesem Ziel haben darf */
     private $ceilings = [];
 
@@ -63,10 +65,14 @@ final class ContentCheck
      *
      * @param array<string, mixed> $uploads Dateien der Einheit uploads desselben Pushs, relativ zu uploads/ (nur die Schlüssel zählen)
      * @param bool                 $lock    beim Anwenden: jede Zeile wird mit FOR UPDATE gelesen
+     * @param bool                 $partial Probelauf ohne offenes Push-Fenster: die Antwort verrät nicht, welche Objekte
+     *                                      und Dateien es auf dem Ziel gibt – was ins Leere zeigt, gilt als gesperrte
+     *                                      Zeile (blocked_row), Dateien von Attachments werden nicht geprüft
      * @throws ContentException
      */
-    public function run(array $uploads = [], bool $lock = false): void
+    public function run(array $uploads = [], bool $lock = false, bool $partial = false): void
     {
+        $this->partial  = $partial;
         $this->dangling = [];
         $this->inserted = [];
         $this->ceilings = [];
@@ -78,7 +84,9 @@ final class ContentCheck
         $this->ids();
         $this->orphans($lock);
         $this->references();
-        $this->files($uploads);
+        if (!$partial) {
+            $this->files($uploads);
+        }
     }
 
     /**
@@ -298,6 +306,21 @@ final class ContentCheck
         }
         if ($invalid !== []) {
             throw new ContentException(ContentException::INVALID, 'Das Paket ist ungültig: ein Schlüssel hat nicht die Form der Tabelle, oder ein Beitrag soll ohne op trash in den Papierkorb.', $invalid);
+        }
+        // Ohne Fenster kein Orakel: was ins Leere zeigt, steht zwischen den gesperrten Zeilen – eine
+        // Ablehnung, die Schlüssel in der Reihenfolge des Pakets.
+        if ($this->partial) {
+            $hidden = [];
+            foreach (array_merge($blocked, $this->dangling, $this->unreferenced()) as $entry) {
+                $hidden[$entry['table'] . "\0\0" . $entry['key']] = true;
+            }
+            $blocked = [];
+            foreach ($this->package->rows() as $row) {
+                if (isset($hidden[$row['table'] . "\0\0" . $row['key']])) {
+                    $blocked[] = ContentException::key($row['table'], $row['key']);
+                }
+            }
+            $this->dangling = [];
         }
         if ($blocked !== []) {
             throw new ContentException(ContentException::BLOCKED, count($blocked) . ' Zeile(n) stehen auf der Sperrliste des Agents oder nicht auf seiner Whitelist.', $blocked);
@@ -548,7 +571,17 @@ final class ContentCheck
     /** Nr. 8: Zeilen ohne Objekt, term_taxonomy ohne Term, Optionen, die ins Leere zeigen. */
     private function references(): void
     {
-        $dangling = $this->dangling;
+        // Im Probelauf ohne Fenster hat lists() das schon als gesperrte Zeilen gemeldet.
+        $dangling = $this->partial ? [] : array_merge($this->dangling, $this->unreferenced());
+        if ($dangling !== []) {
+            throw new ContentException(ContentException::DANGLING, 'Zeilen verweisen auf Objekte, die es auf dem Ziel nicht gibt und die nicht mitgepusht werden.', $dangling);
+        }
+    }
+
+    /** @return list<array{table: string, key: string}> term_taxonomy-Zeilen ohne Term und Optionen, die ins Leere zeigen */
+    private function unreferenced(): array
+    {
+        $dangling = [];
         foreach ($this->rows['term_taxonomy'] ?? [] as $key => $row) {
             if (!$this->termExists($row['term_id'])) {
                 $dangling[] = ContentException::key('term_taxonomy', (string) $key);
@@ -569,9 +602,7 @@ final class ContentCheck
                 }
             }
         }
-        if ($dangling !== []) {
-            throw new ContentException(ContentException::DANGLING, 'Zeilen verweisen auf Objekte, die es auf dem Ziel nicht gibt und die nicht mitgepusht werden.', $dangling);
-        }
+        return $dangling;
     }
 
     /**

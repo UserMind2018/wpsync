@@ -651,8 +651,14 @@ danach für diesen Beitrag nicht mehr von der Site ab.
 
 ### Was der Agent prüft
 
-Im Probelauf (`--dry-run`, ohne Push-Fenster) und beim Anwenden dasselbe, beim Anwenden unter
-Sperre noch einmal. Die CLI legt das Paket dafür vor dem Begin auf der Site ab (`/content/stage`,
+Im Probelauf (`--dry-run`) und beim Anwenden dasselbe, beim Anwenden unter
+Sperre noch einmal. Der Probelauf braucht kein Push-Fenster – **ohne offenes Fenster prüft er
+aber nur einen Teil**: die Antwort soll niemandem, der nur das Secret hat, verraten, welche
+Beiträge, Terme und Dateien es auf der Site gibt. Eine Zeile, die auf ein fehlendes Objekt zeigt,
+erscheint dann wie eine gesperrte (`blocked_row` statt `dangling_reference`, dieselbe Meldung,
+die Schlüssel in der Reihenfolge des Pakets), und die Dateien von Attachments (`upload_missing`)
+prüft der Agent gar nicht. Das `plan`-Ereignis sagt es mit `content.partial: true`, ohne `--json`
+eine Zeile; mit offenem Fenster ist `partial` `false` und die Prüfung vollständig. Die CLI legt das Paket dafür vor dem Begin auf der Site ab (`/content/stage`,
 in Stücken, je Kopplung getrennt im geschützten Push-Arbeitsordner, adressiert über die sha256
 der Datei; es verfällt nach dem bestätigten Push nach Live, spätestens nach 24 Stunden). Jede
 Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffenen Zeilen als

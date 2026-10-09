@@ -61,6 +61,7 @@ func (f *fakeSite) stagedRows(sha string) []PackageRow {
 // contentPlan answers for the package like PushContent::plan.
 func (f *fakeSite) contentPlan(req agentapi.PushBeginRequest) *agentapi.ContentPlan {
 	plan := &agentapi.ContentPlan{Rows: map[string]int{}, Limits: agentapi.ContentLimits{MaxRows: 5000, MaxBytes: 8 << 20, BudgetSeconds: 12}, Conflicts: []agentapi.ContentKey{}}
+	plan.Partial = !f.window // without a window the agent checks only part (N3)
 	rows := f.stagedRows(req.Content.SHA256)
 	if rows == nil {
 		plan.Error = &agentapi.ContentFailure{Code: "package_missing", Message: "nicht abgelegt"}
@@ -216,7 +217,7 @@ func TestRunPushesContentAlone(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(siteDir, ".wpsync", "pushes", testID+".content.json")); err != nil {
 		t.Errorf("the undo of manifest and baseline is missing: %v", err)
 	}
-	if !strings.Contains(out.String(), "content – 4 Zeilen, posts 2, postmeta 2") {
+	if !strings.Contains(out.String(), "content – 4 Zeilen, posts 2, postmeta 2") || strings.Contains(out.String(), "teilweise geprüft") {
 		t.Errorf("output:\n%s", out)
 	}
 }
@@ -225,7 +226,7 @@ func TestRunPushesContentAlone(t *testing.T) {
 func TestRunDryRunWithContentNeedsNoWindow(t *testing.T) {
 	f := newFakeSite(t)
 	f.window = false
-	o, siteDir, _ := contentSite(t, f)
+	o, siteDir, out := contentSite(t, f)
 	o.NoCode, o.DryRun = true, true
 	var plan map[string]any
 	o.Event = func(name string, data any) { plan, _ = data.(map[string]any) }
@@ -239,9 +240,13 @@ func TestRunDryRunWithContentNeedsNoWindow(t *testing.T) {
 		t.Errorf("routes = %s", got)
 	}
 	want := map[string]any{"rows": map[string]int{"posts": 2, "postmeta": 2}, "conflicts": []agentapi.ContentKey{},
-		"limits": agentapi.ContentLimits{MaxRows: 5000, MaxBytes: 8 << 20, BudgetSeconds: 12}}
+		"limits": agentapi.ContentLimits{MaxRows: 5000, MaxBytes: 8 << 20, BudgetSeconds: 12}, "partial": true}
 	if !reflect.DeepEqual(plan["content"], want) {
 		t.Errorf("plan.content = %#v", plan["content"])
+	}
+	// N3: without a window the check is partial, and the output says so.
+	if !strings.Contains(out.String(), "Inhalte nur teilweise geprüft") {
+		t.Errorf("output:\n%s", out)
 	}
 	if report.Status != "dry_run" || contentFile(t, siteDir, "manifest.jsonl") != manifestBefore {
 		t.Errorf("report = %+v", report)

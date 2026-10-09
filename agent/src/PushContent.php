@@ -285,11 +285,13 @@ final class PushContent
      * @param string|null          $file    das abgelegte Paket; null: es liegt nicht (mehr) da
      * @param array<string, mixed> $uploads Dateien der Einheit uploads desselben Pushs (nur die Schlüssel zählen)
      * @param bool                 $real    echter Begin: neue Beiträge brauchen den Öffner des Fensters (§9)
-     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>, extensions?: array<string, list<string>>}
+     * @param bool                 $window  das Push-Fenster dieser Kopplung ist offen; sonst prüft der Probelauf nur
+     *                                      teilweise (partial) und verrät nicht, welche Objekte und Dateien es gibt
+     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>, partial: bool, extensions?: array<string, list<string>>}
      */
-    public static function plan(?string $file, string $name, string $content, array $uploads, bool $real, ?int $opener): array
+    public static function plan(?string $file, string $name, string $content, array $uploads, bool $real, ?int $opener, bool $window = true): array
     {
-        $out = ['ok' => false, 'error' => null, 'rows' => new \stdClass(), 'limits' => ContentPackage::limits(), 'conflicts' => [], 'health_urls' => []];
+        $out = ['ok' => false, 'error' => null, 'rows' => new \stdClass(), 'limits' => ContentPackage::limits(), 'conflicts' => [], 'health_urls' => [], 'partial' => !$window];
         try {
             if ($file === null) {
                 throw new ContentException(ContentException::MISSING, 'Das Paket liegt nicht auf dem Server – zuerst über /content/stage ablegen.');
@@ -302,7 +304,7 @@ final class PushContent
             }
             $target      = self::target($name, $content);
             $check       = new ContentCheck($package, $target);
-            $check->run($uploads);
+            $check->run($uploads, false, !$window);
             foreach ($package->rows() as $row) {
                 if ($real && $row['op'] === 'insert' && $row['table'] === 'posts' && ($opener === null || $opener < 1)) {
                     throw new ContentException(ContentException::AUTHOR, 'Neue Beiträge brauchen einen Autor: das Push-Fenster muss im WP-Admin geöffnet sein, nicht per WP-CLI.');

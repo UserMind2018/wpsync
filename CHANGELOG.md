@@ -18,8 +18,9 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
   Vorher-Abbild, Nacharbeiten (`data.post_actions`), Messwert (`data.content: {rows, seconds}`)
   und Health-Check der geänderten Seiten.
-  `--dry-run` prüft das ganze Paket ohne Push-Fenster; das `plan`-Ereignis nennt
-  `content: {rows, conflicts, limits}`. Auch nach `--to staging`
+  `--dry-run` prüft das Paket ohne Push-Fenster (vollständig nur mit offenem Fenster, siehe
+  „Sicherheit“); das `plan`-Ereignis nennt `content: {rows, conflicts, limits, partial}`. Auch
+  nach `--to staging`
 - `--no-code`: ein Satz nur aus `--uploads` und `--content`
 - `wpsync rollback` nimmt den ganzen Satz zurück (Inhalte → Code → Uploads) – oder nichts, wenn
   sich Zeilen seit dem Push geändert haben (`changed_since_push`). Antwortet WordPress nicht,
@@ -159,6 +160,12 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   sich dessen Inhalt nicht mehr zurücknehmen. Ein beschädigtes Vorher-Abbild meldete bisher
   `content_failed`. Abgelegte Pakete und ihre Kopie im Push sind nur noch für den Besitzer
   lesbar; scheitert das Schreiben, steht kein Pfad im Fehlerprotokoll
+- Agent: Der Probelauf eines Inhalts-Pakets ist ohne offenes Push-Fenster kein Weg mehr, die
+  Site auszufragen. Ist das Fenster der Kopplung zu, meldet er einen Verweis auf ein fehlendes
+  Objekt wie eine gesperrte Zeile (`blocked_row` statt `dangling_reference`, eine Meldung, die
+  Schlüssel in der Reihenfolge des Pakets) und prüft die Dateien von Attachments
+  (`upload_missing`) nicht. Die Antwort nennt `content.partial: true`; die CLI reicht `partial`
+  im `plan`-Ereignis durch und sagt es in einer Zeile. Mit offenem Fenster unverändert
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 
