@@ -139,7 +139,7 @@ trust_ddev() { # gibt .ddev des Ziels frei – ohne Terminal nur über den Finge
 }
 # Stellt her, was ein abgebrochener Lauf an der Quelle verstellt haben kann.
 restore_source() {
-  rm -f "$CTL/hold" "$CTL/needs" "$PUB/.maintenance" "$WPC/e2e-plg-loaded.log" "$WPC/object-cache.php" "$WPC/e2e-object-cache.ser"
+  rm -f "$CTL/hold" "$CTL/needs" "$CTL/nodelete" "$PUB/.maintenance" "$WPC/e2e-plg-loaded.log" "$WPC/object-cache.php" "$WPC/e2e-object-cache.ser"
   rm -rf "$WPC/plugins/plg-x" "$WPC/plugins/plg-ok" "$WPC/plugins/plg-fatal" "$WPC/plugins/plg-admin-fatal" "$WPC/plugins/wp-rocket" "$WPC/plugins/plg-php99" "$WPC/plugins/plg-wp99" "$WPC/plugins/plg-needs" "$WPC/plugins/plg-nohead" "$WPC/plugins/plg-two"
   if [ -s "$E2E/auth-key" ] && [ -f "$PUB/wp-config.php" ]; then
     (cd "$SRC" && ddev wp config set AUTH_KEY "$(cat "$E2E/auth-key")" --type=constant) >/dev/null 2>&1 || true
@@ -463,6 +463,9 @@ eq "Beleg Nr. 2 (Gegenprobe): über den Core lief die Aktivierungsroutine" "$(lo
 sql -e "DELETE FROM ${PREFIX}options WHERE option_name IN ('plg_ok_activated', 'recently_activated'); DROP TABLE IF EXISTS ${PREFIX}plg_ok" || true
 src wp cache flush >/dev/null 2>&1 || true
 eq "AC-193: die Nacharbeiten nennen plugins_cache und rewrite_rules" "$(last act '.data.post_actions | map(select(.step == "plugins_cache" or .step == "rewrite_rules") | .ok) | join(",")')" "true,true"
+# Nach-Review NR-3: auf einer normalen Site (kein persistenter Object-Cache) steht der Schritt da und ist bestanden –
+# der Gegenbeweis gegen Falsch-Positive: ein Push scheitert hier nie an der Rückprüfung.
+eq "NR-3: plugins_effective steht im Ergebnis und ist ok" "$(last act '.data.post_actions | map(select(.step == "plugins_effective") | .ok) | join(",")')" "true"
 ACT_ID="$(last act '.data.push_id')"
 eq "V12: das Protokoll nennt die Einheit plugins mit dem Eintrag" "$(record "$ACT_ID" '.units[] | select(.path == "plugins") | .activated | join(",")')" "plg-ok/plg-ok.php"
 jrun act-again "$WPSYNC" push "$TARGET" code --activate plugins/plg-ok --yes --json
@@ -491,6 +494,7 @@ echo "== AC-202, AC-204, AC-207, AC-208: deaktivieren – ohne Einheit, ohne Dea
 WANT="$(want_drop plg-solo/plg-solo.php)"
 jrun deact "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-solo --yes --json
 eq "deaktivieren: Exit 0" "$RC $(last deact '.data.plugins.deactivated | join(",")')" "0 plugins/plg-solo"
+eq "NR-3: auch beim Deaktivieren ist plugins_effective ok" "$(last deact '.data.post_actions | map(select(.step == "plugins_effective") | .ok) | join(",")')" "true"
 eq "deaktivieren: die Liste ohne den Eintrag, dicht und sortiert" "$(active)" "$WANT"
 ok "deaktivieren: der Ordner bleibt auf der Site" test -f "$WPC/plugins/plg-solo/plg-solo.php"
 ok "deaktivieren: Warnung deactivation_review" sh -c "tail -n 1 '$JSON/deact.jsonl' | jq -e '.data.warnings | index(\"deactivation_review\")'"
@@ -626,10 +630,30 @@ class E2E_File_Cache extends WP_Object_Cache
         @unlink($this->e2e_file);
         return parent::flush();
     }
+
+    // Solange <quelle>/e2e-ctl/nodelete liegt, verweigert der Cache das Löschen von alloptions und der Liste –
+    // still, ohne Ausnahme: wie ein persistenter Cache, der gerade nicht schreibt (Nach-Review NR-3).
+    public function delete($key, $group = 'default', $deprecated = false)
+    {
+        if ($group === 'options' && ($key === 'alloptions' || $key === 'active_plugins') && is_file('/var/www/html/e2e-ctl/nodelete')) {
+            return false;
+        }
+        return parent::delete($key, $group, $deprecated);
+    }
 }
 PHP
 cp "$E2E/object-cache.php" "$WPC/object-cache.php"
 eq "Object-Cache: die Site antwortet mit dem Drop-in und hält ihn für persistent" "$(code "$SOURCE_URL/") $(src wp eval 'echo wp_using_ext_object_cache() ? "ext" : "intern";')" "200 ext"
+# Nach-Review NR-3: der Cache verweigert das Löschen – WordPress lüde weiter die alte Liste, der Health-Check prüfte den
+# falschen Stand. Der Agent liest zurück (plugins_effective: nicht ok), die CLI bestätigt nicht und nimmt zurück.
+code "$SOURCE_URL/" >/dev/null # alloptions liegt im Cache
+src exec touch "$CTL_IN/nodelete"
+jrun stale "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-solo --yes --json
+src exec rm -f "$CTL_IN/nodelete"
+eq "NR-3: der Cache hält die alte Liste – Exit 43 über den Agent" "$RC $(last stale '[.data.status, .data.via] | join(" ")')" "43 rolled_back agent"
+ok "NR-3: der Grund nennt die Rückprüfung" contains "$(last stale '.error.message')" "plugins_effective"
+eq "NR-3: die Liste in der Datenbank ist zurück" "$(active)" "$LIST_PULLED"
+eq "NR-3: die Site antwortet" "$(code "$SOURCE_URL/")" 200
 src exec touch "$CTL_IN/needs"
 jrun cache "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-solo --yes --json
 eq "AC-187: Exit 43 über rescue.php, ohne object_cache_stale" "$RC $(last cache '[.data.via, (.data.warnings // [] | map(select(. == "object_cache_stale" or . == "plugins_not_restored")) | length | tostring)] | join(" ")')" "43 rescue 0"
@@ -669,6 +693,35 @@ jrun s2-c-back2 "$WPSYNC" rollback "$TARGET" "$(last s2-c '.data.push_id')" --js
 eq "S2 Szenario 2: danach die Deaktivierung" "$RC $(last s2-c-back2 '.data.plugins_back.reactivated | join(",")')" "0 plg-solo/plg-solo.php"
 cp -p "$E2E/plg-solo.good" "$LWPC/plugins/plg-solo/plg-solo.php"
 clean "S2 Szenario 2"
+
+echo "== Nach-Review NR-2: eine Kette aus drei Pushes – jeder spätere, der noch steht, sperrt, nicht nur der erste"
+# A tauscht plg-ok und schaltet plg-solo ab; B tauscht plg-ok noch einmal; C nennt plg-solo (schon aus: unchanged).
+jrun k-a "$WPSYNC" push "$TARGET" code --activate plugins/plg-ok --deactivate plugins/plg-solo --yes --json
+cp -p "$LWPC/plugins/plg-ok/inc/teil.php" "$E2E/teil.good"
+printf '\n// e2e: geändert für die Kette\n' >>"$LWPC/plugins/plg-ok/inc/teil.php"
+jrun k-b "$WPSYNC" push "$TARGET" code plugins/plg-ok --yes --json
+jrun k-c "$WPSYNC" push "$TARGET" code --no-code --deactivate plugins/plg-solo --yes --json
+eq "Kette: alle drei bestätigt, C fand plg-solo schon aus" "$(last k-a '.data.status') $(last k-b '.data.status') $(last k-c '.data.status') $(last k-c '.data.plugins.unchanged | join(",")')" "confirmed confirmed confirmed plugins/plg-solo"
+K_A="$(last k-a '.data.push_id')"
+K_B="$(last k-b '.data.push_id')"
+K_C="$(last k-c '.data.push_id')"
+jrun k-a-back1 "$WPSYNC" rollback "$TARGET" "$K_A" --json
+eq "Kette: A ist gesperrt" "$RC" 1
+ok "Kette: genannt wird der späteste Push, der noch steht (C)" contains "$(last k-a-back1 '.error.message')" "$K_C"
+jrun k-b-back "$WPSYNC" rollback "$TARGET" "$K_B" --json
+eq "Kette: B geht zurück" "$RC" 0
+jrun k-a-back2 "$WPSYNC" rollback "$TARGET" "$K_A" --json
+eq "Kette: A bleibt gesperrt, solange C steht – obwohl der vermerkte Nachfolger B zurück ist" "$RC" 1
+ok "Kette: die Meldung nennt C" contains "$(last k-a-back2 '.error.message')" "$K_C"
+ok "Kette: der Stand von A steht noch" sh -c "test -f '$WPC/plugins/plg-ok/plg-ok.php'"
+no "Kette: plg-solo ist weiter aus" is_active plg-solo/plg-solo.php
+jrun k-c-back "$WPSYNC" rollback "$TARGET" "$K_C" --json
+eq "Kette: C geht zurück (es hatte nichts geändert)" "$RC $(last k-c-back '.data.plugins_back.reactivated | length')" "0 0"
+jrun k-a-back3 "$WPSYNC" rollback "$TARGET" "$K_A" --json
+eq "Kette: jetzt geht A zurück" "$RC $(last k-a-back3 '.data.plugins_back | [(.deactivated | join(",")), (.reactivated | join(","))] | join(" ")')" "0 plg-ok/plg-ok.php plg-solo/plg-solo.php"
+cp -p "$E2E/teil.good" "$LWPC/plugins/plg-ok/inc/teil.php"
+sql -e "DELETE FROM ${PREFIX}options WHERE option_name IN ('plg_ok_activated', 'recently_activated')" || true
+clean "Kette"
 
 echo "== Security-Review P4 S6: ein Eintrag mit Klammern im Dateinamen wird geschaltet, zurückgenommen und genannt – in der Ausgabe gequotet"
 # Aktivieren lässt sich eine solche Hauptdatei über einen Push nicht (file_name) – sie steht schon auf der Site.
@@ -741,7 +794,6 @@ echo "SKIP: AC-180 Multisite, MyISAM (engine_unsupported), AC-210 (Kopie schalte
 echo "SKIP: rescue.php stirbt zwischen dem COMMIT der Rücknahme und dem Vermerk in rescue.json (die Wiederholung findet dann „nichts zu tun“, ohne Cache-Schritt): ein Prozess-Tod an genau dieser Stelle ist im E2E nicht herstellbar – bekannte Grenze, README."
 echo "SKIP: Beleg Nr. 1, zweiter Teil (admin-ajax.php der Kopie MIT Zugangs-Cookie antwortet 400): den Cookie holt nur der Health-Check der CLI; belegt ist, dass der Push nach Staging mit dieser Seite im Health-Check durchgeht (Exit 0)."
 echo "SKIP: Security-Review P4 S3 (der Agent unter einem anderen Ordnernamen): den laufenden Agent im E2E umzubenennen, risse Pairing und Arbeitsordner mit – decken PushPluginsTest und PushPluginsBeginTest."
-echo "SKIP: S4 (Object-Cache hält den alten Stand trotz Nacharbeit): bräuchte ein Drop-in, das Löschen verweigert – decken ContentPostActionsTest und TestRunNeverConfirmsAPluginStateWhoseCacheStepFailed."
 echo "SKIP: AC-198, AC-211 (Abnahme mit Borlabs auf vorlage): nach dem Release, Task 26."
 
 echo "== Aufräumen auf der Quelle"
