@@ -721,10 +721,18 @@ final class Push
      */
     private static function contentFailed(ContentException $e, string $content, string $work, string $pushId, $lock = false): \WP_Error
     {
-        // Mit der Sperre des Pushs, soweit sie zu haben ist: kam die Naht nicht mehr dazu (oder lief
-        // gerade rescue.php), tauschen sonst zwei Läufe dieselben Paare zurück.
+        // Mit der Sperre des Pushs: kam die Naht nicht mehr dazu (oder lief gerade rescue.php), tauschen
+        // sonst zwei Läufe dieselben Paare zurück. Wo sich gar nicht sperren lässt (false), wie vor P3.
         if (!is_resource($lock)) {
             $lock = PushRescue::lock($work, $pushId, self::$gateWait ?? self::GATE_SECONDS);
+        }
+        if ($lock === null) {
+            // Die Sperre bleibt belegt: eine Rücknahme dieses Pushs (rescue.php, der Agent) läuft noch. Sie
+            // nimmt Code und Uploads zurück und schliesst den DB-Anteil ab – festgeschrieben wurde hier
+            // nichts. Ohne Sperre daneben den Datensatz zu schreiben, die Paare zu tauschen und den Ordner
+            // zu löschen, wäre genau der Wettlauf, den sie verhindert. Der Push bleibt, wie er ist; schliesst
+            // ihn jene Rücknahme nicht ab, tut es wpsync rollback (Exit 42).
+            return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen; eine Rücknahme dieses Pushs läuft gerade. Bleibt er danach offen: wpsync rollback ' . $pushId . '.', 409);
         }
         try {
             PushRescue::setContent($work, $pushId, PushRescue::CONTENT_DONE);

@@ -82,6 +82,9 @@ sich wie bisher (`content_not_rolled_back`).
   Pushs schon weg ist) und bestätigt nur noch einen Push, der dann weiter unbestätigt ist – sonst
   409 `wpsync_push_state`. Beim Aufräumen eines Pushs schreibt der Agent erst das Protokoll, dann
   löscht er den Ordner
+- Scheitern die Inhalte eines Commits, während eine Rücknahme desselben Pushs die Sperre länger als
+  15 s hält, räumt der Commit nicht mehr ungesperrt daneben auf: er antwortet 409
+  `wpsync_push_pending` (Exit 42), die laufende Rücknahme schliesst den Push ab
 - Der Vermerk „von einem späteren Push überholt“ (`superseded_by`) wird nur noch unter der Sperre
   des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme. Ein Vermerk, dessen
   späterer Push zurückgerollt ist oder nicht mehr existiert, sperrt den älteren nicht mehr

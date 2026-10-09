@@ -67,19 +67,32 @@ final class PushRescueFlowTest extends PushRescueFlowCase
         $old            = $this->liveDb->data;
         $id             = $this->uploaded($this->stage($this->rows()));
         $held           = null;
-        $this->liveDb->beforeLock = function () use ($id, &$held): void {
-            $held = PushRescue::lock($this->work($this->live), $id); // eine Rücknahme läuft gerade
+        $before                   = null;
+        $this->liveDb->beforeLock = function () use ($id, &$held, &$before): void {
+            $held   = PushRescue::lock($this->work($this->live), $id); // eine Rücknahme läuft gerade
+            $before = file_get_contents($this->work($this->live) . '/' . $id . '/rescue.json');
         };
         $started = microtime(true);
         $commit  = Push::commit(['push_id' => $id], self::KEY);
         $this->assertIsResource($held);
         $this->assertGreaterThan(0.2, microtime(true) - $started, 'der Commit hat gewartet');
-        $this->assertRefused('wpsync_content_content_failed', 500, $commit);
         $this->assertSame($old, $this->liveDb->data);
         $this->assertNotContains('commit', $this->liveDb->log);
-        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
-        $this->assertSame('failed', Store::getPush($id)['status']);
+        // Security-Review P3, Runde 2: bleibt die Sperre belegt, räumt der Commit nicht ungesperrt neben
+        // der laufenden Rücknahme auf – weder am Datensatz noch an den Paaren noch am Ordner. Die
+        // Rücknahme, die die Sperre hält, nimmt den Push zurück; bis dahin ist er offen.
+        $error = $this->assertRefused('wpsync_push_pending', 409, $commit);
+        $this->assertStringContainsString('wpsync rollback ' . $id, $error->message);
+        $this->assertSame($before, file_get_contents($this->work($this->live) . '/' . $id . '/rescue.json'), 'rescue.json unberührt');
+        $this->assertSame('new', file_get_contents($this->live . '/plugins/x/main.php'), 'die Paare tauscht nur, wer die Sperre hält');
+        $this->assertSame(['committed', false], [Store::getPush($id)['status'], Store::getPush($id)['pruned']]);
         PushRescue::unlock($held);
+        // Die Rücknahme, die die Sperre hielt (hier: rescue.php danach), schliesst ihn ab – in der Datenbank steht nichts.
+        $this->assertSame([200, ['ok' => true, 'status' => 'rolled_back', 'content' => ['state' => 'nothing']]], $this->rescueDb($id));
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        Push::sync();
+        $this->assertSame('rolled_back', Store::getPush($id)['status']);
+        $this->assertSame($old, $this->liveDb->data);
     }
 
     /** Der gewöhnliche Commit: die Sperre hält bis „applied“ und ist danach frei. */
