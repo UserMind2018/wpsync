@@ -1,7 +1,6 @@
 package agentapi
 
 import (
-	"fmt"
 	"regexp"
 )
 
@@ -36,6 +35,9 @@ type PushBeginRequest struct {
 	// RescueStub asks agent 0.5.1 for rescue.php through a stub in the webroot (Spec Stufe 2, 12).
 	// An older agent ignores it and names rescue.php in its plugin folder.
 	RescueStub bool `json:"rescue_stub,omitempty"`
+	// Content names a package staged before through /content/stage (agent 0.7.0, Spec Content-Push
+	// §7). With it Units may be empty: a push of content alone.
+	Content *PushContentRef `json:"content,omitempty"`
 }
 
 // PushUnitPlan is the agent's view of one unit.
@@ -77,6 +79,9 @@ type PushBegin struct {
 	Pending      *PushPending   `json:"pending"`
 	Units        []PushUnitPlan `json:"units"`
 	Rescue       PushRescue     `json:"rescue"`
+	// Content: the agent's check of the package the request named; nil when it named none – or
+	// when the agent does not know the content channel.
+	Content *ContentPlan `json:"content"`
 }
 
 // PushChunk is a file or a piece of one; Data travels base64-encoded.
@@ -99,6 +104,8 @@ type PushRecordUnit struct {
 	NewVersion string `json:"new_version"`
 	Files      int    `json:"files"`
 	Uploaded   int    `json:"uploaded"`
+	// Extensions: on the unit "content", the project extensions of the package – only if it had any.
+	Extensions *ContentExtensions `json:"extensions,omitempty"`
 }
 
 // PushRecord is one line of the push log. Status: uploading, committed, confirmed, rolled_back,
@@ -124,6 +131,9 @@ func (c *Client) PushBegin(req PushBeginRequest) (*PushBegin, error) {
 	if err := c.PostJSON("/wpsync/v1/push/begin", req, &res); err != nil {
 		return nil, err
 	}
+	if res.Content != nil {
+		res.Content.Clean()
+	}
 	return &res, nil
 }
 
@@ -136,30 +146,39 @@ func (c *Client) PushUpload(pushID string, unit int, chunks []PushChunk) error {
 // PushCommit builds and swaps the units; large units take several requests. It returns the new
 // stamps per unit for the baseline.
 func (c *Client) PushCommit(pushID string) (map[string]map[string]PushStamp, error) {
-	var cursor *pushCursor
-	for {
-		var res struct {
-			Next   *pushCursor                     `json:"next"`
-			Stamps map[string]map[string]PushStamp `json:"stamps"`
-		}
-		if err := c.PostJSON("/wpsync/v1/push/commit", map[string]any{"push_id": pushID, "cursor": cursor}, &res); err != nil {
-			return nil, err
-		}
-		if res.Next == nil {
-			return res.Stamps, nil
-		}
-		// Each call places at least one file; a cursor that does not move would loop forever.
-		if cursor != nil && (res.Next.U < cursor.U || (res.Next.U == cursor.U && res.Next.I <= cursor.I)) {
-			return nil, fmt.Errorf("push commit: agent cursor did not advance (%d/%d)", res.Next.U, res.Next.I)
-		}
-		cursor = res.Next
+	res, err := c.PushCommitFull(pushID)
+	if err != nil {
+		return nil, err
 	}
+	return res.Stamps, nil
 }
 
 // PushConfirm marks a swapped push as healthy.
 func (c *Client) PushConfirm(pushID string) error {
-	var res struct{}
-	return c.PostJSON("/wpsync/v1/push/confirm", map[string]any{"push_id": pushID}, &res)
+	_, _, err := c.PushConfirmState(pushID)
+	return err
+}
+
+// PushConfirmState is PushConfirm and returns how the agent closed the push: "confirmed" – or
+// "rolled_back" with the warning content_kept, when rescue.php had taken code and uploads back
+// and only the content of the push still stands (agent 0.7.0, Spec Content-Push §7.6).
+func (c *Client) PushConfirmState(pushID string) (status string, warnings []string, err error) {
+	var res struct {
+		Status   string   `json:"status"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := c.PostJSON("/wpsync/v1/push/confirm", map[string]any{"push_id": pushID}, &res); err != nil {
+		return "", nil, err
+	}
+	for _, w := range res.Warnings {
+		if warningRe.MatchString(w) && len(warnings) < 10 {
+			warnings = append(warnings, w)
+		}
+	}
+	if res.Status != "rolled_back" {
+		res.Status = "confirmed"
+	}
+	return res.Status, warnings, nil
 }
 
 // RollbackNotes is what a rollback reports beyond its status (agent 0.6.0): warnings such as
@@ -167,6 +186,8 @@ func (c *Client) PushConfirm(pushID string) error {
 type RollbackNotes struct {
 	Warnings []string `json:"warnings"`
 	Kept     []string `json:"kept"`
+	// PostActions: the steps after taking content back (agent 0.7.0, Spec Content-Push §7.7).
+	PostActions []PostAction `json:"post_actions"`
 }
 
 var warningRe = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
@@ -186,6 +207,7 @@ func (n RollbackNotes) Clean() RollbackNotes {
 		}
 		out.Kept = append(out.Kept, k)
 	}
+	out.PostActions = CleanActions(n.PostActions)
 	return out
 }
 
@@ -211,6 +233,13 @@ func (c *Client) PushList() ([]PushRecord, error) {
 	}
 	if err := c.PostJSON("/wpsync/v1/push/list", map[string]any{}, &res); err != nil {
 		return nil, err
+	}
+	for _, r := range res.Pushes {
+		for i := range r.Units {
+			if r.Units[i].Extensions != nil {
+				r.Units[i].Extensions.Clean()
+			}
+		}
 	}
 	return res.Pushes, nil
 }

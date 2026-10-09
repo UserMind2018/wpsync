@@ -11,7 +11,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,8 @@ type Options struct {
 
 	Units              []string // empty: every unit with local changes
 	Uploads            []string // --uploads: new files relative to wp-content/uploads/ (Spec Content-Push §8)
+	Content            string   // --content: file of a content package (Spec Content-Push §7)
+	NoCode             bool     // --no-code: only uploads and content; no unit is scanned or pushed
 	Force              bool     // overwrite although the server changed since the last pull
 	Yes                bool     // do not ask before pushing
 	AllowVersionChange bool     // with Yes: accept a changed plugin or theme version
@@ -96,7 +100,34 @@ type Result struct {
 	// Health names every page that got worse after the swap, when the push was taken back for it
 	// (Spec Content-Push §7.4, S5); omitted otherwise.
 	Health []HealthFinding `json:"health,omitempty"`
+	// PostActions: what the agent did after applying or taking back content, step by step (Spec
+	// Content-Push §7.7); a failed step is no failed push. Omitted without content.
+	PostActions []agentapi.PostAction `json:"post_actions,omitempty"`
+	// Content: what the agent applied of the package – while it stands on the site. Omitted
+	// without content, in a dry run and once the push is rolled back.
+	Content *ContentReport `json:"content,omitempty"`
 }
+
+// ContentReport is the content part of a push that stands: the rows of the package and the
+// seconds the agent took to apply them in its transaction (Spec Content-Push §7.5). The steps
+// after it are Result.PostActions.
+type ContentReport struct {
+	Rows    int     `json:"rows"`
+	Seconds float64 `json:"seconds"`
+}
+
+// WarningContentNotRolledBack: code and uploads of the push are taken back, its content is not –
+// rescue.php knows no database. wpsync rollback <id> takes it back once the agent answers again
+// (Spec Content-Push §7.6).
+const WarningContentNotRolledBack = "content_not_rolled_back"
+
+// WarningContentKept: pushes --confirm closed a push whose code and uploads rescue.php had taken
+// back; its content stays on the site and cannot be taken back any more (Spec Content-Push §7.6).
+const WarningContentKept = "content_kept"
+
+// WarningContentState: the push is live and confirmed, only manifest and baseline of this site
+// folder could not be brought to the new state – the next pull with --content rebuilds them.
+const WarningContentState = "content_state_failed"
 
 // WarningSnapshotFailed: the push (or rollback) is done, baseline and journal are written, only the
 // commit in the internal git failed – as for the pull (Spec Container-Push C3).
@@ -177,6 +208,8 @@ type RolledBackError struct {
 	Reasons    []string // what got worse after the swap
 	StillWorse []string // what is still worse after the rollback; normally empty
 	Warnings   []string // what the rollback reports beyond its status, e.g. upload_changed_since_push
+	// PostActions: the agent's steps after taking the content back; nil through rescue.php.
+	PostActions []agentapi.PostAction
 }
 
 func (e *RolledBackError) Error() string {
@@ -393,7 +426,7 @@ func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) 
 // planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
 // skipped are local units new to the baseline that were not named (U14), missing the units of the
 // baseline that are gone locally and stay on the site (Spec Container-Push C7).
-func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string, up *agentapi.PushUnitPlan) map[string]any {
+func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, missing []string, up *agentapi.PushUnitPlan, ct *agentapi.ContentPlan) map[string]any {
 	list := make([]map[string]any, len(units))
 	for i, u := range units {
 		p := plan.Units[i]
@@ -410,6 +443,18 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, m
 		"skipped_new": append([]string{}, skipped...), "missing_locally": append([]string{}, missing...)}
 	if up != nil { // only with --uploads: plans of pushes without stay as they were
 		ev["uploads"] = map[string]any{"need": nonNil(up.Need), "same": nonNil(up.Same), "conflicts": nonNil(up.Conflicts)}
+	}
+	if ct != nil { // only with --content (Spec Content-Push §10)
+		rows := ct.Rows
+		if rows == nil {
+			rows = map[string]int{}
+		}
+		content := map[string]any{"rows": rows, "conflicts": append([]agentapi.ContentKey{}, ct.Conflicts...), "limits": ct.Limits,
+			"partial": ct.Partial, "unchecked": append([]agentapi.ContentUnchecked{}, ct.Unchecked...), "unchecked_total": ct.UncheckedTotal}
+		if ct.Extensions != nil {
+			content["extensions"] = ct.Extensions
+		}
+		ev["content"] = content
 	}
 	return ev
 }
@@ -466,22 +511,27 @@ func Run(o Options) error {
 	if base.Empty() {
 		return ErrNoBaseline
 	}
-	all, deleted, links, err := scan(docroot, base)
-	if err != nil {
-		return err
-	}
-	if err := namedLinks(docroot, links, o.Units, o.Out); err != nil {
-		return err
-	}
-	units, err := selectUnits(all, o.Units, o.Out)
-	if err != nil {
-		return err
+	// With --no-code no unit is looked at: the set is uploads and content alone.
+	var units []Unit
+	var deleted []string
+	if !o.NoCode {
+		all, gone, links, err := scan(docroot, base)
+		if err != nil {
+			return err
+		}
+		if err := namedLinks(docroot, links, o.Units, o.Out); err != nil {
+			return err
+		}
+		if units, err = selectUnits(all, o.Units, o.Out); err != nil {
+			return err
+		}
+		deleted = gone
 	}
 	for _, unit := range deleted {
 		fmt.Fprintf(o.Out, "  Hinweis: %s fehlt lokal – ein Push löscht nie, auf der Site bleibt es bestehen.\n", unit)
 	}
 	var skipped []string
-	if len(o.Units) == 0 {
+	if len(o.Units) == 0 && !o.NoCode {
 		// Without named units, units missing from the baseline stay local – whether the
 		// site has them or not. They are either stale copies outside the pull profile or
 		// something new that should go out on purpose (U14).
@@ -505,7 +555,18 @@ func Run(o Options) error {
 		}
 		up = &u
 	}
-	if len(units) == 0 && up == nil {
+	// The content comes as a package the caller built (Spec Content-Push §7.1); it is checked here
+	// for its form and against the content state of this site folder, by the agent for the rest.
+	var pkg *Package
+	if o.Content != "" {
+		if pkg, err = LoadPackage(o.Content); err != nil {
+			return err
+		}
+		if err := pkg.CheckSite(siteDir); err != nil {
+			return err
+		}
+	}
+	if len(units) == 0 && up == nil && pkg == nil {
 		if len(skipped) > 0 {
 			return &SkippedNewError{Units: skipped}
 		}
@@ -550,6 +611,15 @@ func Run(o Options) error {
 		report.Units = append(append([]string{}, names...), UploadsUnit)
 		want++
 	}
+	if pkg != nil {
+		// The package lies on the site before the dry run, so that the agent checks all of it –
+		// staging needs no push window and writes nothing a visitor could reach.
+		if err := stagePackage(o, pkg); err != nil {
+			return err
+		}
+		req.Content = &agentapi.PushContentRef{SHA256: pkg.SHA256}
+		report.Units = append(append([]string{}, report.Units...), ContentUnit)
+	}
 
 	plan, err := o.Client.PushBegin(req)
 	if err != nil {
@@ -557,7 +627,10 @@ func Run(o Options) error {
 		if up != nil && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_unit" {
 			return fmt.Errorf("%w: %w", ErrAgentNoUploads, err) // an agent before 0.6.0 refuses the unit
 		}
-		return uploadError(agentError(target, err))
+		if pkg != nil && len(req.Units) == 0 && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_units" {
+			return fmt.Errorf("%w: %w", ErrAgentNoContent, err) // an agent without the channel wants units
+		}
+		return contentError(uploadError(agentError(target, err)))
 	}
 	if !AtLeast(plan.AgentVersion, MinAgent) {
 		return ErrAgentTooOld
@@ -567,6 +640,11 @@ func Run(o Options) error {
 	}
 	if up != nil && !AtLeast(plan.AgentVersion, MinAgentUploads) {
 		return ErrAgentNoUploads
+	}
+	// An agent that knows the content channel answers for the package; the version alone does not
+	// say it (0.7.0 was built with and, before its release, without the channel).
+	if pkg != nil && (plan.Content == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentContentPush)) {
+		return ErrAgentNoContent
 	}
 	if err := answeredFor(target, plan.Target); err != nil {
 		return err
@@ -598,7 +676,10 @@ func Run(o Options) error {
 		printUploads(o.Out, up, upPlan)
 		readonly = readonly || !upPlan.Writable
 	}
-	o.event("plan", planEvent(units, plan, target, skipped, deleted, upPlan))
+	if pkg != nil {
+		printContent(o.Out, pkg, plan.Content)
+	}
+	o.event("plan", planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content))
 	if readonly {
 		return ErrNotWritable
 	}
@@ -609,7 +690,14 @@ func Run(o Options) error {
 	if conflict && !o.Force {
 		return ErrConflict
 	}
-	if len(units) == 0 && len(upPlan.Need) == 0 {
+	// What the agent refuses of the package stops the whole set – there is no --force for content.
+	if pkg != nil && !plan.Content.OK {
+		if plan.Content.Error == nil {
+			return &ContentError{Reason: "content_failed", Message: "der Agent lehnt die Inhalte ohne Grund ab"}
+		}
+		return contentFailure(plan.Content.Error)
+	}
+	if len(units) == 0 && pkg == nil && len(upPlan.Need) == 0 {
 		return ErrUploadsThere // no code, and every upload is there already
 	}
 	if o.DryRun {
@@ -639,7 +727,7 @@ func Run(o Options) error {
 		} else {
 			where = "nach " + where
 		}
-		if !o.Confirm(fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan), where)) {
+		if !o.Confirm(fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan, pkg), where)) {
 			return ErrAborted
 		}
 	}
@@ -647,7 +735,12 @@ func Run(o Options) error {
 	if err := rescueReady(o, plan.Rescue); err != nil {
 		return err
 	}
-	acc, urls, err := o.healthPages(plan.HealthURLs)
+	// With content the published pages it changes are checked too, before and after (Spec §7.4).
+	pages := plan.HealthURLs
+	if pkg != nil {
+		pages = append(append([]string{}, pages...), plan.Content.HealthURLs...)
+	}
+	acc, urls, err := o.healthPages(pages)
 	if err != nil {
 		return err
 	}
@@ -659,7 +752,7 @@ func Run(o Options) error {
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
 	if err != nil {
-		return uploadError(agentError(target, err))
+		return contentError(uploadError(agentError(target, err)))
 	}
 	// Before the first byte travels: the push the agent created must be the one asked for.
 	if err := answeredFor(target, begin.Target); err != nil {
@@ -684,6 +777,9 @@ func Run(o Options) error {
 	journal.Target = target
 	if up != nil {
 		journal.NoteUploads(base, begin.Units[len(units)].Need)
+	}
+	if pkg != nil {
+		journal.Content = &JournalContent{SHA256: pkg.SHA256, Rows: len(pkg.Rows)}
 	}
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
@@ -720,11 +816,13 @@ func Run(o Options) error {
 		o.Client.Ctx = nil // the client outlives this push (rollback, pushes): never leave it cancelled
 		stop()
 	}()
-	stamps, err := o.Client.PushCommit(begin.PushID)
+	committed, err := o.Client.PushCommitFull(begin.PushID)
 	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code != "" {
-			return uploadError(agentError(target, err)) // the agent refused and left the site as it was
+			// The agent refused and left the site as it was – also when the content failed last: it
+			// swapped code and uploads back (Spec Content-Push §7.3).
+			return contentError(uploadError(agentError(target, err)))
 		}
 		report.Status = "committed" // unknown; the worse case
 		if done.Err() != nil {
@@ -734,7 +832,21 @@ func Run(o Options) error {
 		}
 		return fmt.Errorf("der Tausch wurde nicht bestätigt, der Stand ist unklar – prüfen mit: wpsync pushes %s (%w)", o.Site.Name, err)
 	}
+	stamps := committed.Stamps
 	report.Status = "committed"
+	// The answer of the commit is the site's word: an agent that names another number of rows than
+	// the package holds did not apply this package.
+	rowsOff := pkg != nil && committed.Content != nil && committed.Content.Rows != len(pkg.Rows)
+	if committed.Content != nil {
+		report.PostActions = committed.Content.PostActions
+		if rowsOff {
+			fmt.Fprintf(o.Out, "  ! der Agent nennt %d angewandte Zeilen, das Paket hat %d\n", committed.Content.Rows, len(pkg.Rows))
+		} else {
+			report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
+			fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
+		}
+		printActions(o.Out, committed.Content.PostActions)
+	}
 	o.event("commit", map[string]any{"push_id": begin.PushID})
 	fmt.Fprintln(o.Out, "  getauscht – prüfe die Site …")
 
@@ -749,6 +861,12 @@ func Run(o Options) error {
 		worse = []string{"der Health-Check kam nach SIGTERM nicht rechtzeitig zum Ende – ungeprüft wird nicht bestätigt"}
 	}
 	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
+	if pkg != nil && committed.Content == nil && len(worse) == 0 {
+		worse = []string{"der Agent hat die Inhalte des Pushs nicht angewandt"} // never confirm half a set
+	}
+	if rowsOff && len(worse) == 0 {
+		worse = []string{fmt.Sprintf("der Agent nennt %d angewandte Zeilen, das Paket hat %d", committed.Content.Rows, len(pkg.Rows))}
+	}
 	if len(worse) > 0 {
 		report.Health = WorsePages(before, after)
 		return rolledBack(report, rollbackNow(done, o, acc, journal, urls, before, worse))
@@ -781,6 +899,12 @@ func Run(o Options) error {
 		if up != nil {
 			next = strings.TrimSpace(next + " --uploads <liste>")
 		}
+		if pkg != nil {
+			next = strings.TrimSpace(next + " --content <paket>")
+		}
+		if o.NoCode {
+			next = strings.TrimSpace(next + " --no-code")
+		}
 		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
 			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, next)
 		return nil
@@ -791,6 +915,15 @@ func Run(o Options) error {
 		return fmt.Errorf("save baseline: %w", err)
 	}
 	journal.Applied = true
+	if pkg != nil {
+		// Manifest and baseline follow the site: the pushed rows are no local change any more, and
+		// the next package is built against the fingerprints the site has now. A failure here is a
+		// warning – the push is live and confirmed.
+		if err := applyContent(siteDir, journal, pkg, committed.Content.After); err != nil {
+			fmt.Fprintf(o.Out, "  ! Manifest und Baseline liessen sich nicht nachziehen – vor dem nächsten Inhalts-Push: wpsync pull %s --content (%v)\n", o.Site.Name, err)
+			report.Warnings = append(report.Warnings, WarningContentState)
+		}
+	}
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
@@ -991,6 +1124,13 @@ func rolledBack(report *Result, err error) error {
 	if errors.As(err, &rolled) {
 		report.Status = "rolled_back"
 		report.Warnings = append(report.Warnings, rolled.Warnings...)
+		// Through rescue.php the content stays on the site – then it is still what was applied.
+		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
+			report.Content = nil
+		}
+		if rolled.PostActions != nil {
+			report.PostActions = rolled.PostActions
+		}
 	}
 	return err
 }
@@ -1008,14 +1148,42 @@ func stagingPages(siteURL, base string, pages []string) []string {
 	return out
 }
 
-// rollbackNow takes a swapped push back through rescue.php and checks the site again.
+// rollbackNow takes a swapped push back and checks the site again: through rescue.php – or, for a
+// push with content, through the agent first, because only it takes content back (DB → code →
+// uploads, Spec Content-Push §7.6). If the agent does not answer, rescue.php takes code and
+// uploads back and the result says content_not_rolled_back. If the agent answers and refuses (a
+// wpsync code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php
+// is not called: the set stays whole. A push without content goes through rescue.php, always.
 // ctx bounds the check after the rollback; a check cut short by it is left out of the error.
 func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
 		fmt.Fprintf(o.Out, "  ! %s\n", r)
 	}
 	fmt.Fprintln(o.Out, "  rolle zurück …")
-	notes, err := RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt))
+	var notes agentapi.RollbackNotes
+	var err error
+	viaAgent := false
+	if j.Content != nil {
+		var apiErr *agentapi.APIError
+		notes, err = o.Client.PushRollbackNotes(j.PushID)
+		switch {
+		case err == nil:
+			viaAgent = true
+		case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_") && apiErr.Status < 500:
+			// The agent answered and refused – rows changed since the push, or any other reason of
+			// its own. Never around it through rescue.php: that would take back half the set.
+			return fmt.Errorf("ROLLBACK NICHT MÖGLICH – Push %s bleibt ganz bestehen (%s): %w", j.PushID, strings.Join(reasons, "; "), contentError(agentError(j.target(), err)))
+		default:
+			// No answer, a 5xx, or a page that is not the agent's (a firewall, a fatal error).
+			fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php (nur Code und Uploads)")
+		}
+	}
+	if !viaAgent {
+		notes, err = RescueRollbackNotes(o.HTTP, j.RescueURL, j.PushID, RescueKey(o.Secret, j.PushID, j.Salt))
+		if err == nil && j.Content != nil && !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
+			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack) // whatever rescue.php says: it knows no database
+		}
+	}
 	if err != nil {
 		where := "live und die Site"
 		if j.target() == TargetStaging {
@@ -1031,7 +1199,8 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 		still = nil
 	}
 	printKept(o.Out, notes.Kept)
-	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings}
+	printActions(o.Out, notes.PostActions)
+	return &RolledBackError{PushID: j.PushID, Reasons: reasons, StillWorse: still, Warnings: notes.Warnings, PostActions: notes.PostActions}
 }
 
 // showPath returns a local file path for the plan: as is when it is safe to show (umlauts stay

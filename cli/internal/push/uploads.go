@@ -278,14 +278,18 @@ func printKept(out io.Writer, kept []string) {
 }
 
 // pushWhat names what a push brings, for the question before it.
-func pushWhat(units int, up *agentapi.PushUnitPlan) string {
-	switch {
-	case up == nil:
-		return fmt.Sprintf("%d Einheit(en)", units)
-	case units == 0:
-		return fmt.Sprintf("%d neue Upload-Datei(en)", len(up.Need))
+func pushWhat(units int, up *agentapi.PushUnitPlan, pkg *Package) string {
+	var parts []string
+	if units > 0 || (up == nil && pkg == nil) {
+		parts = append(parts, fmt.Sprintf("%d Einheit(en)", units))
 	}
-	return fmt.Sprintf("%d Einheit(en) und %d neue Upload-Datei(en)", units, len(up.Need))
+	if up != nil {
+		parts = append(parts, fmt.Sprintf("%d neue Upload-Datei(en)", len(up.Need)))
+	}
+	if pkg != nil {
+		parts = append(parts, fmt.Sprintf("%d Inhaltszeile(n)", len(pkg.Rows)))
+	}
+	return strings.Join(parts, " und ")
 }
 
 // nonNil returns a copy that is [] in JSON when empty, never null.

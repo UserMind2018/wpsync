@@ -51,6 +51,9 @@ final class Rest
             'files'             => 'files',
             // Inhalts-Manifest (Spec Content-Push §4.2): nur Fingerabdrücke, im Umfang des Pull-Scopes.
             'content/manifest'  => 'contentManifest',
+            // Ablage eines Inhalts-Pakets (Spec Content-Push §7.5). Ohne Push-Fenster: abgelegt ist nicht
+            // angewandt – geschrieben wird erst im Commit eines Pushs, und der braucht das Fenster.
+            'content/stage'     => 'contentStage',
             'push/begin'        => 'pushBegin',
             'push/upload'       => 'pushUpload',
             'push/commit'       => 'pushCommit',
@@ -119,6 +122,22 @@ final class Rest
         );
     }
 
+    /**
+     * Die Antworten des Agents sind JSON. Mit WP_DEBUG und WP_DEBUG_DISPLAY schriebe $wpdb einen
+     * Datenbankfehler samt Abfrage als HTML davor – auch aus Code, den der Agent nur aufruft
+     * (Nacharbeiten, Cache-Plugins): die CLI könnte die Antwort nicht lesen, und in der Abfrage
+     * stehen Werte. Das schaltet nur die Ausgabe ab; ins Fehlerprotokoll schreibt $wpdb weiter – die
+     * Abfragen des Inhaltskanals, die Werte eines Pakets tragen, unterdrücken auch das selbst
+     * (ContentSql::silent()).
+     */
+    private static function quietDatabase(): void
+    {
+        global $wpdb;
+        if (is_object($wpdb) && method_exists($wpdb, 'hide_errors')) {
+            $wpdb->hide_errors();
+        }
+    }
+
     /** @return true|\WP_Error */
     private static function authenticate(\WP_REST_Request $request)
     {
@@ -126,6 +145,7 @@ final class Rest
         if ($tls !== null) {
             return $tls;
         }
+        self::quietDatabase();
         Store::install();
         $keyId  = (string) $request->get_header('x-wpsync-key');
         $secret = preg_match('/^[a-f0-9]{16}\z/', $keyId) ? Store::secretFor($keyId) : null;
@@ -287,6 +307,12 @@ final class Rest
     public static function pushList(): \WP_REST_Response
     {
         return Push::index();
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function contentStage(\WP_REST_Request $request)
+    {
+        return Push::stage(self::json($request), self::$keyId);
     }
 
     /** @return \WP_REST_Response|\WP_Error */

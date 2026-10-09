@@ -82,6 +82,11 @@ type Failure struct {
 	// SkippedNew: with reason nothing_to_push the local units that are new and were not named
 	// (Spec Content-Push §10, S7); left out when there are none.
 	SkippedNew []string `json:"skipped_new,omitempty"`
+	// Keys and Paths: with a refusal of the content of a push (reason conflict, blocked_row,
+	// id_taken, upload_missing, changed_since_push …) the rows as {table, key} and the files
+	// relative to wp-content/uploads/ it is about (Spec Content-Push §10). Never a value.
+	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
+	Paths []string              `json:"paths,omitempty"`
 	// Device and AdminURL: with exit 40 whose push window it is (as far as pair stored it) and
 	// where an administrator opens it (Spec Container-Push C8).
 	Device   string `json:"device,omitempty"`
@@ -145,6 +150,10 @@ func Classify(err error) Failure {
 	if f.Reason == "nothing_to_push" && errors.As(err, &skipped) {
 		f.SkippedNew = append([]string{}, skipped.Units...)
 	}
+	var refused *push.ContentError
+	if errors.As(err, &refused) {
+		f.Keys, f.Paths = refused.Keys, refused.Paths
+	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
 		f.Device, f.AdminURL = window.Device, window.AdminURL
@@ -168,6 +177,11 @@ func reason(err error, exit int) string {
 	code := ""
 	if errors.As(err, &apiErr) {
 		code = apiErr.Code
+	}
+	// The content of a push: the reason is the agent's code (Spec Content-Push §7.2, §7.6).
+	var refused *push.ContentError
+	if errors.As(err, &refused) {
+		return refused.Reason
 	}
 	switch {
 	case errors.Is(err, agentapi.ErrForeignURL):
@@ -228,7 +242,7 @@ func classify(err error) int {
 		return ExitUnknown
 	case errors.Is(err, syscall.ENOSPC):
 		return ExitDiskFull
-	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging), errors.Is(err, push.ErrAgentNoUploads):
+	case errors.As(err, &outdated), errors.Is(err, push.ErrAgentNoStaging), errors.Is(err, push.ErrAgentNoUploads), errors.Is(err, push.ErrAgentNoContent):
 		return ExitAgentOutdated
 	case errors.As(err, &postSetup):
 		return ExitPostSetupFailed

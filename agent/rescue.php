@@ -3,6 +3,8 @@
  * Notfall-Rollback für wpsync push. Lädt kein WordPress und keine Datenbank, damit es auch
  * antwortet, wenn der gepushte Code einen Fatal auslöst. Kennt nur „ping“ und „rollback“ und
  * prüft dafür einen pro Push abgeleiteten Schlüssel gegen dessen Hash (src/PushRescue.php).
+ * Nimmt Code und Uploads zurück, nie Inhalte: hat der Push einen DB-Anteil, meldet die Antwort
+ * warnings: ["content_not_rolled_back"] (Spec Content-Push §7.6).
  */
 define('WPSYNC_RESCUE', true);
 
