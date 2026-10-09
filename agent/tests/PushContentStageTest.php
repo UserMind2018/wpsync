@@ -168,4 +168,25 @@ final class PushContentStageTest extends TestCase
         $this->assertNull(PushContent::taken($push, $sha), 'ein verändertes Paket wird nicht angewandt');
         $this->assertFalse(PushContent::take($staged, $this->work . '/p_20261009_ba9876543210', str_repeat('0', 64)));
     }
+
+    /**
+     * Lesen unter Sperre und Schreiben müssen auf derselben Verbindung landen. Ein Drop-in, das
+     * Abfragen auf mehrere Server verteilt, garantiert das nicht – dort gibt es keinen Inhalts-Push.
+     */
+    public function testADatabaseProxyDropInIsNoTarget(): void
+    {
+        foreach (['hyperdb', 'LudicrousDB'] as $class) {
+            if (!class_exists($class, false)) {
+                eval('class ' . $class . ' {}');
+            }
+            $GLOBALS['wpdb'] = new $class();
+            try {
+                PushContent::target('live', $this->work);
+                $this->fail('no exception');
+            } catch (\WpSync\ContentException $e) {
+                $this->assertSame(\WpSync\ContentException::ENGINE, $e->reason());
+                $this->assertStringContainsString($class, $e->getMessage());
+            }
+        }
+    }
 }

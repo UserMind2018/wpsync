@@ -179,6 +179,13 @@ final class PushContent
         if (self::$resolve !== null) {
             return (self::$resolve)($name, $content);
         }
+        // Lesen unter Sperre und Schreiben müssen auf derselben Verbindung landen. Ein Drop-in, das
+        // Abfragen auf mehrere Server verteilt, garantiert das nicht.
+        foreach (['hyperdb', 'LudicrousDB'] as $proxy) {
+            if (is_object($wpdb) && is_a($wpdb, $proxy)) {
+                throw new ContentException(ContentException::ENGINE, 'Diese Site verteilt Datenbankabfragen über ' . $proxy . ' – Inhalte lassen sich so nicht sicher übertragen.', [], ['tables' => []]);
+            }
+        }
         $home     = rtrim((string) get_option('home'), '/');
         $siteurl  = (string) get_option('siteurl');
         $autoload = version_compare((string) get_bloginfo('version'), '6.6', '>=') ? 'auto' : 'yes'; // S4

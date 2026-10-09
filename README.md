@@ -637,7 +637,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
 | `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
 | `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB) – in mehreren Pushes übertragen |
-| `engine_unsupported` | eine betroffene Tabelle ist nicht InnoDB |
+| `engine_unsupported` | eine betroffene Tabelle ist nicht InnoDB, oder die Site verteilt ihre Datenbankabfragen über HyperDB bzw. LudicrousDB |
 | `list_version_mismatch` | das Paket ist mit einer anderen Version der Listen gebaut als der des Agents |
 | `blocked_row` | die Zeile steht auf der Sperrliste oder nicht auf der Whitelist des Agents; ein Name mit anderen Zeichen als `A–Z a–z 0–9 _ . : -`; auf dem Ziel gibt es denselben Schlüssel in anderer Gross-/Kleinschreibung; ein Attachment nennt eine Datei, die nicht unter `uploads` liegen darf |
 | `unsafe_value` | ein Wert trägt ein serialisiertes Objekt (`O:`, `C:`, `E:` – auch verschachtelt) oder sieht serialisiert aus und lässt sich nicht lesen |
@@ -695,7 +695,10 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
 - **Staging:** dieselben Abdrücke gelten auf der Kopie; der Agent schreibt nur in ihre Tabellen
   und setzt ihre Adressen ein. Nacharbeiten gibt es dort nur, soweit sie sich mit SQL und Dateien
   sagen lassen. `staging refresh` und `staging delete` verwerfen ein dort angewandtes Paket.
-- **Grenzen:** Kein Multisite, nur InnoDB. Benutzer, Kommentare und Plugin-Tabellen pusht der
+- **Grenzen:** Kein Multisite, nur InnoDB, eine Datenbankverbindung: Lesen unter Sperre und
+  Schreiben müssen auf demselben Server landen. Mit Drop-ins, die Abfragen auf mehrere Server
+  verteilen, ist das nicht garantiert – HyperDB und LudicrousDB lehnt der Agent ab
+  (`engine_unsupported`), andere Datenbank-Proxys erkennt er nicht und unterstützt er nicht. Benutzer, Kommentare und Plugin-Tabellen pusht der
   Kanal nie. Eine Rücknahme der Inhalte ohne WordPress gibt es noch nicht (kommt mit 0.8.0).
   Steht die Adresse der Live-Site wörtlich in einem lokalen Wert, lehnt der Agent ihn ab
   (`write_mismatch`).
@@ -911,7 +914,10 @@ abbilden lässt, sofern das Profil sie kopiert.
   in den geschützten Push-Arbeitsordner: höchstens fünf Dateien je Kopplung, je höchstens 16 MB,
   24 Stunden. Dort liegt auch das Vorher-Abbild eines Pushs (`before.json`, Inhalte der Site im
   Klartext) – es wird mit dem Snapshot aufgeräumt. Fehlerantworten nennen Tabelle und
-  Schlüssel, nie einen Wert.
+  Schlüssel, nie einen Wert. Die Transaktion trägt eine Sitzungsmarke: baut WordPress eine
+  verlorene Datenbankverbindung mittendrin neu auf, schreibt keine weitere Anweisung (jede ist an
+  die Marke gebunden), es gibt keinen `COMMIT`, und der Push endet mit `content_failed`. Liess
+  sich dabei eine einzelne Zeile nicht auf ihren Stand davor zurücksetzen, nennt `error.keys` sie.
 - **Inhalts-Manifest:** `/content/manifest` ist signiert wie jeder Request, liest nur und
   braucht kein Push-Fenster. Die Inhalte verlassen den Server dort nur als Fingerabdruck, ohne
   Werte, im Umfang des Pull-Profils (abgewählte Tabellen und Beitragstypen fehlen) und ohne
