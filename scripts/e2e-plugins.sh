@@ -442,6 +442,7 @@ WANT="$(want_add plg-ok/plg-ok.php)"
 rm -f "$WPC/e2e-plg-loaded.log"
 jrun act "$WPSYNC" push "$TARGET" code --activate plugins/plg-ok --yes --json
 eq "aktivieren: Exit 0, bestätigt" "$RC $(last act '.data.status')" "0 confirmed"
+ok "aktivieren: der Plan nennt die Einheit neu – nicht „bleibt auf der Site inaktiv“" sh -c "grep -qF 'plugins/plg-ok – 2 von 2 Dateien zu übertragen (neu)' '$JSON/act.err' && ! grep -F 'plugins/plg-ok –' '$JSON/act.err' | grep -qF 'inaktiv'"
 eq "aktivieren: data.plugins nennt die Einheit" "$(last act '.data.plugins | [(.activated | join(",")), (.deactivated | length), (.skipped | length)] | join(" ")')" "plugins/plg-ok 0 0"
 eq "AC-177: die Liste ist bytegleich zu der, die activate_plugin() schriebe" "$(active)" "$WANT"
 ok "aktivieren: WordPress hält das Plugin für aktiv" src wp plugin is-active plg-ok
@@ -636,6 +637,7 @@ STG_LIST="$(active "$STG_PREFIX")"
 eq "Beleg Nr. 1 (Kopie): admin-ajax.php der Kopie ohne Zugangs-Cookie antwortet 403" "$(code "$STG_URL/wp-admin/admin-ajax.php")" 403
 jrun stg "$WPSYNC" push "$TARGET" code --to staging --activate plugins/plg-ok,plugins/wp-rocket --deactivate plugins/plg-solo --yes --json
 eq "Staging: Exit 0" "$RC $(last stg '.data.target')" "0 staging"
+ok "Staging: der Hinweis für den Push nach Live nennt die Schalter" hasF "$JSON/stg.err" "code plugins/plg-ok plugins/wp-rocket --activate plugins/plg-ok,plugins/wp-rocket --deactivate plugins/plg-solo"
 eq "AC-192: wp-rocket wird in der Kopie nicht aktiviert" "$(last stg '.data.plugins | [(.activated | join(",")), (.skipped | join(","))] | join(" ")')" "plugins/plg-ok plugins/wp-rocket"
 ok "Staging: plg-ok ist in der Kopie aktiv" is_active plg-ok/plg-ok.php "$STG_PREFIX"
 no "Staging: wp-rocket ist in der Kopie nicht aktiv" is_active wp-rocket/wp-rocket.php "$STG_PREFIX"
