@@ -74,6 +74,9 @@ final class PushRescue
     /** Marker im Arbeitsordner: rescue.php hat einen Push zurückgenommen (P3 §8.1). */
     public const PENDING_FILE = 'rescue.pending';
 
+    /** So lange wartet der Cache-Schritt auf die Sperre des Pushs, bevor er ohne Marke antwortet (flushed()). */
+    public const FLUSH_WAIT = 2.0;
+
     /** Antwort von handle() auf action=cache: kein HTTP-Status – rescue.php leert jetzt den Cache und ruft flushed(). */
     public const FLUSH = 0;
 
@@ -387,17 +390,29 @@ final class PushRescue
 
     /**
      * Nach action=cache: rescue.php hat WordPress mit SHORTINIT geladen und wp_cache_flush() gerufen.
+     * Die Marke „flushed“ kommt nur unter der Sperre des Pushs in rescue.json – jedes Schreiben dort
+     * liest und ersetzt den ganzen Datensatz, und der Agent schreibt beim Wiederanlauf denselben
+     * (Push::sync()). Ist die Sperre nicht zu haben, ist der Cache trotzdem geleert: die Antwort
+     * bleibt, die Marke fehlt, und ein weiterer Aufruf leerte ihn höchstens noch einmal.
      *
+     * @param float $wait so lange wartet der Schritt auf die Sperre
      * @return array{0: int, 1: array<string, mixed>}
      */
-    public static function flushed(string $workDir, string $pushId, bool $ok): array
+    public static function flushed(string $workDir, string $pushId, bool $ok, float $wait = self::FLUSH_WAIT): array
     {
         if (!$ok) {
             return [500, ['ok' => false, 'error' => 'cache failed']];
         }
-        $record = self::read($workDir, $pushId);
-        if ($record !== null && is_array($record['content'] ?? null) && ($record['content']['cache'] ?? '') === self::CACHE_STALE) {
-            self::setContentFields($workDir, $pushId, ['cache' => self::CACHE_FLUSHED]);
+        $lock = self::lock($workDir, $pushId, $wait);
+        if (is_resource($lock)) {
+            try {
+                $record = self::read($workDir, $pushId);
+                if ($record !== null && is_array($record['content'] ?? null) && ($record['content']['cache'] ?? '') === self::CACHE_STALE) {
+                    self::setContentFields($workDir, $pushId, ['cache' => self::CACHE_FLUSHED]);
+                }
+            } finally {
+                self::unlock($lock);
+            }
         }
         return [200, ['ok' => true, 'cache' => self::CACHE_FLUSHED]];
     }

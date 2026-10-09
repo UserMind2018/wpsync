@@ -965,11 +965,13 @@ final class Push
     /**
      * Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. Hat
      * rescue.php dabei auch die Inhalte zurückgenommen, laufen hier die Nacharbeiten, die ohne
-     * WordPress nicht gingen (Spec Content-Push P3 §8.2).
+     * WordPress nicht gingen (Spec Content-Push P3 §8.2). Jeder Push unter seiner Sperre: was sync()
+     * in rescue.json schreibt (post = done), schreibt es nie neben einem anderen Lauf.
      */
     public static function sync(): void
     {
         $name = Store::pushDirName();
+        $busy = []; // Ziel → true: ein Push dort war gerade gesperrt
         foreach (Store::pushes(50) as $push) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 continue;
@@ -983,12 +985,29 @@ final class Push
                 }
                 continue;
             }
-            $record = PushRescue::read($content . '/' . $name, $push['push_id']);
+            $work   = $content . '/' . $name;
+            $record = PushRescue::read($work, $push['push_id']);
             // Hat rescue.php nur Code und Uploads zurückgenommen, stehen die Inhalte noch (§7.6): der
             // Push bleibt offen, sein Vorher-Abbild liegen – wpsync rollback holt sie über den Agent nach.
-            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
-                self::afterRescue($push, $content, $content . '/' . $name, $record);
-                self::finishRollback($push['push_id']);
+            if ($record === null || $record['status'] !== PushRescue::ROLLED_BACK || PushRescue::contentOpen($record)) {
+                continue;
+            }
+            // Übernommen wird nur unter der Sperre des Pushs: rescue.php und sein Cache-Schritt schreiben
+            // denselben Datensatz. Hält sie ein anderer Lauf, bleibt der Push für diesmal, wie er ist.
+            // Wo sich nicht sperren lässt (false), nimmt rescue.php keine Inhalte zurück – wie vor P3.
+            $lock = PushRescue::lock($work, $push['push_id']);
+            if ($lock === null) {
+                $busy[$push['target']] = true;
+                continue;
+            }
+            try {
+                $record = PushRescue::read($work, $push['push_id']); // unter der Sperre noch einmal
+                if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
+                    self::afterRescue($push, $content, $work, $record);
+                    self::finishRollback($push['push_id']);
+                }
+            } finally {
+                PushRescue::unlock($lock);
             }
         }
         // Die Marker beider Ziele haben ausgedient – nur wenn die Liste oben wirklich gelesen wurde.
@@ -998,7 +1017,16 @@ final class Push
         foreach (self::TARGETS as $target) {
             $content = self::content($target);
             $marker  = PushRescue::pendingFile($content . '/' . $name);
-            if ($content !== '' && is_file($marker) && !is_link($marker)) {
+            if ($content === '' || is_link($marker)) {
+                continue;
+            }
+            if (isset($busy[$target])) {
+                // Ein Push dieses Ziels war gesperrt: der Marker bleibt (oder liegt wieder – catchUp() nimmt
+                // ihn vorher weg), damit der nächste Seitenaufruf es noch einmal versucht.
+                if (is_dir($content . '/' . $name)) {
+                    @touch($marker);
+                }
+            } elseif (is_file($marker)) {
                 @unlink($marker);
             }
         }

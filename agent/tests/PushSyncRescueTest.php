@@ -111,6 +111,38 @@ final class PushSyncRescueTest extends PushRescueFlowCase
         $this->assertSame('rescue', $this->contentUnit($id)['via']);
     }
 
+    /**
+     * Security-Review P3, N5: der Agent übernimmt eine Rücknahme von rescue.php nur unter der Sperre
+     * des Pushs. Hält sie ein anderer Lauf (rescue.php, sein Cache-Schritt), fasst sync() weder
+     * rescue.json noch den Arbeitsordner an – und der Marker liegt wieder, damit der nächste
+     * Seitenaufruf es nachholt.
+     */
+    public function testSyncLeavesAPushAloneWhileAnotherRunHoldsItsLock(): void
+    {
+        $id = $this->pushed();
+        $this->rescued($id);
+        $file   = $this->work($this->live) . '/' . $id . '/rescue.json';
+        $before = file_get_contents($file);
+        $held   = PushRescue::lock($this->work($this->live), $id);
+        $this->assertIsResource($held);
+
+        Push::catchUp();
+
+        $this->assertSame($before, file_get_contents($file), 'nichts geschrieben');
+        $this->assertSame([], $GLOBALS['wpsync_post_actions'], 'keine Nacharbeiten');
+        $this->assertSame(['committed', false], [Store::getPush($id)['status'], Store::getPush($id)['pruned']]);
+        $this->assertFileExists($this->marker($this->live), 'der nächste Seitenaufruf versucht es wieder');
+        Push::sync();
+        $this->assertSame($before, file_get_contents($file));
+        $this->assertFileExists($this->marker($this->live));
+
+        PushRescue::unlock($held);
+        Push::catchUp();
+        $this->assertSame(['rolled_back', true], [Store::getPush($id)['status'], Store::getPush($id)['pruned']]);
+        $this->assertSame([true, true, true], array_column($this->contentUnit($id)['post_actions'], 'ok'));
+        $this->assertFileDoesNotExist($this->marker($this->live));
+    }
+
     public function testInitIsHookedEarly(): void
     {
         $this->assertStringContainsString("add_action('init', [self::class, 'catchUp'], 1);", (string) file_get_contents(__DIR__ . '/../src/Push.php'));

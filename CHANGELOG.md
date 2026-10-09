@@ -83,6 +83,9 @@ sich wie bisher (`content_not_rolled_back`).
 - Lässt sich ein Push nicht sperren (kein `flock`), schliesst `rescue.php` seinen DB-Anteil nie
   ab – auch nicht, wenn noch kein Vorher-Abbild liegt: `content_error.code:
   "rescue_db_unavailable"`, Code und Uploads gehen wie bisher zurück
+- Der Cache-Schritt von `rescue.php` (`cache: "flushed"`) und der Agent beim Wiederanlauf
+  (`post_actions`) schreiben ihren Vermerk nur noch unter der Sperre des Pushs in `rescue.json`;
+  ist der Push gerade gesperrt, holt der Agent die Nacharbeiten beim nächsten Seitenaufruf nach
 - Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
   (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
 

@@ -644,6 +644,32 @@ final class PushRescueDbTest extends ContentApplyCase
         $this->assertDirectoryDoesNotExist($this->work . '/' . self::ID);
     }
 
+    /**
+     * Security-Review P3, N5: die Marke „flushed“ schreibt der Cache-Schritt nur unter der Sperre des
+     * Pushs. Hält sie ein anderer Lauf (eine Rücknahme, der Agent beim Wiederanlauf), ist der Cache
+     * zwar geleert, rescue.json bleibt aber unberührt – zwei Läufe überschreiben sich nie.
+     */
+    public function testTheCacheMarkIsOnlyWrittenUnderTheLock(): void
+    {
+        $this->applied();
+        file_put_contents($this->content . '/object-cache.php', '<?php');
+        $this->assertSame('stale', $this->rescue()[1]['content']['cache']);
+        $before = file_get_contents(PushRescue::file($this->work, self::ID));
+
+        $held = PushRescue::lock($this->work, self::ID);
+        $this->assertIsResource($held);
+        $this->assertSame([200, ['ok' => true, 'cache' => 'flushed']], PushRescue::flushed($this->work, self::ID, true, 0.0), 'geleert ist er');
+        $this->assertSame($before, file_get_contents(PushRescue::file($this->work, self::ID)), 'ohne Sperre kein Schreiben');
+        PushRescue::unlock($held);
+
+        $this->assertSame([200, ['ok' => true, 'cache' => 'flushed']], PushRescue::flushed($this->work, self::ID, true, 0.0));
+        $this->assertSame('flushed', $this->record()['content']['cache']);
+        // Nach dem Lauf ist die Sperre wieder frei.
+        $again = PushRescue::lock($this->work, self::ID);
+        $this->assertIsResource($again);
+        PushRescue::unlock($again);
+    }
+
     public function testNoCacheStepWithoutContentOrForACopy(): void
     {
         // Ein Push ohne DB-Anteil.
