@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -181,6 +182,16 @@ func TestRunPushesContentAlone(t *testing.T) {
 	if !reflect.DeepEqual(report.Units, []string{ContentUnit}) || report.Status != "confirmed" ||
 		!reflect.DeepEqual(report.PostActions, []agentapi.PostAction{{Step: "object_cache", OK: true}}) {
 		t.Errorf("report = %+v", report)
+	}
+	// D14: how many rows the agent applied and how long that took – for people and for --json.
+	if report.Content == nil || report.Content.Rows != len(f.stagedRows(sha)) || report.Content.Rows == 0 || report.Content.Seconds != 0.1 {
+		t.Errorf("report.Content = %+v", report.Content)
+	}
+	if data, _ := json.Marshal(report); !strings.Contains(string(data), fmt.Sprintf(`"content":{"rows":%d,"seconds":0.1}`, report.Content.Rows)) {
+		t.Errorf("json = %s", data)
+	}
+	if want := fmt.Sprintf("Inhalte: %d Zeilen in 0.1 s angewandt", report.Content.Rows); !strings.Contains(out.String(), want) {
+		t.Errorf("output misses %q:\n%s", want, out)
 	}
 	manifest, baseline := contentFile(t, siteDir, "manifest.jsonl"), contentFile(t, siteDir, "baseline.jsonl")
 	for _, want := range []string{
@@ -371,6 +382,9 @@ func TestRunTakesContentBackThroughTheAgent(t *testing.T) {
 	if report.Status != "rolled_back" || len(report.Warnings) != 0 || len(report.PostActions) != 2 || report.PostActions[1].OK {
 		t.Errorf("report = %+v", report)
 	}
+	if report.Content != nil {
+		t.Errorf("content that was taken back is not applied: %+v", report.Content)
+	}
 	if contentFile(t, siteDir, "manifest.jsonl") != manifestBefore || contentFile(t, siteDir, "baseline.jsonl") != baselineBefore {
 		t.Error("a rolled back push must leave manifest and baseline alone")
 	}
@@ -394,6 +408,9 @@ func TestRunFallsBackToRescueAndNamesTheContent(t *testing.T) {
 	}
 	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback rescue") {
 		t.Errorf("routes = %s", got)
+	}
+	if report.Content == nil || report.Content.Rows == 0 {
+		t.Errorf("the content still stands on the site: report.Content = %+v", report.Content)
 	}
 	if report.Status != "rolled_back" || !reflect.DeepEqual(report.Warnings, []string{WarningContentNotRolledBack}) {
 		t.Errorf("report = %+v", report)

@@ -16,7 +16,8 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   und `_wp_desired_post_slug`; `trash` darf `row` mit genau `post_date` und `post_date_gmt`
   tragen – das Datum, das WordPress einem nie veröffentlichten Entwurf beim Verschieben gibt),
   transaktional angewandt als letzter Schritt des Commits (Uploads → Code → Inhalte), mit
-  Vorher-Abbild, Nacharbeiten (`data.post_actions`) und Health-Check der geänderten Seiten.
+  Vorher-Abbild, Nacharbeiten (`data.post_actions`), Messwert (`data.content: {rows, seconds}`)
+  und Health-Check der geänderten Seiten.
   `--dry-run` prüft das ganze Paket ohne Push-Fenster; das `plan`-Ereignis nennt
   `content: {rows, conflicts, limits}`. Auch nach `--to staging`
 - `--no-code`: ein Satz nur aus `--uploads` und `--content`

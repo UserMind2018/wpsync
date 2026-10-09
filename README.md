@@ -688,6 +688,9 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
 - **Was der Agent selbst setzt:** `post_modified` (Zeit des Pushs), bei neuen Beiträgen
   `post_author` (wer das Push-Fenster geöffnet hat) und `guid`, bei neuen Optionen `autoload`.
   `post_author` und `guid` bestehender Beiträge bleiben.
+- **Messwert** (`data.content: {"rows","seconds"}`): Zeilen des Pakets und die Sekunden, die der
+  Agent für das Anwenden in seiner Transaktion gebraucht hat; ohne `--json` die Zeile „Inhalte:
+  N Zeilen in X s angewandt“. Fehlt im Probelauf und sobald die Inhalte zurückgenommen sind.
 - **Nacharbeiten** (`data.post_actions: [{"step","ok"}]`): Object-Cache der betroffenen Objekte,
   Elementor-CSS, Yoast-Indexables, bekannte Cache-Plugins (WP Rocket, W3 Total Cache, LiteSpeed,
   SG Optimizer, Breeze), Rewrite-Regeln bei Bedarf, Term-Zähler, eine Revision je geänderter

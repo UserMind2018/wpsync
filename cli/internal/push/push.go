@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +103,17 @@ type Result struct {
 	// PostActions: what the agent did after applying or taking back content, step by step (Spec
 	// Content-Push §7.7); a failed step is no failed push. Omitted without content.
 	PostActions []agentapi.PostAction `json:"post_actions,omitempty"`
+	// Content: what the agent applied of the package – while it stands on the site. Omitted
+	// without content, in a dry run and once the push is rolled back.
+	Content *ContentReport `json:"content,omitempty"`
+}
+
+// ContentReport is the content part of a push that stands: the rows of the package and the
+// seconds the agent took to apply them in its transaction (Spec Content-Push §7.5). The steps
+// after it are Result.PostActions.
+type ContentReport struct {
+	Rows    int     `json:"rows"`
+	Seconds float64 `json:"seconds"`
 }
 
 // WarningContentNotRolledBack: code and uploads of the push are taken back, its content is not –
@@ -819,6 +831,8 @@ func Run(o Options) error {
 	report.Status = "committed"
 	if committed.Content != nil {
 		report.PostActions = committed.Content.PostActions
+		report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
+		fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
 		printActions(o.Out, committed.Content.PostActions)
 	}
 	o.event("commit", map[string]any{"push_id": begin.PushID})
@@ -1095,6 +1109,10 @@ func rolledBack(report *Result, err error) error {
 	if errors.As(err, &rolled) {
 		report.Status = "rolled_back"
 		report.Warnings = append(report.Warnings, rolled.Warnings...)
+		// Through rescue.php the content stays on the site – then it is still what was applied.
+		if !slices.Contains(report.Warnings, WarningContentNotRolledBack) {
+			report.Content = nil
+		}
 		if rolled.PostActions != nil {
 			report.PostActions = rolled.PostActions
 		}
