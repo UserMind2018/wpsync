@@ -710,6 +710,11 @@ final class Push
             $actions = [];
             $record  = PushRescue::read($dirs[1], $pushId);
             if ($record !== null && PushRescue::contentOpen($record)) {
+                // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
+                // und der Code bliebe stehen.
+                if ($record['status'] !== PushRescue::ROLLED_BACK && $record['superseded_by'] !== null) {
+                    return self::error('wpsync_push_rollback', self::superseded((string) $record['superseded_by']), 409);
+                }
                 try {
                     $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
                 } catch (ContentException $e) {
@@ -721,7 +726,7 @@ final class Push
             list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
             if ($status !== 200) {
                 $why = ($body['error'] ?? '') === 'superseded'
-                    ? 'Zuerst den späteren Push ' . ($body['by'] ?? '') . ' zurückrollen.'
+                    ? self::superseded((string) ($body['by'] ?? ''))
                     : 'Rollback fehlgeschlagen: ' . ($body['error'] ?? 'unbekannt');
                 return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
             }
@@ -739,6 +744,11 @@ final class Push
             return new \WP_REST_Response($answer);
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
+    }
+
+    private static function superseded(string $by): string
+    {
+        return 'Zuerst den späteren Push ' . $by . ' zurückrollen.';
     }
 
     /** @return \WP_REST_Response */

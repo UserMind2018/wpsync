@@ -641,4 +641,41 @@ final class PushContentFlowTest extends TestCase
         $this->assertSame('stg-old', file_get_contents($this->staging . '/plugins/x/main.php'));
         $this->assertSame([], $this->liveDb->log);
     }
+
+    /**
+     * §7.6: der Satz bleibt ganz. Lässt sich der Code nicht zurücknehmen, weil ein späterer Push
+     * dieselbe Einheit getauscht hat, bleiben auch die Inhalte stehen – geprüft, bevor die Datenbank
+     * etwas zurücknimmt.
+     */
+    public function testASupersededPushKeepsItsContentToo(): void
+    {
+        $old                 = $this->liveDb->data;
+        list($first, $commit) = $this->push($this->stage($this->rows()), 'new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        Push::confirm(['push_id' => $first], self::KEY);
+        list($second, $commit) = $this->push(null, 'newer');
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        Push::confirm(['push_id' => $second], self::KEY);
+        $pushed                         = $this->liveDb->data;
+        $this->liveDb->log              = [];
+        $GLOBALS['wpsync_post_actions'] = [];
+
+        $error = $this->assertRefused('wpsync_push_rollback', 409, Push::rollback(['push_id' => $first], self::KEY));
+        $this->assertStringContainsString($second, $error->message);
+        $this->assertSame($pushed, $this->liveDb->data, 'die Inhalte stehen noch');
+        $this->assertSame([], $this->liveDb->log, 'keine Transaktion, kein Schreiben');
+        $this->assertSame([], $GLOBALS['wpsync_post_actions']);
+        $this->assertSame('applied', $this->rescue($this->live, $first)['content']['state']);
+        $this->assertSame('newer', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertSame('confirmed', Store::getPush($first)['status']);
+
+        // Ist der spätere Push zurück, geht der Satz ganz.
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::rollback(['push_id' => $second], self::KEY));
+        $back = Push::rollback(['push_id' => $first], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $back, $back instanceof \WP_Error ? $back->code . ' ' . $back->message : '');
+        ksort($old['postmeta']);
+        ksort($this->liveDb->data['postmeta']);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+    }
 }
