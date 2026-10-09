@@ -108,9 +108,21 @@ final class ContentApply
                 if ($current === null || ($current['post_status'] ?? '') === 'trash') {
                     continue; // liegt schon im Papierkorb: nichts zu schreiben
                 }
-                $byTable['posts'][]    = ['posts', $key, array_merge($current, ['post_status' => 'trash'], $modified)];
-                $byTable['postmeta'][] = ['postmeta', Canon::pairKey($key, '_wp_trash_meta_status'), ['values' => [(string) $current['post_status']]]];
-                $byTable['postmeta'][] = ['postmeta', Canon::pairKey($key, '_wp_trash_meta_time'), ['values' => [(string) $now]]];
+                // Wie wp_trash_post() und wp_insert_post(): Status, __trashed am Namen, der alte Name in
+                // _wp_desired_post_slug, Status und Zeit des Papierkorbs. add_post_meta() hängt an, es ersetzt nicht.
+                $meta = ['_wp_trash_meta_status' => (string) $current['post_status'], '_wp_trash_meta_time' => (string) $now];
+                $name = (string) ($current['post_name'] ?? '');
+                $row  = ['post_status' => 'trash'];
+                if (substr($name, -9) !== '__trashed') {
+                    $meta['_wp_desired_post_slug'] = $name;
+                    $row['post_name']              = self::trashedName($name, $key, $current, $target);
+                }
+                $byTable['posts'][] = ['posts', $key, array_merge($current, $row, $modified)];
+                foreach ($meta as $metaKey => $value) {
+                    $pair                  = Canon::pairKey($key, $metaKey);
+                    $have                  = (array) (($check->state('postmeta')[$pair] ?? [])['values'] ?? []);
+                    $byTable['postmeta'][] = ['postmeta', $pair, ['values' => array_merge($have, [$value])]];
+                }
                 continue;
             }
             $values = (array) $check->value($table, $key);
@@ -134,6 +146,22 @@ final class ContentApply
             $byTable[$table][] = [$table, $key, $current === null ? $values : array_merge($current, $values)];
         }
         return array_merge(...array_values($byTable));
+    }
+
+    /**
+     * post_name eines Beitrags im Papierkorb, wie wp_add_trashed_suffix_to_post_name_for_post():
+     * _truncate_post_slug( $name, 191 ) . '__trashed', danach – auf Live – wp_unique_post_slug().
+     *
+     * @param array<string, mixed> $current die Zeile des Beitrags
+     */
+    private static function trashedName(string $name, string $id, array $current, ContentTarget $target): string
+    {
+        if (strlen($name) > 191) {
+            $decoded = urldecode($name);
+            $name    = $decoded === $name || !function_exists('utf8_uri_encode') ? substr($name, 0, 191) : (string) utf8_uri_encode($decoded, 191, true);
+        }
+        $name = rtrim($name, '-') . '__trashed';
+        return $target->slug === null ? $name : (string) ($target->slug)($name, $id, (string) ($current['post_type'] ?? ''), (string) ($current['post_parent'] ?? '0'));
     }
 
     /** guid eines neuen Beitrags (§7.3): bei Attachments die Adresse der Datei, sonst <ziel>/?p=<ID>. */

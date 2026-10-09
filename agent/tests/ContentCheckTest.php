@@ -127,7 +127,7 @@ final class ContentCheckTest extends TestCase
         $this->store->transaction(static function () use ($check): void {
             $check->run([], true);
         });
-        foreach (['posts:219', 'posts:1000001', "postmeta:219\0_neu", 'posts:220', "postmeta:220\0_wp_trash_meta_status", "postmeta:220\0_wp_trash_meta_time"] as $key) {
+        foreach (['posts:219', 'posts:1000001', "postmeta:219\0_neu", 'posts:220', "postmeta:220\0_wp_trash_meta_status", "postmeta:220\0_wp_trash_meta_time", "postmeta:220\0_wp_desired_post_slug"] as $key) {
             $this->assertContains($key, $this->store->locked);
         }
     }

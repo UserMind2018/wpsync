@@ -17,6 +17,8 @@ final class ContentPackage
     public const MAX_BYTES = 8388608;
     /** So viel nimmt /content/stage an – darüber gibt es keinen Probelauf mehr, nur die Ablehnung. */
     public const STAGE_BYTES = 16777216;
+    /** Meta, die op trash am Beitrag schreibt – wie wp_trash_post() und wp_add_trashed_suffix_to_post_name_for_post(). */
+    public const TRASH_META = ['_wp_trash_meta_status', '_wp_trash_meta_time', '_wp_desired_post_slug'];
     /** Länge der Kopfzeile. */
     private const HEAD_BYTES = 65536;
 
@@ -81,8 +83,9 @@ final class ContentPackage
                 );
             }
             $hash = hash_init('sha256');
-            $rows = [];
-            $seen = [];
+            $rows    = [];
+            $seen    = [];
+            $trashed = [];
             while (($line = fgets($handle)) !== false) {
                 hash_update($hash, $line);
                 if (substr($line, -1) !== "\n" || substr($line, -2, 1) === "\r") {
@@ -98,9 +101,22 @@ final class ContentPackage
                 }
                 $seen[$id] = true;
                 $rows[]    = $row;
+                if ($row['op'] === 'trash') {
+                    $trashed[$row['key']] = true;
+                }
             }
             if (count($rows) !== $head['rows']) {
                 throw self::invalid('Das Paket hat weniger Zeilen, als der Kopf nennt.');
+            }
+            // Was der Papierkorb an einem Beitrag hinterlässt, schreibt der Agent selbst (wie wp_trash_post()).
+            foreach ($rows as $n => $row) {
+                if ($row['table'] !== 'postmeta') {
+                    continue;
+                }
+                list($object, $name) = ContentState::split($row['key']);
+                if (in_array($name, self::TRASH_META, true) && isset($trashed[$object])) {
+                    throw self::invalid('Zeile ' . ($n + 1) . ': ' . $name . ' eines Beitrags mit op trash setzt der Agent selbst – die Zeile gehört nicht ins Paket (Papierkorb).');
+                }
             }
             if (!hash_equals($head['sha256'], hash_final($hash))) {
                 throw self::invalid('Die Prüfsumme des Pakets stimmt nicht.');

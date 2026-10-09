@@ -98,7 +98,10 @@ seal() {
 }
 # pkg <name> [jq-Bedingung über .t und .k]: baut das Paket aus dem Export der Arbeitskopie gegen
 # die Baseline – update, insert, trash und gelöschte Paare; expected kommt aus dem Manifest.
-# Nur pushbare Zeilen (p), wie das Studio. Liefert die Zahl der Zeilen in ROWS.
+# Nur pushbare Zeilen (p), wie das Studio. Für einen Beitrag, der lokal in den Papierkorb ging,
+# entsteht nur die Zeile trash: was der Papierkorb an ihm hinterlässt (__trashed am Namen,
+# _wp_desired_post_slug, _wp_trash_meta_*), schreibt der Agent selbst – solche Meta-Zeilen im
+# Paket wären package_invalid. Liefert die Zahl der Zeilen in ROWS.
 pkg() {
   local name="$1" only="${2:-true}"
   "$WPSYNC" content export "$TARGET" >"$PKG/$name.export" 2>"$PKG/$name.export.err" </dev/null || fail "content export für $name (siehe $PKG/$name.export.err)"
@@ -109,8 +112,11 @@ pkg() {
     | ($m | map(select(.t != null) | {key: id, value: .h}) | from_entries) as $M
     | ($e | map(select(.t != null) | {key: id, value: true}) | from_entries) as $E
     | ($e | map(select(.t == "posts") | {key: .k, value: true}) | from_entries) as $posts
+    | ($e | map(select(.t == "posts" and status == "trash") | select($B[id] != null and ($B[id] | status) != "trash") | {key: .k, value: true}) | from_entries) as $trashed
     | (
         $e[] | select(.t != null and .p == true and .h != null) | select('"$only"')
+        | select((.t == "postmeta" and ((.k | split("\u0000")) as $pair | $trashed[$pair[0]] == true
+            and (["_wp_trash_meta_status", "_wp_trash_meta_time", "_wp_desired_post_slug"] | index($pair[1])) != null)) | not)
         | . as $x | $B[id] as $old
         | if $old == null then {op: "insert", table: .t, key: .k, expected: "absent", row: .row}
           elif $old.h == .h then empty
@@ -411,6 +417,7 @@ ok "die neue Seite liegt im Korridor" test "$NEW_ID" -gt 1000000
 tgt wp eval "update_post_meta($NEW_ID, '_wp_page_template', 'default'); wp_set_object_terms($NEW_ID, [$(jq -r '.cat' <<<"$IDS")], 'category'); wp_trash_post($DRAFT);" --skip-plugins --skip-themes
 pkg neu "(.k | split(\"\u0000\")[0]) as \$o | \$o == \"$NEW_ID\" or \$o == \"$DRAFT\""
 eq "Paket neu: insert des Beitrags, seiner Meta, der Zuordnung und trash" "$(jq -r '.op + ":" + .table' "$PKG/neu.body" | LC_ALL=C sort -u | paste -sd' ' -)" "insert:postmeta insert:posts insert:term_relationships trash:posts"
+eq "Paket neu: für den Entwurf nur die Zeile trash, keine Meta des Papierkorbs" "$(jq -r --arg d "$DRAFT" 'select(.key | split("\u0000")[0] == $d) | .op + ":" + .table' "$PKG/neu.body" | paste -sd' ' -)" "trash:posts"
 push_content push-neu neu --yes
 eq "Neu: Exit 0" "$RC" 0
 cat "$JSON/push-neu.err"
@@ -423,15 +430,20 @@ eq "Neu: Zuordnung zur Kategorie" "$(src mysql -N -e "SELECT COUNT(*) FROM ${PRE
 eq "Neu: die Seite antwortet unter ihrer Adresse" "$(code "$SOURCE_URL/e2e-neu/")" 200
 eq "Papierkorb: Status" "$(post src "$DRAFT" post_status)" "trash"
 eq "Papierkorb: der Agent schreibt die Papierkorb-Meta (W8)" "$(meta src "$DRAFT" _wp_trash_meta_status)" "draft"
+eq "Papierkorb: __trashed am Namen wie in WordPress" "$(post src "$DRAFT" post_name)" "$(post tgt "$DRAFT" post_name)"
+eq "Papierkorb: der alte Name in _wp_desired_post_slug" "$(meta src "$DRAFT" _wp_desired_post_slug)" "e2e-entwurf"
 jrun rollback-neu "$WPSYNC" rollback "$TARGET" "$PUSH_NEU" --json
 eq "AC-153 Rücknahme: Exit 0" "$RC" 0
 eq "AC-153: die neue Seite ist samt Meta und Zuordnung wieder weg" \
   "$(src mysql -N -e "SELECT (SELECT COUNT(*) FROM ${PREFIX}posts WHERE ID = $NEW_ID) + (SELECT COUNT(*) FROM ${PREFIX}postmeta WHERE post_id = $NEW_ID) + (SELECT COUNT(*) FROM ${PREFIX}term_relationships WHERE object_id = $NEW_ID)")" 0
 eq "AC-153: der Entwurf ist aus dem Papierkorb zurück" "$(post src "$DRAFT" post_status)" "draft"
-eq "AC-153: die Papierkorb-Meta sind wieder weg" "$(meta src "$DRAFT" _wp_trash_meta_status)" ""
+eq "AC-153: die Papierkorb-Meta sind wieder weg" "$(meta src "$DRAFT" _wp_trash_meta_status)$(meta src "$DRAFT" _wp_desired_post_slug)" ""
+eq "AC-153: der Name ist wieder der alte" "$(post src "$DRAFT" post_name)" "e2e-entwurf"
 # Noch einmal nach Live – dieselben Abdrücke gelten wieder – und dort mit WordPress selbst wiederherstellen.
 push_content push-neu2 neu --yes
 eq "Neu (zweiter Push desselben Pakets): Exit 0" "$RC" 0
+pkg nach-papierkorb "(.k | split(\"\u0000\")[0]) == \"$DRAFT\""
+eq "Papierkorb: nach dem Push weicht die Arbeitskopie für den Entwurf nicht mehr von Live ab" "$ROWS" 0
 src wp eval "wp_untrash_post($DRAFT);" >/dev/null
 no "Papierkorb: „Wiederherstellen“ in WordPress funktioniert" test "$(post src "$DRAFT" post_status)" = trash
 

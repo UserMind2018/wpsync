@@ -614,13 +614,20 @@ Danach je Zeile `{"op","table","key","expected","row"}`:
 |---|---|---|
 | `update` | Abdruck der Zeile aus dem Manifest | die Spalten des Abdrucks wie im Export (base64), bei einem Paar `{"values":[…]}`; eine **leere Menge** löscht das Meta-Paar bzw. die Zuordnungen dieser Taxonomie |
 | `insert` | `"absent"` | wie `update`. Neue Zeilen in `posts`, `terms`, `term_taxonomy` brauchen eine ID im Korridor; Meta, Zuordnungen und Optionen an bestehenden Objekten nicht |
-| `trash` | Abdruck aus dem Manifest | – (nur `posts`, nie Attachments); `_wp_trash_meta_status` und `_wp_trash_meta_time` schreibt der Agent selbst |
+| `trash` | Abdruck aus dem Manifest | – (nur `posts`, nie Attachments). Der Agent tut, was WordPress beim Weg in den Papierkorb tut: `post_status = trash`, `__trashed` an `post_name`, der alte Name in `_wp_desired_post_slug`, dazu `_wp_trash_meta_status` und `_wp_trash_meta_time` |
 
 Werte sind **normalisiert** – sie tragen die Platzhalter `⟦wpsync:origin⟧`, `:esc1`, `:esc2`
 statt einer Domain; der Agent setzt die Adresse des Ziels ein, auf der Staging-Kopie die der
 Kopie. Die Werte eines Meta-Paars schreibt der Agent in der Reihenfolge des Pakets; im Abdruck
 zählen sie als sortierte Menge, eine reine Umsortierung ist deshalb weder Änderung noch Konflikt.
 Optionen werden nie gelöscht. `home` ist `live.home` aus `map.json`.
+
+**Papierkorb:** Für einen Beitrag, der lokal in den Papierkorb gegangen ist, gehört genau eine
+Zeile ins Paket – `op: trash` für `posts`. Was WordPress dabei lokal am Beitrag hinterlässt (das
+Suffix am Namen, `_wp_desired_post_slug`, `_wp_trash_meta_*`), schreibt der Agent auf dem Ziel
+selbst; Zeilen dafür im Paket sind `package_invalid`. Die Antwort des Commits nennt die
+geschriebenen Schlüssel, die CLI zieht Manifest und Baseline nach – die Arbeitskopie weicht
+danach für diesen Beitrag nicht mehr von der Site ab.
 
 ### Was der Agent prüft
 
@@ -633,7 +640,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 
 | `error.reason` | Bedeutung |
 |---|---|
-| `package_invalid` | Form, Prüfsumme, Zeilenende, doppelter Schlüssel, Platzhalter in unbekannter Form, Sprung in den Papierkorb ohne `op: trash` |
+| `package_invalid` | Form, Prüfsumme, Zeilenende, doppelter Schlüssel, Platzhalter in unbekannter Form, Sprung in den Papierkorb ohne `op: trash`, eine Zeile für `_wp_trash_meta_status`, `_wp_trash_meta_time` oder `_wp_desired_post_slug` an einem Beitrag mit `op: trash` |
 | `baseline_outdated` | andere `canon_version` oder Varianten; lokal: das Paket gehört nicht zum Inhaltsstand dieses Site-Ordners (`map_id`) |
 | `origin_mismatch` | das Paket ist für eine andere Adresse gebaut, oder `home` und `siteurl` der Site haben verschiedene Origins |
 | `package_too_large` | mehr als `limits.max_rows` (5.000) Zeilen oder `limits.max_bytes` (8 MB) – in mehreren Pushes übertragen |

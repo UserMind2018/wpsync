@@ -227,6 +227,10 @@ final class PushContent
                 $autoload
             );
             $target->indexables = self::existing((string) $wpdb->prefix . 'yoast_indexable');
+            // Wie wp_insert_post() beim Weg in den Papierkorb. Nur auf Live: die Funktion liest dessen Tabellen.
+            $target->slug = static function (string $name, string $id, string $type, string $parent): string {
+                return function_exists('wp_unique_post_slug') ? (string) wp_unique_post_slug($name, (int) $id, 'trash', $type, (int) $parent) : $name;
+            };
             return $target;
         } catch (\InvalidArgumentException $e) {
             throw new ContentException(ContentException::ORIGIN, 'Die Adresse oder die Tabellen dieser Site lassen sich nicht bestimmen.');

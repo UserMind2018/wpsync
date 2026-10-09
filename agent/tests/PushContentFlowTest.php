@@ -378,7 +378,7 @@ final class PushContentFlowTest extends TestCase
 
         $content = $commit->data['content'];
         $this->assertSame(5, $content['rows']);
-        $this->assertCount(7, $content['after'], '5 Zeilen und die beiden Papierkorb-Meta');
+        $this->assertCount(8, $content['after'], '5 Zeilen und die drei Meta des Papierkorbs');
         $this->assertSame(['t' => 'posts', 'k' => '219', 'h' => ContentFixtures::hash('posts', '219', $this->liveDb->data['posts']['219'])], $content['after'][0]);
         $this->assertSame(['object_cache', 'rewrite_rules', 'revisions'], array_column($content['post_actions'], 'step'));
         $this->assertContains('clean_post_cache [219]', $GLOBALS['wpsync_post_actions']);

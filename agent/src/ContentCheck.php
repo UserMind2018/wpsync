@@ -147,8 +147,9 @@ final class ContentCheck
                 $keys['terms'][] = $object;
             }
             if ($row['op'] === 'trash') {
-                $keys['postmeta'][] = Canon::pairKey($row['key'], '_wp_trash_meta_status');
-                $keys['postmeta'][] = Canon::pairKey($row['key'], '_wp_trash_meta_time');
+                foreach (ContentPackage::TRASH_META as $meta) {
+                    $keys['postmeta'][] = Canon::pairKey($row['key'], $meta);
+                }
             }
         }
         foreach ($this->rows['term_relationships'] ?? [] as $row) {

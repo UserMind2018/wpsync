@@ -103,7 +103,7 @@ final class ContentRollbackTest extends ContentApplyCase
     /** @return array<string, array{0: int}> */
     public static function lostWrites(): array
     {
-        return ['erster' => [1], 'mittendrin' => [6], 'eingefügter Beitrag' => [12], 'letzter' => [14]];
+        return ['erster' => [1], 'mittendrin' => [6], 'eingefügter Beitrag' => [13], 'letzter' => [15]];
     }
 
     /**
@@ -116,7 +116,7 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->apply($this->rows());
         $pushed                   = $this->store->data;
         $this->store->log         = [];
-        $this->store->loseAtWrite = 14 + $n; // das Anwenden hat 14-mal geschrieben
+        $this->store->loseAtWrite = 15 + $n; // das Anwenden hat 15-mal geschrieben
         try {
             ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
             $this->fail('no exception');

@@ -5,6 +5,7 @@ namespace WpSync\Tests;
 
 use WpSync\ContentApply;
 use WpSync\ContentException;
+use WpSync\ContentRollback;
 use WpSync\ContentOrigin;
 use WpSync\ContentPackage;
 use WpSync\ContentState;
@@ -74,7 +75,7 @@ final class ContentApplyTest extends ContentApplyCase
         $before = json_decode((string) file_get_contents($this->dir . '/before.json'), true);
         $after  = json_decode((string) file_get_contents($this->dir . '/after.json'), true);
 
-        $this->assertCount(14, $before['keys'], '12 Zeilen und die beiden Papierkorb-Meta');
+        $this->assertCount(15, $before['keys'], '12 Zeilen und die drei Meta des Papierkorbs');
         $this->assertSame(['t' => 'posts', 'k' => '219'], array_slice($before['keys'][0], 0, 2));
         $this->assertSame($old['posts']['219'], ContentState::decode('posts', $before['keys'][0]['state']), 'roh, nicht normalisiert');
         $byKey = [];
@@ -230,7 +231,7 @@ final class ContentApplyTest extends ContentApplyCase
     /** @return array<string, array{0: int}> der wievielte Schreibzugriff die Verbindung verliert: update, trash, insert, Paar, Option */
     public static function lostWrites(): array
     {
-        return ['update posts' => [1], 'trash' => [2], 'insert term_taxonomy' => [5], 'postmeta' => [6], 'letzter' => [14]];
+        return ['update posts' => [1], 'trash' => [2], 'insert term_taxonomy' => [5], 'postmeta' => [6], 'letzter' => [15]];
     }
 
     /**
@@ -316,5 +317,73 @@ final class ContentApplyTest extends ContentApplyCase
         $result                    = $this->apply($this->rows());
         $this->assertSame(12, $result['rows']);
         $this->assertSame('Neu', $this->store->data['posts']['219']['post_title']);
+    }
+
+    /**
+     * Papierkorb wie WordPress (wp_trash_post() und wp_insert_post()): Status, __trashed am Namen,
+     * der alte Name in _wp_desired_post_slug, dazu Status und Zeit des Papierkorbs – alles vom Agent,
+     * nichts davon aus dem Paket. content.after nennt jeden dieser Schlüssel.
+     */
+    public function testTrashDoesWhatWordPressDoes(): void
+    {
+        $this->store->data['postmeta']["220\0_wp_desired_post_slug"] = ['values' => ['uralt']]; // WordPress hängt an, es ersetzt nicht
+        $result = $this->apply([ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'))]);
+        $data   = $this->store->data;
+        $this->assertSame(['trash', 'seite-220__trashed'], [$data['posts']['220']['post_status'], $data['posts']['220']['post_name']]);
+        $this->assertSame(['uralt', 'seite-220'], $data['postmeta']["220\0_wp_desired_post_slug"]['values']);
+        $this->assertSame(['draft'], $data['postmeta']["220\0_wp_trash_meta_status"]['values']);
+        $this->assertSame([(string) self::NOW], $data['postmeta']["220\0_wp_trash_meta_time"]['values']);
+        $after = [];
+        foreach ($result['after'] as $entry) {
+            $after[$entry['t'] . ':' . $entry['k']] = $entry['h'];
+        }
+        $this->assertSame(['posts:220', "postmeta:220\0_wp_trash_meta_status", "postmeta:220\0_wp_trash_meta_time", "postmeta:220\0_wp_desired_post_slug"], array_keys($after));
+        $this->assertSame($this->h('posts', '220'), $after['posts:220'], 'der Abdruck der Zeile mit dem neuen Namen');
+        $this->assertSame($this->h('postmeta', "220\0_wp_desired_post_slug"), $after["postmeta:220\0_wp_desired_post_slug"]);
+        $this->assertTrue($result['changes']['rewrite'], 'der Name hat sich geändert');
+
+        // Die Rücknahme macht alles rückgängig: Name, Status, die drei Meta.
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $data = $this->store->data;
+        $this->assertSame(['draft', 'seite-220'], [$data['posts']['220']['post_status'], $data['posts']['220']['post_name']]);
+        $this->assertSame(['uralt'], $data['postmeta']["220\0_wp_desired_post_slug"]['values']);
+        $this->assertArrayNotHasKey("220\0_wp_trash_meta_status", $data['postmeta']);
+        $this->assertArrayNotHasKey("220\0_wp_trash_meta_time", $data['postmeta']);
+    }
+
+    /** Wie _truncate_post_slug( …, 191 ) und der Fall „trägt das Suffix schon“ in wp_add_trashed_suffix_to_post_name_for_post(). */
+    public function testTrashedNamesFollowCore(): void
+    {
+        $cases = [
+            'kontakt'                    => ['kontakt__trashed', true],
+            ''                           => ['__trashed', true],
+            'alt__trashed'               => ['alt__trashed', false],
+            'endet-auf-'                 => ['endet-auf__trashed', true],
+            str_repeat('a', 200)         => [str_repeat('a', 191) . '__trashed', true],
+            str_repeat('a', 190) . '-b'  => [str_repeat('a', 190) . '__trashed', true],
+        ];
+        foreach ($cases as $name => $want) {
+            $name = (string) $name;
+            $this->setUp();
+            $this->store->data['posts']['220']['post_name'] = $name;
+            $this->apply([ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'))]);
+            $this->assertSame($want[0], $this->store->data['posts']['220']['post_name'], $name);
+            $this->assertSame($want[1] ? [$name] : null, $this->store->data['postmeta']["220\0_wp_desired_post_slug"]['values'] ?? null, $name);
+        }
+    }
+
+    /** Auf Live fragt der Agent WordPress nach dem eindeutigen Namen (wp_unique_post_slug), wie wp_insert_post() es tut. */
+    public function testTrashAsksTheTargetForAUniqueName(): void
+    {
+        $target       = ContentFixtures::live($this->store);
+        $seen         = null;
+        $target->slug = static function (string $name, string $id, string $type, string $parent) use (&$seen): string {
+            $seen = [$name, $id, $type, $parent];
+            return $name . '-2';
+        };
+        $this->apply([ContentFixtures::row('trash', 'posts', '220', $this->h('posts', '220'))], 7, $target);
+        $this->assertSame(['seite-220__trashed', '220', 'page', '0'], $seen);
+        $this->assertSame('seite-220__trashed-2', $this->store->data['posts']['220']['post_name']);
+        $this->assertSame(['seite-220'], $this->store->data['postmeta']["220\0_wp_desired_post_slug"]['values']);
     }
 }

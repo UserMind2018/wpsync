@@ -173,6 +173,18 @@ final class ContentPackageTest extends TestCase
         }
         $double = [ContentFixtures::row('trash', 'posts', '219', $h), ContentFixtures::row('update', 'posts', '219', $h, ContentFixtures::postRow('219'))];
         $this->assertRefused('package_invalid', ContentFixtures::text($double), 'doppelter Schlüssel');
+        // Was der Papierkorb an einem Beitrag hinterlässt, schreibt der Agent selbst – eine zweite Quelle gibt es nicht.
+        foreach (['_wp_trash_meta_status', '_wp_trash_meta_time', '_wp_desired_post_slug'] as $meta) {
+            $e = $this->assertRefused('package_invalid', ContentFixtures::text([
+                ContentFixtures::row('insert', 'postmeta', "219\0" . $meta, 'absent', ['values' => ['x']]),
+                ContentFixtures::row('trash', 'posts', '219', $h),
+            ]), $meta);
+            $this->assertStringContainsString('Papierkorb', $e->getMessage());
+        }
+        ContentPackage::read($this->write(ContentFixtures::text([
+            ContentFixtures::row('insert', 'postmeta', "220\0_wp_desired_post_slug", 'absent', ['values' => ['x']]),
+            ContentFixtures::row('trash', 'posts', '219', $h),
+        ]))); // an einem anderen Beitrag ist es eine Zeile wie jede andere
         $raw = ContentFixtures::text([ContentFixtures::row('update', 'options', 'blogname', $h, ['option_value' => 'x'])]);
         $this->assertRefused('package_invalid', str_replace('"eA=="', '"kein base64!"', $raw), 'kein base64');
         $this->assertRefused('package_invalid', str_replace('"op":"update"', '"op":"update","zusatz":1', $raw), 'unbekanntes Feld in der Zeile');

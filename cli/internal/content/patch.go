@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/safefs"
@@ -72,6 +73,21 @@ func Patch(siteDir string, changes map[Key]Change) (*Undo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// What the trash leaves at a post the agent writes itself, as WordPress does. The baseline
+	// follows from the row the post had: its name and its status.
+	trashed := map[Key]bool{}
+	for k, c := range changes {
+		if c.Trash && k.T == "posts" {
+			trashed[k] = true
+		}
+	}
+	posts, err := rowsOf(root, baselineName, trashed)
+	if err != nil {
+		if back := restore(root, manifestName, undo.Manifest); back != nil {
+			return nil, errors.Join(err, back)
+		}
+		return nil, err
+	}
 	err = rewrite(root, baselineName, undo.Baseline, keysOf(changes), func(k Key, old []byte) ([]byte, bool, error) {
 		c := changes[k]
 		line := patchLine{T: k.T, K: k.K}
@@ -92,7 +108,10 @@ func Patch(siteDir string, changes map[Key]Change) (*Undo, error) {
 			if err := json.Unmarshal(line.Row, &row); err != nil {
 				return nil, false, fmt.Errorf("%s: %w", baselineName, err)
 			}
-			row["post_status"], _ = json.Marshal(base64.StdEncoding.EncodeToString([]byte("trash")))
+			row["post_status"] = packValue("trash")
+			if name, ok := unpackValue(row["post_name"]); ok {
+				row["post_name"] = packValue(TrashedName(name))
+			}
 			packed, err := json.Marshal(row)
 			if err != nil {
 				return nil, false, err
@@ -105,7 +124,29 @@ func Patch(siteDir string, changes map[Key]Change) (*Undo, error) {
 				line.P = &yes
 			}
 		default:
-			return nil, false, nil // no row to put there: the baseline stays as it is
+			value, pushable, ok := trashMeta(k, posts)
+			if !ok {
+				return nil, false, nil // no row to put there: the baseline stays as it is
+			}
+			// add_post_meta() appends: what the pair held stays in front.
+			var set struct {
+				Values []json.RawMessage `json:"values"`
+			}
+			if old != nil && json.Unmarshal(line.Row, &set) != nil {
+				return nil, false, fmt.Errorf("%s: row of %s is no set", baselineName, k.T)
+			}
+			set.Values = append(set.Values, packValue(value))
+			packed, err := json.Marshal(set)
+			if err != nil {
+				return nil, false, err
+			}
+			line.Row = packed
+			if old == nil {
+				line.P = &pushable
+				if !pushable {
+					line.Why = "meta_key"
+				}
+			}
 		}
 		out, err := encode(line)
 		return out, true, err
@@ -156,6 +197,88 @@ func restore(root *os.Root, name string, lines map[string]json.RawMessage) error
 		}
 		return before, true, nil
 	})
+}
+
+// TrashedName is the post_name WordPress gives a post on its way to the trash
+// (wp_add_trashed_suffix_to_post_name_for_post): the name, cut to 191 bytes and without a dash
+// at its end, with "__trashed" – unless it carries the suffix already. The agent may add a
+// number to keep it unique; the fingerprint of the line is always the agent's.
+func TrashedName(name string) string {
+	if strings.HasSuffix(name, "__trashed") {
+		return name
+	}
+	if len(name) > 191 {
+		name = strings.ToValidUTF8(name[:191], "")
+	}
+	return strings.TrimRight(name, "-") + "__trashed"
+}
+
+func packValue(s string) json.RawMessage {
+	out, _ := json.Marshal(base64.StdEncoding.EncodeToString([]byte(s)))
+	return out
+}
+
+func unpackValue(raw json.RawMessage) (string, bool) {
+	var packed string
+	if json.Unmarshal(raw, &packed) != nil {
+		return "", false
+	}
+	value, err := base64.StdEncoding.DecodeString(packed)
+	return string(value), err == nil
+}
+
+// trashMeta answers for a meta key the agent wrote at a trashed post the value it has there and
+// whether the lists let it be pushed: _wp_desired_post_slug holds the name the post had – not
+// written when the name carried the suffix already –, _wp_trash_meta_status its status. The
+// time of the trash only the agent knows.
+func trashMeta(k Key, posts map[Key]map[string]json.RawMessage) (value string, pushable, ok bool) {
+	object, name, pair := strings.Cut(k.K, "\x00")
+	row, known := posts[Key{T: "posts", K: object}]
+	if k.T != "postmeta" || !pair || !known {
+		return "", false, false
+	}
+	switch name {
+	case "_wp_desired_post_slug":
+		value, ok = unpackValue(row["post_name"])
+		return value, true, ok && !strings.HasSuffix(value, "__trashed")
+	case "_wp_trash_meta_status":
+		value, ok = unpackValue(row["post_status"])
+		return value, false, ok
+	}
+	return "", false, false
+}
+
+// rowsOf returns the rows the baseline holds for keys.
+func rowsOf(root *os.Root, name string, keys map[Key]bool) (map[Key]map[string]json.RawMessage, error) {
+	out := map[Key]map[string]json.RawMessage{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	f, err := safefs.Open(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 1<<20)
+	for {
+		data, readErr := agentapi.ReadLine(br, maxRecordLine)
+		if errors.Is(readErr, agentapi.ErrLineTooLong) {
+			return nil, fmt.Errorf("%s: %w (mehr als %d Bytes)", name, readErr, maxRecordLine)
+		}
+		var line patchLine
+		if bytes.HasPrefix(data, []byte(`{"t":`)) && json.Unmarshal(data, &line) == nil && keys[Key{line.T, line.K}] {
+			row := map[string]json.RawMessage{}
+			if json.Unmarshal(line.Row, &row) == nil {
+				out[Key{line.T, line.K}] = row
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return out, nil
+			}
+			return nil, readErr
+		}
+	}
 }
 
 func keysOf(changes map[Key]Change) map[Key]bool {

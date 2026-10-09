@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -70,11 +72,11 @@ func TestPatchBringsManifestAndBaselineToThePushedState(t *testing.T) {
 	manifestBefore, baselineBefore := read(t, siteDir, manifestName), read(t, siteDir, baselineName)
 	newRow := json.RawMessage(`{"post_title":"` + b64("Neu") + `","post_status":"` + b64("publish") + `"}`)
 	changes := map[Key]Change{
-		{"posts", "219"}:                             {H: str("n219"), Row: newRow},                   // update
-		{"posts", "220"}:                             {H: str("n220"), Trash: true},                   // trash
-		{"postmeta", "219\x00_thumbnail_id"}:         {H: nil, Row: json.RawMessage(`{"values":[]}`)}, // pair deleted
-		{"posts", "1000001"}:                         {H: str("n1000001"), Row: newRow},               // insert
-		{"postmeta", "220\x00_wp_trash_meta_status"}: {H: str("ntrash")},                              // written by the agent
+		{"posts", "219"}:                           {H: str("n219"), Row: newRow},                   // update
+		{"posts", "220"}:                           {H: str("n220"), Trash: true},                   // trash
+		{"postmeta", "219\x00_thumbnail_id"}:       {H: nil, Row: json.RawMessage(`{"values":[]}`)}, // pair deleted
+		{"posts", "1000001"}:                       {H: str("n1000001"), Row: newRow},               // insert
+		{"postmeta", "220\x00_wp_trash_meta_time"}: {H: str("ntrash")},                              // written by the agent
 	}
 	undo, err := Patch(siteDir, changes)
 	if err != nil {
@@ -92,10 +94,10 @@ func TestPatchBringsManifestAndBaselineToThePushedState(t *testing.T) {
 	if lineOf(t, manifest, "postmeta", "219\x00_thumbnail_id") != nil || lineOf(t, baseline, "postmeta", "219\x00_thumbnail_id") != nil {
 		t.Error("a deleted pair has no line any more")
 	}
-	if got := lineOf(t, manifest, "postmeta", "220\x00_wp_trash_meta_status"); got == nil || got["h"] != "ntrash" {
+	if got := lineOf(t, manifest, "postmeta", "220\x00_wp_trash_meta_time"); got == nil || got["h"] != "ntrash" {
 		t.Errorf("manifest trash meta = %v", got)
 	}
-	if lineOf(t, baseline, "postmeta", "220\x00_wp_trash_meta_status") != nil {
+	if lineOf(t, baseline, "postmeta", "220\x00_wp_trash_meta_time") != nil {
 		t.Error("a key without a row never reaches the baseline")
 	}
 	if got := lineOf(t, manifest, "options", "blogname"); got["h"] != "hblog" {
@@ -206,5 +208,64 @@ func TestPatchRefusesAnOverlongLine(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(siteDir, ".wpsync", "content", baselineName+safefs.TmpSuffix)); !os.IsNotExist(err) {
 		t.Errorf("temp file left behind: %v", err)
+	}
+}
+
+// op trash: the agent does what WordPress does – __trashed at the name, the old name in
+// _wp_desired_post_slug, status and time of the trash. The baseline follows with what it can
+// know (name, status, the two metas it has the values for); h is always the agent's.
+func TestPatchFollowsATrashedPost(t *testing.T) {
+	siteDir := patchSite(t)
+	dir := filepath.Join(siteDir, ".wpsync", "content")
+	baseline := `{"t":"posts","k":"220","h":"h220","row":{"post_name":"` + b64("entwurf") + `","post_status":"` + b64("draft") + `"},"p":true}
+{"t":"posts","k":"221","h":"h221","row":{"post_name":"` + b64("alt__trashed") + `","post_status":"` + b64("draft") + `"},"p":true}
+{"t":"postmeta","k":"220\u0000_wp_desired_post_slug","h":"hold","row":{"values":["` + b64("uralt") + `"]},"p":true}
+`
+	if err := os.WriteFile(filepath.Join(dir, baselineName), []byte(baseline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := read(t, siteDir, baselineName)
+	changes := map[Key]Change{
+		{"posts", "220"}: {H: str("n220"), Trash: true},
+		{"postmeta", "220\x00_wp_desired_post_slug"}: {H: str("nslug")},
+		{"postmeta", "220\x00_wp_trash_meta_status"}: {H: str("nstatus")},
+		{"postmeta", "220\x00_wp_trash_meta_time"}:   {H: str("ntime")},
+		{"posts", "221"}: {H: str("n221"), Trash: true},
+		{"postmeta", "221\x00_wp_trash_meta_status"}: {H: str("nstatus221")},
+	}
+	undo, err := Patch(siteDir, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, siteDir, baselineName)
+	post := lineOf(t, got, "posts", "220")
+	if row := post["row"].(map[string]any); post["h"] != "n220" || row["post_status"] != b64("trash") || row["post_name"] != b64("entwurf__trashed") {
+		t.Errorf("posts 220 = %v", post)
+	}
+	if row := lineOf(t, got, "posts", "221")["row"].(map[string]any); row["post_name"] != b64("alt__trashed") {
+		t.Errorf("a name that carries the suffix stays: %v", row)
+	}
+	slug := lineOf(t, got, "postmeta", "220\x00_wp_desired_post_slug")
+	if slug == nil || slug["h"] != "nslug" || slug["p"] != true || !reflect.DeepEqual(slug["row"].(map[string]any)["values"], []any{b64("uralt"), b64("entwurf")}) {
+		t.Errorf("desired slug = %v", slug)
+	}
+	status := lineOf(t, got, "postmeta", "220\x00_wp_trash_meta_status")
+	if status == nil || status["h"] != "nstatus" || status["p"] != false || status["why"] != "meta_key" || !reflect.DeepEqual(status["row"].(map[string]any)["values"], []any{b64("draft")}) {
+		t.Errorf("trash status = %v", status)
+	}
+	if lineOf(t, got, "postmeta", "220\x00_wp_trash_meta_time") != nil {
+		t.Error("the time of the trash is the agent's alone: manifest only")
+	}
+	if lineOf(t, read(t, siteDir, manifestName), "postmeta", "220\x00_wp_trash_meta_time")["h"] != "ntime" {
+		t.Error("manifest misses the time of the trash")
+	}
+	if err := Unpatch(siteDir, undo); err != nil {
+		t.Fatal(err)
+	}
+	a, b := strings.Split(strings.TrimSpace(read(t, siteDir, baselineName)), "\n"), strings.Split(strings.TrimSpace(before), "\n")
+	sort.Strings(a)
+	sort.Strings(b)
+	if !reflect.DeepEqual(a, b) {
+		t.Errorf("after Unpatch:\n%s", strings.Join(a, "\n"))
 	}
 }

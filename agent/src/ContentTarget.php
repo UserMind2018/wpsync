@@ -32,6 +32,11 @@ final class ContentTarget
     public $autoload;
     /** @var string voller Name der Tabelle yoast_indexable des Ziels; '' wenn es sie nicht gibt (Nacharbeiten) */
     public $indexables = '';
+    /**
+     * @var (callable(string, string, string, string): string)|null eindeutiger post_name eines Beitrags im
+     *      Papierkorb: Name, ID, Beitragstyp, post_parent – auf Live wp_unique_post_slug(); null: der Name bleibt
+     */
+    public $slug = null;
     /** @var ContentReader|null */
     private $reader = null;
 
