@@ -32,6 +32,31 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->assertSame(ContentRollback::NOTHING, $again['state'], 'ein zweiter Lauf findet alles im Vorher-Zustand');
     }
 
+    /**
+     * Lag auf dem Ziel schon etwas an der ID eines neuen Beitrags (verwaiste Zuordnung oder Meta
+     * eines früher gelöschten Beitrags) und hat der Push es überschrieben, steht es nach der
+     * Rücknahme wieder da: was am eingefügten Objekt hängt, geht zuerst, dann kommt das Vorher-Abbild.
+     */
+    public function testRollbackRestoresWhatHungOnTheIdOfAnInsertedObject(): void
+    {
+        $this->store->data['term_relationships']["1000001\0category"]   = ['values' => ['5:0']];
+        $this->store->data['postmeta']["1000001\0_wp_page_template"]    = ['values' => ['verwaist']];
+        $old  = $this->store->data;
+        $rows = $this->rows();
+        foreach ($rows as $i => $row) {
+            if ($row['key'] === "1000001\0category") {
+                $rows[$i] = ContentFixtures::row('update', 'term_relationships', $row['key'], $this->h('term_relationships', $row['key']), ['values' => ['5:0', '1000002:0']]);
+            } elseif ($row['key'] === "1000001\0_wp_page_template") {
+                $rows[$i] = ContentFixtures::row('update', 'postmeta', $row['key'], $this->h('postmeta', $row['key']), ['values' => ['default']]);
+            }
+        }
+        $this->apply($rows);
+
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+        $this->assertSame(ContentRollback::NOTHING, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+    }
+
     /** AC-153: nach einer Änderung seit dem Push wird nichts zurückgenommen – alle geänderten Schlüssel genannt. */
     public function testChangedSincePush(): void
     {

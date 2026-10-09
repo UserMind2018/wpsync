@@ -68,13 +68,32 @@ final class ContentRollback
                 if ($changed !== []) {
                     throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
                 }
+                // Zuerst geht, was an den eingefügten Objekten hängt – auch was erst nach dem Push dazukam.
+                // Lag an derselben ID schon vor dem Push etwas (verwaiste Meta oder Zuordnungen eines
+                // früher gelöschten Objekts), bringt es das Vorher-Abbild danach zurück.
+                foreach (array_reverse($before) as $entry) {
+                    $table = $entry['t'];
+                    $key   = $entry['k'];
+                    if ($entry['state'] !== null || !isset(ContentState::PK[$table])) {
+                        continue;
+                    }
+                    try {
+                        $store->purge($table, $key);
+                    } catch (ContentException $e) {
+                        if (!$store->alive()) {
+                            $lost = [$table, $key, $now[$table][$key] ?? null];
+                        }
+                        throw $e;
+                    }
+                    if (!$store->alive()) {
+                        $lost = [$table, $key, $now[$table][$key] ?? null];
+                        throw ContentRepair::lost();
+                    }
+                }
                 foreach (array_reverse($before) as $entry) {
                     $table = $entry['t'];
                     $key   = $entry['k'];
                     try {
-                        if ($entry['state'] === null && isset(ContentState::PK[$table])) {
-                            $store->purge($table, $key); // was am eingefügten Objekt hängt, geht mit
-                        }
                         // Eine Zeile, die es vor dem Push gab, bekommt nur zurück, was der Push geschrieben hat.
                         $state = $entry['state'];
                         if ($state !== null && !ContentState::isSet($table) && ($now[$table][$key] ?? null) !== null) {
