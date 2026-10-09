@@ -369,3 +369,49 @@ func TestPostJSONBoundsTheAnswer(t *testing.T) {
 		t.Errorf("a streamed answer was cut: %d bytes", len(raw))
 	}
 }
+
+// Nach-Review NR-5: die Grenze gilt je Route. Pläne, Listen und Bestätigungen sind klein (16 MiB); nur die
+// Routen mit grossen legitimen Antworten dürfen mehr – json.Decoder hält den ganzen Wert im Speicher, und im
+// Container sind das wenige hundert MB.
+func TestJSONLimitsPerRoute(t *testing.T) {
+	if MaxJSONBytes != 16<<20 {
+		t.Errorf("default = %d", MaxJSONBytes)
+	}
+	for route, want := range map[string]int64{
+		"/wpsync/v1/ping": 16 << 20, "/wpsync/v1/push/list": 16 << 20, "/wpsync/v1/push/rollback": 16 << 20, "/wpsync/v1/push/confirm": 16 << 20,
+		"/wpsync/v1/staging/status": 16 << 20, "/wpsync/v1/unbekannt": 16 << 20,
+		"/wpsync/v1/push/begin": 64 << 20, "/wpsync/v1/push/commit": 64 << 20, "/wpsync/v1/infosheet": 64 << 20,
+		"/wpsync/v1/delta": 256 << 20,
+	} {
+		if got := jsonLimit(route); got != want {
+			t.Errorf("%s: %d MiB, want %d MiB", route, got>>20, want>>20)
+		}
+	}
+	// Die Vorgabe lässt sich (im Test) senken; eine Route mit eigener Grenze bleibt bei ihrer.
+	old := MaxJSONBytes
+	MaxJSONBytes = 1 << 10
+	defer func() { MaxJSONBytes = old }()
+	if jsonLimit("/wpsync/v1/ping") != 1<<10 || jsonLimit("/wpsync/v1/delta") != 256<<20 {
+		t.Error("the default follows MaxJSONBytes, a route of its own does not")
+	}
+}
+
+// NR-5: auch die beiden Anfragen ohne Signatur – Discover und Pair – lesen nur eine kleine Antwort.
+func TestDiscoverAndPairBoundTheAnswer(t *testing.T) {
+	huge := `{"namespace":"wpsync/v1","key_id":"k","secret":"s","x":"` + strings.Repeat("a", 2<<20) + `"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(huge)) }))
+	defer srv.Close()
+	if _, err := Discover(srv.Client(), srv.URL); err == nil {
+		t.Error("discover took an answer of 2 MiB")
+	}
+	if _, err := Pair(srv.Client(), srv.URL, "code", "mac"); err == nil {
+		t.Error("pair took an answer of 2 MiB")
+	}
+	huge = `{"namespace":"wpsync/v1","key_id":"k","secret":"s"}`
+	if _, err := Discover(srv.Client(), srv.URL); err != nil {
+		t.Errorf("discover: %v", err)
+	}
+	if res, err := Pair(srv.Client(), srv.URL, "code", "mac"); err != nil || res.Secret != "s" {
+		t.Errorf("pair: %v", err)
+	}
+}

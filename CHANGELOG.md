@@ -63,8 +63,10 @@ Agent ≥ 0.9.0 wie bisher.
 - Ein Satz mit Plugin-Zustand hat einen Datenbank-Anteil: Die Rücknahme geht zuerst über den Agent
   und schickt `rescue.php` `content=1`, auch ohne Paket
 - `--no-code` braucht `--uploads`, `--content` oder `--deactivate`
-- Die CLI liest eine JSON-Antwort des Agents nur noch bis 256 MiB (nach dem Entpacken gezählt);
-  darüber bricht der Befehl mit einem klaren Fehler ab. Dateien, Tabellen und das Inhalts-Manifest
+- Die CLI liest eine JSON-Antwort des Agents nur noch bis zu einer Grenze je Route (nach dem
+  Entpacken gezählt): 16 MiB, für `/push/begin`, `/push/commit` und das Infosheet 64 MiB, für
+  `/delta` 256 MiB; `pair` und die Suche nach dem Agent 1 MiB. Darüber bricht der Befehl mit einem
+  klaren Fehler ab. Dateien, Tabellen und das Inhalts-Manifest
   werden weiter gestreamt
 - Nach einer Rücknahme über `rescue.php` trägt das Ergebnis kein `post_actions` mehr (bisher standen
   dort die Nacharbeiten des Commits)
