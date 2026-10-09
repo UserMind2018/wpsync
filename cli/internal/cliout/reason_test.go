@@ -125,3 +125,29 @@ func TestNothingToPushNamesTheSkippedUnits(t *testing.T) {
 		t.Errorf("without skipped units the field is left out: %s", data)
 	}
 }
+
+// Spec Content-Push §10: a refusal of the content of a push is exit 1 with the agent's reason,
+// the rows as keys and, for upload_missing, the files – whether the agent or the CLI found it.
+func TestContentRefusalsHaveReasonKeysAndPaths(t *testing.T) {
+	keys := []agentapi.ContentKey{{Table: "posts", Key: "219"}, {Table: "postmeta", Key: "219\x00_x", Pattern: "email"}}
+	for _, reason := range []string{"package_invalid", "baseline_outdated", "origin_mismatch", "package_too_large", "engine_unsupported",
+		"blocked_row", "list_version_mismatch", "local_origin_in_package", "pseudonym_in_package", "id_outside_corridor", "id_taken",
+		"conflict", "row_unfaithful", "dangling_reference", "upload_missing", "author_unknown", "changed_since_push", "unsafe_value",
+		"write_mismatch", "package_missing", "content_failed"} {
+		api := &agentapi.APIError{Status: 409, Code: "wpsync_content_" + reason, Message: "abgelehnt"}
+		f := Classify(fmt.Errorf("push: %w", &push.ContentError{Reason: reason, Message: "abgelehnt", Keys: keys, Paths: []string{"2026/10/a.jpg"}, Err: api}))
+		if f.Exit != ExitUnknown || f.Reason != reason || len(f.Keys) != 2 || f.Keys[1].Pattern != "email" || len(f.Paths) != 1 {
+			t.Errorf("%s: %+v", reason, f)
+		}
+	}
+	out, _ := json.Marshal(Classify(&push.ContentError{Reason: "conflict", Message: "geändert", Keys: keys}))
+	if !strings.Contains(string(out), `"keys":[{"table":"posts","key":"219"},{"table":"postmeta","key":"219\u0000_x","pattern":"email"}]`) {
+		t.Errorf("json = %s", out)
+	}
+	if f := Classify(push.ErrAgentNoContent); f.Exit != ExitAgentOutdated {
+		t.Errorf("agent without the content channel: %+v", f)
+	}
+	if out, _ := json.Marshal(Classify(push.ErrConflict)); strings.Contains(string(out), "keys") || strings.Contains(string(out), "paths") {
+		t.Errorf("other failures carry no keys: %s", out)
+	}
+}
