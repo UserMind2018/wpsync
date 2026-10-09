@@ -1063,6 +1063,29 @@ abbilden lässt, sofern das Profil sie kopiert.
   Plugins löscht ihn. Der Schlüsselschutz ist derselbe wie bei `rescue.php`.
 - **Snapshots:** liegen in `wp-content/wpsync-push-<zufall>/` mit `.htaccess`-Sperre. Auf
   Servern ohne `.htaccess`-Auswertung schützt nur der zufällige Name.
+- **Arbeitsordner auf nginx:** In diesem Ordner liegen bei einem Inhalts-Push auch das abgelegte
+  Paket (`packages/<kopplung>/<sha256>.jsonl`, `<push-id>/content/package.jsonl`) und die
+  Abbilder `before.json`/`after.json`. nginx wertet keine `.htaccess` aus: dort hält sie nur der
+  zufällige Ordnername (und bei den Abbildern die Verschlüsselung) vom Netz fern. Wer es fest
+  haben will, sperrt den Ordner in der Server-Konfiguration:
+  `location ~ ^/wp-content/wpsync-push-[^/]+/ { deny all; }` – `rescue.php` liegt im
+  Plugin-Ordner und bleibt davon unberührt.
+- **Grenzen der Inhaltsprüfung:**
+  - `local_origin_in_package` und `pseudonym_in_package` sind ein Schutz gegen **Versehen** – ein
+    Rest der lokalen Adresse oder ein pseudonymisierter Wert, der unbemerkt ins Paket gerutscht
+    ist. Sie sind keine kodierungsfeste Sperre: der Agent sucht den Host wörtlich und bis zu
+    dreifach URL-kodiert und die Pseudonym-Muster in ihrer bekannten Form. Wer einen Wert
+    absichtlich anders kodiert (Base64, HTML-Entities, ein JSON in einem serialisierten String
+    mit eigener Escapung, zerlegt über mehrere Felder), kommt daran vorbei. Das ist kein Loch im
+    Rechtemodell – der Kanal ist ein Administrator-Kanal und darf solche Inhalte ohnehin
+    schreiben –, aber auch keine Garantie, dass nie eine lokale Adresse live geht.
+  - Ein **Fatal in einer Nacharbeit** nach dem `COMMIT` (ein Cache-Plugin, Elementor, eine
+    Revision) beendet den Request, nachdem die Inhalte schon in der Datenbank stehen: die
+    Antwort des Commits kommt nicht mehr an. Die CLI meldet dann den halben Zustand („der Tausch
+    wurde nicht bestätigt, der Stand ist unklar“, mit dem Hinweis auf `wpsync pushes`), nie
+    Erfolg; der Push bleibt getauscht und unbestätigt (weitere Pushes: Exit 42), bis
+    `wpsync rollback` ihn zurücknimmt oder `wpsync pushes --confirm` ihn bestätigt. Die
+    Nacharbeiten, die nicht mehr liefen, sind dann von Hand nachzuholen (Caches leeren).
 - **Datenminimierung:** Personenbezogene Daten verlassen den Server pseudonymisiert –
   auch dann, wenn ein älteres CLI nichts dazu sagt. Klartext nur mit `--no-anonymize`.
 - **Transport:** Der Agent antwortet nur über HTTPS. Für lokale Umgebungen:
