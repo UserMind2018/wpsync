@@ -1114,8 +1114,9 @@ func stagingPages(siteURL, base string, pages []string) []string {
 // rollbackNow takes a swapped push back and checks the site again: through rescue.php – or, for a
 // push with content, through the agent first, because only it takes content back (DB → code →
 // uploads, Spec Content-Push §7.6). If the agent does not answer, rescue.php takes code and
-// uploads back and the result says content_not_rolled_back. If the agent refuses because rows
-// changed since the push, nothing is taken back and rescue.php is not called: the set stays whole.
+// uploads back and the result says content_not_rolled_back. If the agent answers and refuses (a
+// wpsync code below 500, e.g. rows changed since the push), nothing is taken back and rescue.php
+// is not called: the set stays whole. A push without content goes through rescue.php, always.
 // ctx bounds the check after the rollback; a check cut short by it is left out of the error.
 func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, urls []string, before []Probe, reasons []string) error {
 	for _, r := range reasons {
@@ -1131,9 +1132,12 @@ func rollbackNow(ctx context.Context, o Options, acc *copyAccess, j *Journal, ur
 		switch {
 		case err == nil:
 			viaAgent = true
-		case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, agentapi.ContentCodePrefix):
-			return fmt.Errorf("ROLLBACK NICHT MÖGLICH – Push %s bleibt ganz bestehen (%s): %w", j.PushID, strings.Join(reasons, "; "), contentError(err))
+		case errors.As(err, &apiErr) && strings.HasPrefix(apiErr.Code, "wpsync_") && apiErr.Status < 500:
+			// The agent answered and refused – rows changed since the push, or any other reason of
+			// its own. Never around it through rescue.php: that would take back half the set.
+			return fmt.Errorf("ROLLBACK NICHT MÖGLICH – Push %s bleibt ganz bestehen (%s): %w", j.PushID, strings.Join(reasons, "; "), contentError(agentError(j.target(), err)))
 		default:
+			// No answer, a 5xx, or a page that is not the agent's (a firewall, a fatal error).
 			fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php (nur Code und Uploads)")
 		}
 	}

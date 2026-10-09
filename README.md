@@ -679,7 +679,8 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
   Fehler des Pushs.
 - **Health-Check:** zusätzlich die veröffentlichten Seiten, die das Paket ändert (höchstens 10).
   Wird die Site schlechter, geht die Rücknahme **zuerst über den Agent** – nur er nimmt Inhalte
-  zurück (Inhalte → Code → Uploads). Antwortet er nicht, nimmt `rescue.php` Code und Uploads
+  zurück (Inhalte → Code → Uploads). Lehnt er ab (etwa `changed_since_push`), bleibt der Satz
+  ganz. Antwortet er nicht, mit einem Serverfehler oder mit einer fremden Seite, nimmt `rescue.php` Code und Uploads
   zurück, und das Ergebnis sagt es: Exit 43 mit `warnings: ["content_not_rolled_back"]`. Der Push
   bleibt dann offen (weitere Pushes: Exit 42); `wpsync rollback <site> <push-id>` holt die
   Inhalte nach, sobald WordPress wieder antwortet.

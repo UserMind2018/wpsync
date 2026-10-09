@@ -99,6 +99,7 @@ type fakeSite struct {
 	upNeed      []string                                 // need of the unit uploads in the last begin
 	upUnit      map[string]int                           // rel → unit index of the upload request that carried it
 	rescueBody  string                                   // answer of rescue.php to a rollback; empty: {"ok":true,"status":"rolled_back"}
+	rbPlain     bool                                     // /push/rollback answers with a page that is not the agent's
 	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
 
 	// The content channel (agent 0.7.0, content_run_test.go).
@@ -371,6 +372,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 				w.Write([]byte(f.rbBody))
 				return
 			}
+		}
+		if f.rbPlain {
+			w.WriteHeader(f.rollback)
+			w.Write([]byte("<html><body>Access denied</body></html>"))
+			return
 		}
 		if f.rbCode != "" {
 			w.WriteHeader(f.rollback)

@@ -607,3 +607,64 @@ func TestRollbackCatchingUpRevertsManifestAndBaseline(t *testing.T) {
 		t.Errorf("journal = %+v", j)
 	}
 }
+
+// §7.6, D13: antwortet der Agent und lehnt die Rücknahme ab (ein wpsync-Code unter 500), wird für
+// einen Satz mit Inhalten nicht auf rescue.php ausgewichen – das nähme nur Code und Uploads zurück.
+func TestRunNeverGoesAroundARefusalOfTheAgentWithContent(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken, f.rollback, f.rbCode = true, 409, "wpsync_push_rollback"
+	o, _, out := contentSite(t, f)
+	var report Result
+	o.Report = &report
+
+	err := Run(o)
+	var apiErr *agentapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "wpsync_push_rollback" || errors.As(err, new(*RolledBackError)) {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if strings.Contains(strings.Join(f.routes, " "), "rescue") || f.rolledBack {
+		t.Errorf("routes = %v", f.routes)
+	}
+	if report.Status != "committed" {
+		t.Errorf("status = %q", report.Status)
+	}
+}
+
+// Eine Antwort ohne wpsync-Code – die Fehlerseite einer Firewall, ein Fatal – ist keine Antwort des Agents: rescue.php.
+func TestRunFallsBackToRescueOnAnAnswerThatIsNotTheAgents(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{{403, ""}, {403, "rest_forbidden"}, {500, "wpsync_push_rollback"}} {
+		f := newFakeSite(t)
+		f.broken, f.rollback, f.rbCode = true, tc.status, tc.code
+		f.rbPlain = tc.code == ""
+		o, _, out := contentSite(t, f)
+
+		err := Run(o)
+		var rolled *RolledBackError
+		if !errors.As(err, &rolled) || !reflect.DeepEqual(rolled.Warnings, []string{WarningContentNotRolledBack}) {
+			t.Fatalf("%+v: err = %v\n%s", tc, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback rescue") {
+			t.Errorf("%+v: routes = %s", tc, got)
+		}
+	}
+}
+
+// Ohne Inhalte bleibt alles, wie es war: die Rücknahme nach dem Health-Check geht immer über rescue.php, nie über den Agent.
+func TestRunWithoutContentAlwaysRollsBackThroughRescue(t *testing.T) {
+	f := newFakeSite(t)
+	f.broken, f.rollback, f.rbCode = true, 409, "wpsync_push_rollback"
+	o, _, out := contentSite(t, f)
+	o.Content = ""
+
+	err := Run(o)
+	var rolled *RolledBackError
+	if !errors.As(err, &rolled) || len(rolled.Warnings) != 0 {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rescue") || strings.Contains(got, "rollback") {
+		t.Errorf("routes = %s", got)
+	}
+}
