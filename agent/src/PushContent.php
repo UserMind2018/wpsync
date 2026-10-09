@@ -259,6 +259,9 @@ final class PushContent
             if ($e->reason() === ContentException::CONFLICT) {
                 $out['conflicts'] = array_slice($e->keys(), 0, ContentException::MAX_KEYS);
             }
+        } catch (\Throwable $e) {
+            // Kein vorgesehener Grund: auch der steht in der Antwort, statt den Begin scheitern zu lassen.
+            $out['error'] = (new ContentException(ContentException::FAILED, 'Das Paket liess sich nicht prüfen.'))->toArray();
         }
         return $out;
     }

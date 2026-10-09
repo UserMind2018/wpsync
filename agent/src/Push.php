@@ -590,6 +590,10 @@ final class Push
                 $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by']);
             } catch (ContentException $e) {
                 return self::contentFailed($e, $content, $work, $pushId);
+            } catch (\Throwable $e) {
+                // Kein vorgesehener Grund, dieselbe Folge: was die Transaktion angefangen hat, hat sie
+                // zurückgenommen (ContentStore::transaction). Was der Fehler war, bleibt hier.
+                return self::contentFailed(new ContentException(ContentException::FAILED, 'Die Inhalte liessen sich nicht anwenden – nichts wurde übernommen.'), $content, $work, $pushId);
             }
             PushRescue::setContent($work, $pushId, PushRescue::CONTENT_APPLIED);
             $answer['content'] = [

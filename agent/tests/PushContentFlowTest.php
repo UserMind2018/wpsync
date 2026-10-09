@@ -678,4 +678,39 @@ final class PushContentFlowTest extends TestCase
         $this->assertSame($old, $this->liveDb->data);
         $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
     }
+
+    /**
+     * AC-150: auch ein Fehler, den niemand als Ablehnung vorgesehen hat, hinterlässt keinen halben
+     * Satz – die Transaktion ist zurück, Code und Uploads auch, der Push ist gescheitert.
+     */
+    public function testAnUnexpectedErrorWhileApplyingFailsThePush(): void
+    {
+        $old                      = $this->liveDb->data;
+        $this->liveDb->beforeLock = static function (): void {
+            throw new \RuntimeException('boom');
+        };
+        list($id, $commit) = $this->push($this->stage($this->rows()), 'new', ['2026/10/neu.png' => (string) base64_decode(self::PNG)]);
+        $error             = $this->assertRefused('wpsync_content_content_failed', 500, $commit);
+        $this->assertStringNotContainsString('boom', $error->message);
+        $this->assertSame($old, $this->liveDb->data);
+        $this->assertSame('old', file_get_contents($this->live . '/plugins/x/main.php'));
+        $this->assertFileDoesNotExist($this->live . '/uploads/2026/10/neu.png');
+        $push = Store::getPush($id);
+        $this->assertSame(['failed', true], [$push['status'], $push['pruned']]);
+        $this->assertNull(Store::getState('push_lock'));
+    }
+
+    /** Dasselbe im Probelauf: die Ablehnung steht in der Antwort, der Request scheitert nicht. */
+    public function testAnUnexpectedErrorInTheDryRunIsReportedInBand(): void
+    {
+        $sha                  = $this->stage($this->rows());
+        PushContent::$resolve = static function (): ContentTarget {
+            throw new \RuntimeException('boom');
+        };
+        $begin = $this->begin($sha, ['dry' => true]);
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin);
+        $this->assertFalse($begin->data['content']['ok']);
+        $this->assertSame('content_failed', $begin->data['content']['error']['code']);
+        $this->assertStringNotContainsString('boom', $begin->data['content']['error']['message']);
+    }
 }
