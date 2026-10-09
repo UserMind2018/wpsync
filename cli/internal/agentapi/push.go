@@ -104,6 +104,8 @@ type PushRecordUnit struct {
 	NewVersion string `json:"new_version"`
 	Files      int    `json:"files"`
 	Uploaded   int    `json:"uploaded"`
+	// Extensions: on the unit "content", the project extensions of the package – only if it had any.
+	Extensions *ContentExtensions `json:"extensions,omitempty"`
 }
 
 // PushRecord is one line of the push log. Status: uploading, committed, confirmed, rolled_back,
@@ -231,6 +233,13 @@ func (c *Client) PushList() ([]PushRecord, error) {
 	}
 	if err := c.PostJSON("/wpsync/v1/push/list", map[string]any{}, &res); err != nil {
 		return nil, err
+	}
+	for _, r := range res.Pushes {
+		for i := range r.Units {
+			if r.Units[i].Extensions != nil {
+				r.Units[i].Extensions.Clean()
+			}
+		}
 	}
 	return res.Pushes, nil
 }

@@ -39,6 +39,31 @@ type ContentLimits struct {
 	IDHeadroom int64 `json:"id_headroom,omitempty"`
 }
 
+// ContentExtensions are the project extensions a package was built with: what it pushes beyond
+// the agent's whitelist. The agent names them in the dry run and keeps them in the record of the
+// push (unit "content").
+type ContentExtensions struct {
+	PostTypes      []string `json:"post_types"`
+	Taxonomies     []string `json:"taxonomies"`
+	MetaExceptions []string `json:"meta_exceptions"`
+}
+
+var extensionRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+
+// Clean keeps at most 100 names per list that look like the agent's.
+func (e *ContentExtensions) Clean() {
+	clean := func(names []string) []string {
+		out := []string{}
+		for _, n := range names {
+			if len(out) < 100 && extensionRe.MatchString(n) {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	e.PostTypes, e.Taxonomies, e.MetaExceptions = clean(e.PostTypes), clean(e.Taxonomies), clean(e.MetaExceptions)
+}
+
 // ContentFailure is a refusal of the content channel, in the dry run inside the answer.
 type ContentFailure struct {
 	Code    string       `json:"code"` // the reason, without prefix
@@ -56,6 +81,8 @@ type ContentPlan struct {
 	Limits     ContentLimits   `json:"limits"`
 	Conflicts  []ContentKey    `json:"conflicts"`
 	HealthURLs []string        `json:"health_urls"` // published pages the package changes, at most 10
+	// Extensions: only when the package names project extensions.
+	Extensions *ContentExtensions `json:"extensions,omitempty"`
 }
 
 // PushContentRef names the staged package of a push by the sha256 of the whole file.
@@ -149,6 +176,9 @@ func (p *ContentPlan) Clean() {
 	p.Conflicts = CleanKeys(p.Conflicts)
 	if len(p.HealthURLs) > 10 {
 		p.HealthURLs = p.HealthURLs[:10]
+	}
+	if p.Extensions != nil {
+		p.Extensions.Clean()
 	}
 }
 

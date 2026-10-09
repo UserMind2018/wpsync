@@ -295,6 +295,34 @@ final class PushContentFlowTest extends TestCase
         $this->assertSame([], $this->liveDb->log, 'auch der echte Begin schreibt noch keine Inhalte');
     }
 
+    /**
+     * M4 (d): die Projekt-Erweiterungen, mit denen ein Paket gebaut ist, stehen im Probelauf, im Plan
+     * und in der Einheit content des Push-Datensatzes – und bleiben dort über den Commit.
+     */
+    public function testTheExtensionsOfAPackageAreVisibleInThePushRecord(): void
+    {
+        $ext = ['post_types' => ['referenz'], 'taxonomies' => ['branche'], 'meta_exceptions' => ['design_token']];
+        $sha = $this->stage($this->rows(), ['extensions' => $ext]);
+        $dry = $this->begin($sha, ['dry' => true]);
+        $this->assertSame($ext, $dry->data['content']['extensions']);
+        $begin = $this->begin($sha);
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
+        $id   = (string) $begin->data['push_id'];
+        $plan = json_decode((string) file_get_contents($this->work($this->live) . '/' . $id . '/plan.json'), true);
+        $this->assertSame($ext, $plan['content']['extensions']);
+        $this->assertSame($ext, Store::getPush($id)['units'][0]['extensions']);
+        $commit = Push::commit(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        $unit = Store::getPush($id)['units'][0];
+        $this->assertSame('content', $unit['path']);
+        $this->assertSame($ext, $unit['extensions']);
+        $listed = Push::index()->data['pushes'][0];
+        $this->assertSame($ext, $listed['units'][0]['extensions'], 'so steht es in wpsync pushes --json');
+
+        // Ohne Erweiterungen bleibt die Einheit, wie sie war.
+        $this->assertArrayNotHasKey('extensions', $this->begin($this->stage([$this->rows()[4]]), ['dry' => true])->data['content']);
+    }
+
     /** §7.8: nach Staging prüft der Begin gegen die Kopie, und das Paket liegt im Arbeitsordner der Kopie. */
     public function testBeginForTheStagingCopy(): void
     {

@@ -379,6 +379,44 @@ final class ContentCheckTest extends TestCase
         $this->check([ContentFixtures::row('insert', 'posts', '1000007', 'absent', ContentFixtures::postRow('1000007'))], [], ContentFixtures::staging($copy))->run();
     }
 
+    /**
+     * M4 (c): eine Zuordnung ist nur pushbar, wenn ihr Objekt ein Beitrag erlaubten Typs ist – die
+     * Listen verlangen den post_type des Objekts. Eine per Erweiterung freigegebene Taxonomie, die
+     * auf der Site für Benutzer registriert ist, trifft nie etwas: in term_relationships steht für
+     * sie die ID eines Benutzers, die sich von der eines Beitrags nicht unterscheiden lässt.
+     */
+    public function testAnExtensionTaxonomyNeverReachesObjectsThatAreNoPosts(): void
+    {
+        $ext  = ['extensions' => ['post_types' => [], 'taxonomies' => ['language', 'abteilung'], 'meta_exceptions' => []]];
+        $this->store->data['terms']['11']         = ContentFixtures::term('11', 'Vertrieb');
+        $this->store->data['term_taxonomy']['11'] = ContentFixtures::taxonomy('11', '11', 'abteilung');
+        // Kein Beitrag mit dieser ID (etwa ein Benutzer 7): dangling_reference, nie ein Schreiben.
+        $e = $this->refused('dangling_reference', [ContentFixtures::row('insert', 'term_relationships', "7\0language", 'absent', ['values' => ['9:0']])], $ext);
+        $this->assertSame([['table' => 'term_relationships', 'key' => "7\0language"]], $e->keys());
+        // Ein Beitrag gesperrten Typs: blocked_row.
+        $this->refused('blocked_row', [ContentFixtures::row('insert', 'term_relationships', "400\0language", 'absent', ['values' => ['9:0']])], $ext);
+
+        // Auf der Site registriert: language für Seiten, abteilung nur für Benutzer.
+        $target              = ContentFixtures::live($this->store);
+        $target->objectTypes = static function (string $taxonomy): ?array {
+            return ['language' => ['page', 'post'], 'abteilung' => ['user'], 'category' => ['post']][$taxonomy] ?? null;
+        };
+        $this->check([ContentFixtures::row('insert', 'term_relationships', "219\0language", 'absent', ['values' => ['9:0']])], $ext, $target)->run();
+        $rows = [
+            ContentFixtures::row('insert', 'term_relationships', "219\0abteilung", 'absent', ['values' => ['11:0']]),
+            ContentFixtures::row('insert', 'terms', '1000001', 'absent', ['name' => 'Neu', 'slug' => 'neu', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000001', 'absent', ['term_id' => '1000001', 'taxonomy' => 'abteilung', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('insert', 'termmeta', "11\0farbe", 'absent', ['values' => ['rot']]),
+        ];
+        $e = $this->refused('blocked_row', $rows, $ext, $target);
+        $this->assertSame(["219\0abteilung", '1000001', '1000001', "11\0farbe"], array_column($e->keys(), 'key'), 'eine Benutzer-Taxonomie: keine Zeile, in keiner Tabelle');
+
+        // Registriert, aber nicht für den Typ dieses Beitrags (Anhang 300): die Zuordnung geht nicht.
+        $this->refused('blocked_row', [ContentFixtures::row('insert', 'term_relationships', "300\0language", 'absent', ['values' => ['9:0']])], $ext, $target);
+        // Die Whitelist bleibt, wie sie ist – auch wenn die Site category nur für Beiträge registriert.
+        $this->check([ContentFixtures::row('insert', 'term_relationships', "219\0category", 'absent', ['values' => ['5:0']])], [], $target)->run();
+    }
+
     /** AC-151: der Konflikt nennt alle abweichenden Schlüssel, nicht nur den ersten. */
     public function testConflictNamesEveryKey(): void
     {

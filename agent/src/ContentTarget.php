@@ -37,6 +37,12 @@ final class ContentTarget
      *      Papierkorb: Name, ID, Beitragstyp, post_parent – auf Live wp_unique_post_slug(); null: der Name bleibt
      */
     public $slug = null;
+    /**
+     * @var (callable(string): (list<string>|null))|null Objekttypen, für die eine Taxonomie auf der Site
+     *      registriert ist (get_taxonomy()->object_type); null als Ergebnis: nicht registriert. Für
+     *      Taxonomien aus Projekt-Erweiterungen (ContentCheck); null: nicht geprüft
+     */
+    public $objectTypes = null;
     /** @var ContentReader|null */
     private $reader = null;
 

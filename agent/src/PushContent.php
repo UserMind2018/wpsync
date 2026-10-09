@@ -208,7 +208,8 @@ final class PushContent
                     $copy['url'] . '/wp-content/uploads',
                     $autoload
                 );
-                $target->indexables = self::existing($copy['indexables']);
+                $target->indexables  = self::existing($copy['indexables']);
+                $target->objectTypes = [self::class, 'objectTypes']; // die Kopie läuft mit dem Code von Live
                 return $target;
             }
             $tables = [];
@@ -228,6 +229,7 @@ final class PushContent
                 $autoload
             );
             $target->indexables = self::existing((string) $wpdb->prefix . 'yoast_indexable');
+            $target->objectTypes = [self::class, 'objectTypes'];
             // Wie wp_insert_post() beim Weg in den Papierkorb. Nur auf Live: die Funktion liest dessen Tabellen.
             $target->slug = static function (string $name, string $id, string $type, string $parent): string {
                 return function_exists('wp_unique_post_slug') ? (string) wp_unique_post_slug($name, (int) $id, 'trash', $type, (int) $parent) : $name;
@@ -236,6 +238,17 @@ final class PushContent
         } catch (\InvalidArgumentException $e) {
             throw new ContentException(ContentException::ORIGIN, 'Die Adresse oder die Tabellen dieser Site lassen sich nicht bestimmen.');
         }
+    }
+
+    /**
+     * Objekttypen, für die eine Taxonomie auf dieser Site registriert ist; null: nicht registriert.
+     *
+     * @return list<string>|null
+     */
+    public static function objectTypes(string $taxonomy): ?array
+    {
+        $object = function_exists('get_taxonomy') ? get_taxonomy($taxonomy) : false;
+        return is_object($object) ? array_values(array_map('strval', (array) ($object->object_type ?? []))) : null;
     }
 
     /**
@@ -262,7 +275,7 @@ final class PushContent
      * @param string|null          $file    das abgelegte Paket; null: es liegt nicht (mehr) da
      * @param array<string, mixed> $uploads Dateien der Einheit uploads desselben Pushs (nur die Schlüssel zählen)
      * @param bool                 $real    echter Begin: neue Beiträge brauchen den Öffner des Fensters (§9)
-     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>}
+     * @return array{ok: bool, error: array<string, mixed>|null, rows: object, limits: array<string, int>, conflicts: list<array<string, string>>, health_urls: list<string>, extensions?: array<string, list<string>>}
      */
     public static function plan(?string $file, string $name, string $content, array $uploads, bool $real, ?int $opener): array
     {
@@ -273,6 +286,10 @@ final class PushContent
             }
             $package     = ContentPackage::read($file);
             $out['rows'] = (object) $package->counts();
+            $used        = ContentLists::used($package->head()['extensions']);
+            if ($used !== null) {
+                $out['extensions'] = $used; // sichtbar im Probelauf und im Push-Datensatz (Einheit content)
+            }
             $target      = self::target($name, $content);
             $check       = new ContentCheck($package, $target);
             $check->run($uploads);

@@ -307,8 +307,10 @@ final class Push
         $taken = true;
         if ($contentSha !== null) {
             $rows            = (int) array_sum((array) $contentPlan['rows']);
-            $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows];
-            $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows];
+            // Projekt-Erweiterungen des Pakets bleiben im Datensatz des Pushs sichtbar (pushes, WP-Admin).
+            $extensions      = isset($contentPlan['extensions']) ? ['extensions' => $contentPlan['extensions']] : [];
+            $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows] + $extensions;
+            $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows] + $extensions;
             $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
         }
         $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
@@ -578,7 +580,9 @@ final class Push
         }
         if ($contentSha !== null) {
             $rows      = (int) ($plan['content']['rows'] ?? 0);
-            $summary[] = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows];
+            $used      = ContentLists::used(is_array($plan['content']['extensions'] ?? null) ? $plan['content']['extensions'] : []);
+            $summary[] = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows]
+                + ($used === null ? [] : ['extensions' => $used]);
         }
         // Ab hier gilt der Push als getauscht – auch wenn PHP beim Anwenden der Inhalte stirbt: dann
         // nimmt die Datenbank die Transaktion zurück, und wpsync rollback holt den Code nach.

@@ -126,6 +126,22 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   `{table: "comments", key: "<post-id>"}`); nichts wird zurückgenommen. Meta der festen
   Sperrliste (`_edit_lock`, `_edit_last`, `_wp_old_slug`, `_wp_trash_meta_*`, `_elementor_css` …)
   und der oEmbed-Cache (`_oembed_*`) zählen nicht und gehen mit dem Beitrag
+- Agent: Engere Grenzen für Projekt-Erweiterungen (`extensions`) eines Inhalts-Pakets,
+  `list_version` bleibt 2. Die feste Liste `never_post_types` kennt weitere Code-Träger, Shop-,
+  Mitgliedschafts-, Kurs-, Formular- und Weiterleitungs-Typen; dazu Präfixe (`shop_`, `wc_`,
+  `edd_`, `memberpress`, `sfwd-`, `llms_`, `tutor_`, `ld-`, `frm_`, `forminator_`, `wpforms`,
+  `nf_`, `jp_`, `amp_`, `flamingo_`) und Wörter im Namen (`snippet`, `code`, `redirect`,
+  `webhook`, `payment`, `order`, `subscription`, `membership`, `coupon`). Neu eine Sperre für
+  Taxonomien: `action-group`, `user-group`, `link_category`, `product_type`,
+  `product_visibility`, `shop_order_status` und alles mit `user`, `role` oder `cap` im Namen.
+  Ein Paket, das so etwas freischalten will, ist `package_invalid`. Eine Taxonomie aus einer
+  Erweiterung, die die Site (auch) für Benutzer registriert hat, ist `blocked_row`, ebenso eine
+  Zuordnung an einen Beitrag, für dessen Typ sie nicht registriert ist. Im Manifest-Kopf neu:
+  `lists.never_post_type_words`, `lists.never_taxonomies`, `lists.never_taxonomy_words`
+- Die Erweiterungen eines Pakets bleiben sichtbar: `content.extensions` in der Antwort des
+  Begin und im `plan`-Ereignis, `units[].extensions` an der Einheit `content` in
+  `wpsync pushes --json` (ohne `--json` hinter der Einheit) und in der Liste der Pushes im
+  WP-Admin. Das Feld fehlt, wenn das Paket keine nennt
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

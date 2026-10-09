@@ -52,11 +52,17 @@ func Pushes(o Options) error {
 		}
 		var units []string
 		for _, u := range r.Units {
+			name := agentapi.Printable(u.Path)
 			if ValidUnit(u.Path) || u.Path == UploadsUnit || u.Path == ContentUnit {
-				units = append(units, u.Path)
-			} else {
-				units = append(units, agentapi.Printable(u.Path))
+				name = u.Path
 			}
+			// What a content push carried beyond the agent's whitelist stays visible.
+			if e := u.Extensions; e != nil && u.Path == ContentUnit {
+				if all := append(append(append([]string{}, e.PostTypes...), e.Taxonomies...), e.MetaExceptions...); len(all) > 0 {
+					name += " (Erweiterungen: " + strings.Join(all, " ") + ")"
+				}
+			}
+			units = append(units, name)
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
 			targetLabel(r.Target), agentapi.Printable(r.Device), status, strings.Join(units, ", "))

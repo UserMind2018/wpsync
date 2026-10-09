@@ -449,7 +449,11 @@ func planEvent(units []Unit, plan *agentapi.PushBegin, target string, skipped, m
 		if rows == nil {
 			rows = map[string]int{}
 		}
-		ev["content"] = map[string]any{"rows": rows, "conflicts": append([]agentapi.ContentKey{}, ct.Conflicts...), "limits": ct.Limits}
+		content := map[string]any{"rows": rows, "conflicts": append([]agentapi.ContentKey{}, ct.Conflicts...), "limits": ct.Limits}
+		if ct.Extensions != nil {
+			content["extensions"] = ct.Extensions
+		}
+		ev["content"] = content
 	}
 	return ev
 }

@@ -685,9 +685,39 @@ Die **Listen** gehören dem Agent (`ContentLists`, Version im Manifest-Kopf unte
 und `lists`); die Angaben im Paket sind nur ein Abgleich. **Projekt-Erweiterungen**
 (`extensions`) kommen aus dem Paket selbst und sind deshalb eng begrenzt: Beitragstypen,
 Taxonomien und einzelne Ausnahmen von den Wortlisten für Meta-Schlüssel (`meta_word`) – nie Optionen,
-nie Tabellen, und nie ein Beitragstyp der festen Liste (`never_post_types`: Revisionen,
-Code-Snippets, Shop, Formulareinträge, geplante Aktionen …). Erwartete Abdrücke nimmt der Agent
+nie Tabellen. Erwartete Abdrücke nimmt der Agent
 nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
+
+Was **keine** Erweiterung freischaltet (das Paket ist sonst `package_invalid`; die Listen stehen
+im Manifest-Kopf unter `lists`):
+
+- **Beitragstypen** der festen Liste `never_post_types` – Revisionen und andere Interna,
+  Code-Träger (Snippet-Plugins, `custom-css-js`, Vorlagen von Oxygen, Bricks und Beaver Builder),
+  Shop (WooCommerce, Easy Digital Downloads), Mitgliedschaft und Kurse (MemberPress, LearnDash),
+  Formulare und ihre Einträge (Contact Form 7, WPForms, Forminator, Formidable, Fluent Forms,
+  MC4WP), Weiterleitungen, geplante Aktionen –, dazu jeder Typ mit einem Präfix aus
+  `never_post_type_prefixes` (`shop_`, `wc_`, `edd_`, `memberpress`, `sfwd-`, `llms_`, `tutor_`,
+  `ld-`, `frm_`, `forminator_`, `wpforms`, `nf_`, `jp_`, `amp_`, `flamingo_`, `wpcode`) und jeder,
+  dessen Name eines der Wörter aus `never_post_type_words` enthält (`snippet`, `code`, `redirect`,
+  `webhook`, `payment`, `order`, `subscription`, `membership`, `coupon`). Was der Pull
+  pseudonymisiert, ebenfalls nicht.
+- **Taxonomien** aus `never_taxonomies` (`action-group`, `user-group`, `link_category`,
+  `product_type`, `product_visibility`, `shop_order_status`) und jede mit `user`, `role` oder
+  `cap` im Namen (`never_taxonomy_words`). Produktattribute (`pa_*`) und -kategorien sind nicht
+  pauschal gesperrt.
+- **Zuordnungen an Objekte, die keine Beiträge sind:** eine Zuordnung (`term_relationships`)
+  braucht immer einen Beitrag erlaubten Typs auf dem Ziel oder im Paket. Für eine Taxonomie aus
+  einer Erweiterung prüft der Agent zusätzlich, wofür die Site sie registriert hat: ist sie (auch)
+  für Benutzer registriert, ist jede ihrer Zeilen `blocked_row`; ist sie nicht für den Typ des
+  Beitrags registriert, ist die Zuordnung `blocked_row`. In `term_relationships` liesse sich die
+  ID eines Benutzers sonst nicht von der eines Beitrags unterscheiden.
+
+Die Erweiterungen, mit denen ein Paket gebaut ist, bleiben **sichtbar**: im Probelauf
+(`content.extensions` im `plan`-Ereignis), im Datensatz des Pushs an der Einheit `content`
+(`wpsync pushes --json`: `units[].extensions` mit `post_types`, `taxonomies`,
+`meta_exceptions`; ohne `--json` hinter der Einheit) und im WP-Admin in der Liste der Pushes.
+Das Feld fehlt, wenn ein Paket keine Erweiterung nennt. Ob eine Site Erweiterungen überhaupt
+zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gibt es noch nicht.
 
 ### Anwenden, Health-Check, Rücknahme
 

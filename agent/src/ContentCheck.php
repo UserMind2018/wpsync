@@ -236,6 +236,13 @@ final class ContentCheck
             if ($why === null && $table === 'term_relationships') {
                 $why = $this->blockedRelations($key, $row['row']['values']);
             }
+            // Eine per Erweiterung freigegebene Taxonomie trifft nur Beiträge, für deren Typ die Site sie führt.
+            if ($why === null && $table === 'term_relationships' && $this->foreignTaxonomy($name, $ctx['post_type'] ?? null)) {
+                $why = 'taxonomy';
+            }
+            foreach ($why === null && isset($ctx['taxonomies']) ? $ctx['taxonomies'] : [] as $taxonomy) {
+                $why = $this->foreignTaxonomy((string) $taxonomy, null) ? 'taxonomy' : $why;
+            }
             if ($why === 'no_object') {
                 $this->dangling[] = ContentException::key($table, $key);
             } elseif ($why === 'key') {
@@ -279,6 +286,25 @@ final class ContentCheck
             $invalid[] = ContentException::key('posts', $row['key']);
         }
         return ContentLists::postType($row['row']['post_type'], $ext) ? null : 'post_type';
+    }
+
+    /**
+     * Gehört eine Taxonomie aus einer Projekt-Erweiterung auf der Site nicht zu Beiträgen? In
+     * term_relationships steht für eine Benutzer-Taxonomie die ID eines Benutzers – von der eines
+     * Beitrags nicht zu unterscheiden. Ist die Taxonomie registriert, darf sie deshalb nicht für
+     * Benutzer gelten, und eine Zuordnung braucht einen Beitrag, für dessen Typ sie registriert ist.
+     * Die Whitelist des Agents bleibt davon unberührt; eine nicht registrierte Taxonomie auch.
+     */
+    private function foreignTaxonomy(string $taxonomy, ?string $postType): bool
+    {
+        if ($this->target->objectTypes === null || in_array($taxonomy, ContentLists::TAXONOMIES, true)) {
+            return false;
+        }
+        $types = ($this->target->objectTypes)($taxonomy);
+        if ($types === null) {
+            return false;
+        }
+        return in_array('user', $types, true) || ($postType !== null && !in_array($postType, $types, true));
     }
 
     /**

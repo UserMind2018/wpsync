@@ -210,6 +210,93 @@ final class ContentListsTest extends TestCase
         $this->assertFalse(ContentLists::neverPostType('referenz'));
     }
 
+    /** @return array<string, array{0: string}> */
+    public static function neverPostTypes(): array
+    {
+        $types = [
+            // M4: feste Einträge
+            'wbcr-snippets', 'advanced_ads', 'custom-css-js', 'et_code_snippet', 'shortcoder', 'ct_template', 'oxy_user_library',
+            'bricks_template', 'fl-builder-template', 'fl-theme-layout', 'memberpressrule', 'memberpressproduct', 'memberpressgroup',
+            'wc_membership_plan', 'wc_user_membership', 'shop_webhook', 'download', 'edd_payment', 'edd_discount', 'edd_log',
+            'wc_booking', 'sfwd-courses', 'sfwd-lessons', 'sfwd-quiz', 'redirect_rule', 'wp_automatic', 'forminator_forms',
+            'forminator_polls', 'forminator_quizzes', 'frm_form_actions', 'frm_styles', 'mc4wp-form', 'amp_validated_url',
+            'jp_pay_order', 'jp_pay_product', 'fluentform', 'wpforms_log',
+            // M4: Präfixe
+            'shop_x', 'wc_x', 'edd_x', 'memberpressx', 'sfwd-x', 'llms_course', 'tutor_quiz', 'ld-exam', 'frm_x', 'forminator_x',
+            'wpforms-x', 'nf_x', 'jp_x', 'amp_x', 'flamingo_x',
+            // M4: Wörter an beliebiger Stelle
+            'my-snippet', 'php_code_x', 'x-redirect', 'my_webhook', 'x_payment_y', 'sales-order', 'subscription_plan',
+            'x-membership', 'coupon-x', 'SNIPPETS',
+        ];
+        return array_combine($types, array_map(static function (string $type): array {
+            return [$type];
+        }, $types));
+    }
+
+    /** M4: Code-Träger, Shop, Mitgliedschaft, Formulare, Weiterleitungen – als Liste und als Muster nie freizuschalten. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('neverPostTypes')]
+    public function testNoExtensionFreesThisPostType(string $type): void
+    {
+        $this->assertTrue(ContentLists::neverPostType($type), $type);
+        if (preg_match('/^[a-z0-9_-]{1,20}\z/', $type) === 1) {
+            $this->assertNull(ContentLists::extensions(['post_types' => ['referenz', $type]]), $type);
+        }
+        $this->assertFalse(ContentLists::postType($type), 'kein Typ der Whitelist');
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function neverTaxonomies(): array
+    {
+        $names = ['action-group', 'user-group', 'link_category', 'product_type', 'product_visibility', 'shop_order_status',
+            'user_tag', 'author-users', 'wp_role', 'roles', 'capability', 'my_caps', 'USER_x'];
+        return array_combine($names, array_map(static function (string $name): array {
+            return [$name];
+        }, $names));
+    }
+
+    /** M4: auch für Taxonomien gibt es eine feste Sperre – Benutzer-Taxonomien, Rollen, Interna des Shops. */
+    #[\PHPUnit\Framework\Attributes\DataProvider('neverTaxonomies')]
+    public function testNoExtensionFreesThisTaxonomy(string $taxonomy): void
+    {
+        $this->assertTrue(ContentLists::neverTaxonomy($taxonomy), $taxonomy);
+        if (preg_match('/^[a-z0-9_-]{1,32}\z/', $taxonomy) === 1) {
+            $this->assertNull(ContentLists::extensions(['taxonomies' => ['branche', $taxonomy]]), $taxonomy);
+        }
+        $this->assertFalse(ContentLists::taxonomy($taxonomy), 'keine Taxonomie der Whitelist');
+    }
+
+    /** M4: die Muster treffen nichts von der Whitelist und nicht die üblichen Erweiterungen eines Projekts. */
+    public function testThePatternsLeaveTheWhitelistAndUsualExtensionsAlone(): void
+    {
+        foreach (ContentLists::POST_TYPES as $type) {
+            $this->assertFalse(ContentLists::neverPostType($type), $type);
+        }
+        foreach (ContentLists::TAXONOMIES as $taxonomy) {
+            $this->assertFalse(ContentLists::neverTaxonomy($taxonomy), $taxonomy);
+        }
+        $ext = ContentLists::extensions(['post_types' => ['referenz', 'team-mitglied', 'produkt', 'event'], 'taxonomies' => ['branche', 'pa_farbe', 'product_cat', 'language'], 'meta_exceptions' => ['design_token']]);
+        $this->assertSame(['referenz', 'team-mitglied', 'produkt', 'event'], $ext['post_types']);
+        $this->assertSame(['branche', 'pa_farbe', 'product_cat', 'language'], $ext['taxonomies'], 'Produktattribute und -kategorien nicht pauschal');
+        $this->assertSame(['design_token'], $ext['meta_exceptions']);
+        $this->assertSame(2, ContentLists::VERSION, 'unveröffentlicht: die Version bleibt');
+        $lists = ContentLists::export();
+        $this->assertSame(ContentLists::NEVER_POST_TYPE_WORDS, $lists['never_post_type_words']);
+        $this->assertSame(ContentLists::NEVER_TAXONOMIES, $lists['never_taxonomies']);
+        $this->assertSame(ContentLists::NEVER_TAXONOMY_WORDS, $lists['never_taxonomy_words']);
+        $this->assertContains('shop_', $lists['never_post_type_prefixes']);
+    }
+
+    /** M4: used() nennt die Erweiterungen eines Pakets nur, wenn es welche hat. */
+    public function testUsedExtensions(): void
+    {
+        $this->assertNull(ContentLists::used(['post_types' => [], 'taxonomies' => [], 'meta_exceptions' => []]));
+        $this->assertNull(ContentLists::used([]));
+        $this->assertSame(
+            ['post_types' => ['referenz'], 'taxonomies' => [], 'meta_exceptions' => ['design_token']],
+            ContentLists::used(['post_types' => ['referenz', 'referenz'], 'taxonomies' => [], 'meta_exceptions' => ['design_token'], 'fremd' => ['x']])
+        );
+    }
+
     /** Härtung S4: mehr Sperrwörter – kurze nur als ganzes Namensglied, damit übliche Schlüssel pushbar bleiben. */
     public function testWordListsBlockSecretsButNotUsualKeys(): void
     {

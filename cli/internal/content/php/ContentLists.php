@@ -58,15 +58,39 @@ final class ContentLists
 
     /**
      * Beitragstypen, die keine Projekt-Erweiterung freigeben kann – die Erweiterungen kommen aus
-     * dem Paket selbst: Interna, Code-Träger, Shop, Formulareinträge, geplante Aktionen.
+     * dem Paket selbst: Interna, Code-Träger (Snippets, Vorlagen von Page-Buildern, die PHP oder
+     * Skripte tragen), Shop, Mitgliedschaft und Kurse, Formulare und ihre Einträge, Weiterleitungen,
+     * geplante Aktionen. Gross/klein egal.
      */
     public const NEVER_POST_TYPES = [
         'revision', 'customize_changeset', 'oembed_cache', 'user_request', 'wp_font_family', 'wp_font_face',
         'wpcode', 'elementor_snippet', 'code_snippet', 'wp_code_snippet', 'insertheadersandfooters', 'ihaf_snippet',
-        'product', 'product_variation', 'shop_coupon', 'shop_subscription',
-        'wpcf7_contact_form', 'wpforms', 'nf_sub', 'feedback', 'scheduled-action',
+        'wbcr-snippets', 'advanced_ads', 'custom-css-js', 'et_code_snippet', 'shortcoder', 'wp_automatic',
+        'ct_template', 'oxy_user_library', 'bricks_template', 'fl-builder-template', 'fl-theme-layout',
+        'product', 'product_variation', 'shop_coupon', 'shop_subscription', 'shop_webhook', 'wc_booking',
+        'wc_membership_plan', 'wc_user_membership', 'memberpressrule', 'memberpressproduct', 'memberpressgroup',
+        'download', 'edd_payment', 'edd_discount', 'edd_log', 'jp_pay_order', 'jp_pay_product',
+        'sfwd-courses', 'sfwd-lessons', 'sfwd-quiz',
+        'wpcf7_contact_form', 'wpforms', 'wpforms_log', 'nf_sub', 'feedback', 'fluentform', 'mc4wp-form',
+        'forminator_forms', 'forminator_polls', 'forminator_quizzes', 'frm_form_actions', 'frm_styles',
+        'redirect_rule', 'amp_validated_url', 'scheduled-action',
     ];
-    public const NEVER_POST_TYPE_PREFIXES = ['shop_order', 'flamingo_', 'wpforms', 'wpcode'];
+    /** Dazu jeder Typ mit einem dieser Präfixe … */
+    public const NEVER_POST_TYPE_PREFIXES = [
+        'shop_', 'wc_', 'edd_', 'memberpress', 'sfwd-', 'llms_', 'tutor_', 'ld-', 'frm_', 'forminator_', 'wpforms', 'nf_',
+        'jp_', 'amp_', 'flamingo_', 'wpcode',
+    ];
+    /** … und jeder, dessen Name eines dieser Wörter enthält. */
+    public const NEVER_POST_TYPE_WORDS = ['snippet', 'code', 'redirect', 'webhook', 'payment', 'order', 'subscription', 'membership', 'coupon'];
+
+    /**
+     * Taxonomien, die keine Projekt-Erweiterung freigeben kann: Gruppen geplanter Aktionen,
+     * Benutzer-Taxonomien, Link-Kategorien, Interna des Shops. Produktattribute (pa_*) und
+     * -kategorien bewusst nicht pauschal.
+     */
+    public const NEVER_TAXONOMIES = ['action-group', 'user-group', 'link_category', 'product_type', 'product_visibility', 'shop_order_status'];
+    /** Dazu jede Taxonomie, deren Name eines dieser Wörter enthält (Benutzer, Rollen, Capabilities). */
+    public const NEVER_TAXONOMY_WORDS = ['user', 'role', 'cap'];
 
     public const BLOCKED_OPTIONS = [
         'siteurl', 'home', 'active_plugins', 'cron', 'rewrite_rules', 'elementor_pro_license_key',
@@ -258,7 +282,8 @@ final class ContentLists
 
     /**
      * Projekt-Erweiterungen aus dem Paketkopf, geprüft. Optionen und Tabellen lassen sich nicht
-     * freigeben, Beitragstypen, die der Pull pseudonymisiert, auch nicht.
+     * freigeben, Beitragstypen, die der Pull pseudonymisiert, auch nicht – und nichts, was
+     * neverPostType() oder neverTaxonomy() nennen.
      *
      * @param mixed $raw
      * @return array{post_types: list<string>, taxonomies: list<string>, meta_exceptions: list<string>}|null null: ungültig
@@ -290,21 +315,50 @@ final class ContentLists
                 return null;
             }
         }
+        foreach ($out['taxonomies'] as $taxonomy) {
+            if (self::neverTaxonomy($taxonomy)) {
+                return null;
+            }
+        }
         return $out;
     }
 
-    /** Ein Beitragstyp, den keine Erweiterung freigibt: was der Pull pseudonymisiert und die feste Liste. */
+    /**
+     * Die Erweiterungen, mit denen ein Paket gebaut ist – für den Push-Datensatz, damit sichtbar
+     * bleibt, was ein Projekt über die Whitelist hinaus gepusht hat.
+     *
+     * @param array<string, mixed> $ext aus extensions()
+     * @return array{post_types: list<string>, taxonomies: list<string>, meta_exceptions: list<string>}|null null: keine
+     */
+    public static function used(array $ext): ?array
+    {
+        $out = self::NO_EXTENSIONS;
+        foreach (array_keys($out) as $field) {
+            $out[$field] = array_values(array_unique(array_filter(is_array($ext[$field] ?? null) ? $ext[$field] : [], 'is_string')));
+        }
+        return $out === self::NO_EXTENSIONS ? null : $out;
+    }
+
+    /** Ein Beitragstyp, den keine Erweiterung freigibt: was der Pull pseudonymisiert, die feste Liste und ihre Muster. */
     public static function neverPostType(string $type): bool
     {
-        if (in_array($type, Anonymizer::postTypes(), true) || in_array($type, self::NEVER_POST_TYPES, true)) {
+        $lower = strtolower($type);
+        if (in_array($type, Anonymizer::postTypes(), true) || in_array($lower, Anonymizer::postTypes(), true) || in_array($lower, self::NEVER_POST_TYPES, true)) {
             return true;
         }
         foreach (self::NEVER_POST_TYPE_PREFIXES as $prefix) {
-            if (strpos($type, $prefix) === 0) {
+            if (strpos($lower, $prefix) === 0) {
                 return true;
             }
         }
-        return false;
+        return self::hasWord($lower, self::NEVER_POST_TYPE_WORDS);
+    }
+
+    /** Eine Taxonomie, die keine Erweiterung freigibt: die feste Liste und alles mit user, role oder cap im Namen. */
+    public static function neverTaxonomy(string $taxonomy): bool
+    {
+        $lower = strtolower($taxonomy);
+        return in_array($lower, self::NEVER_TAXONOMIES, true) || self::hasWord($lower, self::NEVER_TAXONOMY_WORDS);
     }
 
     /** @return array<string, mixed> die Listen als Daten – für den Manifest-Kopf */
@@ -322,6 +376,9 @@ final class ContentLists
             'blocked_segments'        => self::BLOCKED_SEGMENTS,
             'never_post_types'        => self::NEVER_POST_TYPES,
             'never_post_type_prefixes' => self::NEVER_POST_TYPE_PREFIXES,
+            'never_post_type_words'   => self::NEVER_POST_TYPE_WORDS,
+            'never_taxonomies'        => self::NEVER_TAXONOMIES,
+            'never_taxonomy_words'    => self::NEVER_TAXONOMY_WORDS,
             'blocked_options'         => array_merge(self::BLOCKED_OPTIONS, ['<prefix>user_roles']),
             'blocked_option_prefixes' => self::BLOCKED_OPTION_PREFIXES,
             'blocked_option_words'    => self::BLOCKED_OPTION_WORDS,
