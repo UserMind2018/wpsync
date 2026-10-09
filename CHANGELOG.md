@@ -3,9 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [0.7.0] – 2026-10-09 · Agent 0.7.0
-
-### Agent 0.8.0 – Inhalte zurücknehmen ohne WordPress (Content-Push P3)
+## [0.8.0] – 2026-10-09 · Agent 0.8.0
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld
 `rescue.db` des Begin. CLI ≥ 0.8.0 gegen Agent 0.7.x und CLI 0.7.x gegen Agent ≥ 0.8.0 verhalten
@@ -129,7 +127,7 @@ sich wie bisher (`content_not_rolled_back`).
 - Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
   (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
 
-### Agent 0.7.0 – Inhalte pushen
+## [0.7.0] – 2026-10-09 · Agent 0.7.0
 
 **Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` und `push --content` brauchen
 Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter
