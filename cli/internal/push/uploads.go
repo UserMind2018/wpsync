@@ -277,10 +277,10 @@ func printKept(out io.Writer, kept []string) {
 	}
 }
 
-// pushWhat names what a push brings, for the question before it.
-func pushWhat(units int, up *agentapi.PushUnitPlan, pkg *Package) string {
+// pushWhat names what a push carries, for the question before it.
+func pushWhat(units int, up *agentapi.PushUnitPlan, pkg *Package, sw switches) string {
 	var parts []string
-	if units > 0 || (up == nil && pkg == nil) {
+	if units > 0 || (up == nil && pkg == nil && !sw.any()) {
 		parts = append(parts, fmt.Sprintf("%d Einheit(en)", units))
 	}
 	if up != nil {
@@ -288,6 +288,12 @@ func pushWhat(units int, up *agentapi.PushUnitPlan, pkg *Package) string {
 	}
 	if pkg != nil {
 		parts = append(parts, fmt.Sprintf("%d Inhaltszeile(n)", len(pkg.Rows)))
+	}
+	if n := len(sw.Activate); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d Plugin-Aktivierung(en)", n))
+	}
+	if n := len(sw.Deactivate); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d Plugin-Deaktivierung(en)", n))
 	}
 	return strings.Join(parts, " und ")
 }

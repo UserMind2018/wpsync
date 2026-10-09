@@ -116,6 +116,9 @@ type Result struct {
 	// Content: what the agent applied of the package – while it stands on the site. Omitted
 	// without content, in a dry run and once the push is rolled back.
 	Content *ContentReport `json:"content,omitempty"`
+	// Plugins: what the push switched – while it stands on the site. Omitted without a plugin state,
+	// in a dry run and once the push is rolled back (Spec Content-Push P4 §4.5).
+	Plugins *PluginsReport `json:"plugins,omitempty"`
 	// Via: how a rollback happened – "agent" (through WordPress) or "rescue" (rescue.php, without
 	// it). Omitted when nothing was rolled back (Spec Content-Push P3 §9).
 	Via string `json:"via,omitempty"`
@@ -272,12 +275,19 @@ type RolledBackError struct {
 	ContentLeftTotal int
 }
 
-// RescueDBError: --require-rescue-db, and rescue.php cannot take the content of this push back
-// without WordPress. Reason is the agent's (no_crypto, driver, no_image_key, probe_failed,
-// write_failed) or agent_outdated for an agent before 0.8.0.
-type RescueDBError struct{ Reason string }
+// RescueDBError: rescue.php cannot take the database part of this push back without WordPress, and
+// the push must not go out without that – because of --require-rescue-db, or (Mandatory) because it
+// switches plugins (Spec Content-Push P4 A9). Reason is the agent's (no_crypto, driver,
+// no_image_key, probe_failed, write_failed) or agent_outdated for an agent before 0.8.0.
+type RescueDBError struct {
+	Reason    string
+	Mandatory bool
+}
 
 func (e *RescueDBError) Error() string {
+	if e.Mandatory {
+		return fmt.Sprintf("die Notfall-Rücknahme ohne WordPress ist auf dieser Site nicht möglich (%s) – ein Push, der Plugins schaltet, geht ohne sie nicht raus", e.Reason)
+	}
 	return fmt.Sprintf("die Notfall-Rücknahme der Inhalte ohne WordPress ist auf dieser Site nicht möglich (%s) – mit --require-rescue-db wird dann nicht gepusht", e.Reason)
 }
 
@@ -557,6 +567,11 @@ func Run(o Options) error {
 	if err := o.checkTarget(); err != nil {
 		return err
 	}
+	// A wrong call ends before the lock, the scan and any request (Spec Content-Push P4 §4.1).
+	sw, err := o.switches()
+	if err != nil {
+		return err
+	}
 	unlock, err := lock(o)
 	if err != nil {
 		return err
@@ -594,6 +609,10 @@ func Run(o Options) error {
 		if units, err = selectUnits(all, o.Units, o.Out); err != nil {
 			return err
 		}
+		// A3: a unit to activate is part of the set, changed or not.
+		if units, err = withActivated(docroot, base, units, all, sw.Activate, links); err != nil {
+			return err
+		}
 		deleted = gone
 	}
 	for _, unit := range deleted {
@@ -606,7 +625,7 @@ func Run(o Options) error {
 		// something new that should go out on purpose (U14).
 		var kept []Unit
 		for _, u := range units {
-			if u.New {
+			if u.New && !slices.Contains(sw.Activate, u.Path) { // a unit to activate counts as named (U14)
 				fmt.Fprintf(o.Out, "  übersprungen: %s – neu, nur mit ausdrücklicher Nennung: wpsync push %s code %s\n", u.Path, o.Site.Name, u.Path)
 				skipped = append(skipped, u.Path)
 				continue
@@ -635,7 +654,7 @@ func Run(o Options) error {
 			return err
 		}
 	}
-	if len(units) == 0 && up == nil && pkg == nil {
+	if len(units) == 0 && up == nil && pkg == nil && !sw.any() {
 		if len(skipped) > 0 {
 			return &SkippedNewError{Units: skipped}
 		}
@@ -680,9 +699,44 @@ func Run(o Options) error {
 		report.Units = append(append([]string{}, names...), UploadsUnit)
 		want++
 	}
+	// The plugin state: unit names, and for each unit to activate the heads of its PHP files with a
+	// plugin header – the agent checks them against the target in the dry run (A10).
+	var hooked []string // units to activate whose code registers an activation hook
+	if sw.any() {
+		req.Activate, req.Deactivate = sw.Activate, sw.Deactivate
+		for i := range units {
+			if !slices.Contains(sw.Activate, units[i].Path) {
+				continue
+			}
+			heads, hook, err := pluginHeads(docroot, &units[i])
+			if err != nil {
+				return err
+			}
+			if heads != nil {
+				if req.PluginHeads == nil {
+					req.PluginHeads = map[string]map[string][]byte{}
+				}
+				req.PluginHeads[units[i].Path] = heads
+			}
+			if hook {
+				hooked = append(hooked, units[i].Path)
+			}
+		}
+	}
 	if pkg != nil {
 		// The package lies on the site before the dry run, so that the agent checks all of it –
 		// staging needs no push window and writes nothing a visitor could reach.
+		if sw.any() {
+			// The package is staged before the dry run – an agent before 0.9.0 would take it and then
+			// ignore the switches. Ask for the version first: nothing is transmitted to an old agent (V10).
+			env, err := o.Client.Ping()
+			if err != nil {
+				return agentError(target, err)
+			}
+			if !AtLeast(env.AgentVersion, agentapi.MinAgentPlugins) {
+				return ErrAgentNoPlugins
+			}
+		}
 		if err := stagePackage(o, pkg); err != nil {
 			return err
 		}
@@ -699,7 +753,10 @@ func Run(o Options) error {
 		if pkg != nil && len(req.Units) == 0 && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_units" {
 			return fmt.Errorf("%w: %w", ErrAgentNoContent, err) // an agent without the channel wants units
 		}
-		return contentError(uploadError(agentError(target, err)))
+		if sw.any() && pkg == nil && len(req.Units) == 0 && errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_units" {
+			return fmt.Errorf("%w: %w", ErrAgentNoPlugins, err) // an agent before 0.9.0 sees a begin without units
+		}
+		return pluginsError(contentError(uploadError(agentError(target, err))))
 	}
 	if !AtLeast(plan.AgentVersion, MinAgent) {
 		return ErrAgentTooOld
@@ -714,6 +771,11 @@ func Run(o Options) error {
 	// say it (0.7.0 was built with and, before its release, without the channel).
 	if pkg != nil && (plan.Content == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentContentPush)) {
 		return ErrAgentNoContent
+	}
+	// An agent before 0.9.0 ignores the fields and would push without switching anything (A19): told
+	// by the version and by the field plugins of the answer – after the dry run, before any write.
+	if sw.any() && (plan.Plugins == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentPlugins)) {
+		return ErrAgentNoPlugins
 	}
 	if err := answeredFor(target, plan.Target); err != nil {
 		return err
@@ -748,19 +810,37 @@ func Run(o Options) error {
 	if pkg != nil {
 		printContent(o.Out, pkg, plan.Content)
 	}
+	if sw.any() {
+		printPlugins(o.Out, plan.Plugins)
+		report.Warnings = append(report.Warnings, plan.Plugins.Warnings...)
+	}
 	ev := planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content)
-	if pkg != nil && plan.Rescue.DB != nil {
+	if (pkg != nil || sw.any()) && plan.Rescue.DB != nil {
 		ev["rescue_db"] = plan.Rescue.DB // only from agent 0.8.0 (Spec Content-Push P3 §5.3)
+	}
+	if sw.any() {
+		// plan.plugins as the agent answered it, and what a push never runs: activation hooks of the
+		// units to activate (found in their code), deactivation hooks the agent found on the target.
+		ev["plugins"] = plan.Plugins
+		ev["hooks_skipped"] = map[string]any{"activate": nonNil(hooked), "deactivate": nonNil(deactHooked(plan.Plugins))}
 	}
 	o.event("plan", ev)
 	if readonly {
 		return ErrNotWritable
 	}
-	// Can rescue.php take the content back if WordPress fails? The dry run says what a real begin
-	// would yield; the real begin says it again after its probe.
+	// What the agent refuses of the plugin state stops the whole set, like a refusal of the package.
+	if sw.any() && !plan.Plugins.OK {
+		if plan.Plugins.Error == nil {
+			return &PluginsError{Reason: "plugins_failed", Message: "der Agent lehnt den Plugin-Zustand ohne Grund ab"}
+		}
+		return pluginsFailure(plan.Plugins.Error)
+	}
+	// Can rescue.php take the database part back if WordPress fails? The dry run says what a real
+	// begin would yield; the real begin says it again after its probe. For a push that switches
+	// plugins the answer must be yes (A9).
 	rescueWarned := false
-	if pkg != nil {
-		if err := o.rescueDB(plan.Rescue.DB, report, &rescueWarned); err != nil {
+	if pkg != nil || sw.any() {
+		if err := o.rescueDB(plan.Rescue.DB, report, &rescueWarned, sw.any()); err != nil {
 			return err
 		}
 	}
@@ -778,7 +858,7 @@ func Run(o Options) error {
 		}
 		return contentFailure(plan.Content.Error)
 	}
-	if len(units) == 0 && pkg == nil && len(upPlan.Need) == 0 {
+	if len(units) == 0 && pkg == nil && !sw.any() && len(upPlan.Need) == 0 {
 		return ErrUploadsThere // no code, and every upload is there already
 	}
 	if o.DryRun {
@@ -808,7 +888,18 @@ func Run(o Options) error {
 		} else {
 			where = "nach " + where
 		}
-		if !o.Confirm(fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan, pkg), where)) {
+		question := fmt.Sprintf("%s %s pushen?", pushWhat(len(units), upPlan, pkg, sw), where)
+		if sw.any() {
+			// A22: no blocklist of delicate plugins – but nobody switches one off without reading its name.
+			if names := deactivating(plan.Plugins); len(names) > 0 {
+				on := "auf " + o.Site.URL
+				if target == TargetStaging {
+					on = "in der Staging-Kopie von " + o.Site.URL
+				}
+				question = fmt.Sprintf("Deaktiviert %s: %s – das Plugin läuft danach nicht mehr. %s", on, strings.Join(names, ", "), question)
+			}
+		}
+		if !o.Confirm(question) {
 			return ErrAborted
 		}
 	}
@@ -820,6 +911,10 @@ func Run(o Options) error {
 	pages := plan.HealthURLs
 	if pkg != nil {
 		pages = append(append([]string{}, pages...), plan.Content.HealthURLs...)
+	}
+	if sw.any() {
+		// A13: a page in the admin context – many plugins load their admin part only there.
+		pages = append(append([]string{}, pages...), plan.Plugins.HealthURLs...)
 	}
 	acc, urls, err := o.healthPages(pages)
 	if err != nil {
@@ -833,7 +928,7 @@ func Run(o Options) error {
 	req.Dry = false
 	begin, err := o.Client.PushBegin(req)
 	if err != nil {
-		return contentError(uploadError(agentError(target, err)))
+		return pluginsError(contentError(uploadError(agentError(target, err))))
 	}
 	// Before the first byte travels: the push the agent created must be the one asked for.
 	if err := answeredFor(target, begin.Target); err != nil {
@@ -845,9 +940,10 @@ func Run(o Options) error {
 	expires := func(err error) error {
 		return fmt.Errorf("Push %s nicht getauscht – er verfällt auf dem Server (bis dahin ist die Site für Pushes belegt, Exit 44): %w", begin.PushID, err)
 	}
-	if pkg != nil {
-		// After the probe of the real begin: with --require-rescue-db nothing is uploaded or swapped.
-		if err := o.rescueDB(begin.Rescue.DB, report, &rescueWarned); err != nil {
+	if pkg != nil || sw.any() {
+		// After the probe of the real begin: with --require-rescue-db – and always for a push that
+		// switches plugins – nothing is uploaded or swapped without the envelope.
+		if err := o.rescueDB(begin.Rescue.DB, report, &rescueWarned, sw.any()); err != nil {
 			return expires(err)
 		}
 	}
@@ -868,6 +964,7 @@ func Run(o Options) error {
 	if pkg != nil {
 		journal.Content = &JournalContent{SHA256: pkg.SHA256, Rows: len(pkg.Rows)}
 	}
+	journal.Activate, journal.Deactivate = sw.Activate, sw.Deactivate
 	if err := SaveJournal(siteDir, journal); err != nil {
 		return err
 	}
@@ -1205,11 +1302,12 @@ func readExactly(root *os.Root, unit, rel string, want LocalFile) ([]byte, error
 	return data, nil
 }
 
-// rescueDB reads rescue.db of a begin for a push with content (Spec Content-Push P3 R12, §9): a
-// hint and the warning rescue_db_unavailable when rescue.php cannot take the content back – once –,
-// or with RequireRescueDB the refusal. An agent before 0.8.0 names no rescue.db: then nothing is
-// said (the push behaves as before), and RequireRescueDB refuses it.
-func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bool) error {
+// rescueDB reads rescue.db of a begin for a push with a database part (Spec Content-Push P3 R12, §9;
+// P4 A9): a hint and the warning rescue_db_unavailable when rescue.php cannot take it back – once –,
+// or the refusal with RequireRescueDB and, mandatory, for a push that switches plugins. An agent
+// before 0.8.0 names no rescue.db: then nothing is said (the push behaves as before), and a refusal
+// names agent_outdated.
+func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bool, mandatory bool) error {
 	if db != nil && db.OK {
 		return nil
 	}
@@ -1217,8 +1315,8 @@ func (o Options) rescueDB(db *agentapi.RescueDBState, report *Result, warned *bo
 	if db != nil {
 		reason = db.Reason
 	}
-	if o.RequireRescueDB {
-		return &RescueDBError{Reason: reason}
+	if o.RequireRescueDB || mandatory {
+		return &RescueDBError{Reason: reason, Mandatory: mandatory}
 	}
 	if db == nil || *warned {
 		return nil

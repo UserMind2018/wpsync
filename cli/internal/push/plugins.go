@@ -184,3 +184,187 @@ func pluginHeads(docroot string, u *Unit) (heads map[string][]byte, hook bool, e
 	}
 	return heads, hook, nil
 }
+
+// Warnings of a push with a plugin state (Spec Content-Push P4 §4.5); never an error.
+const (
+	// WarningDeactivationReview: the set switches at least one active plugin off. Always in the
+	// plan, so that a caller has to show it (A22): what follows from switching a consent or security
+	// plugin off, no health check sees.
+	WarningDeactivationReview = "deactivation_review"
+	// WarningRequirementsUnchecked: for a plugin to activate no head was sent; its requirements are
+	// checked only in the commit.
+	WarningRequirementsUnchecked = "requirements_unchecked"
+	// WarningActivationHooksSkipped: an activated unit registers an activation hook, and it did not
+	// run – a push writes active_plugins itself (A5). Way out: deactivate and activate once in the WP admin.
+	WarningActivationHooksSkipped = "activation_hooks_skipped"
+	// WarningDeactivationHooksSkipped: a deactivated plugin registers a deactivation hook; it did not run (A17).
+	WarningDeactivationHooksSkipped = "deactivation_hooks_skipped"
+	// WarningPluginsNotRestored: rescue.php left the database part of the push on the site – and with
+	// it the plugin state: active_plugins still carries the entries of the push (A18).
+	WarningPluginsNotRestored = "plugins_not_restored"
+)
+
+// PluginsReport is the plugin part of a push that stands: the units it activated and deactivated,
+// the ones that were in the wanted state already and the ones the target skipped.
+type PluginsReport struct {
+	Activated   []string `json:"activated"`
+	Deactivated []string `json:"deactivated"`
+	Unchanged   []string `json:"unchanged"`
+	Skipped     []string `json:"skipped"`
+}
+
+// PluginsError is a refusal of the plugin state of a push – by the agent, in the dry run or later.
+// Reason is the error.reason of --json: plugins_invalid, plugins_requirements, plugins_not_allowed,
+// plugins_unsupported, plugins_failed – or rescue_db_unavailable, then Detail says why the agent has
+// no rescue envelope for the push. Plugins names the units it is about; never a value of the option.
+type PluginsError struct {
+	Reason  string
+	Message string
+	Detail  string
+	Plugins []agentapi.PluginRefusal
+	Err     error // the agent's answer, if it was one
+}
+
+func (e *PluginsError) Error() string {
+	msg := e.Message
+	if msg == "" {
+		msg = "Plugin-Zustand abgelehnt"
+	}
+	var shown []string
+	for i, p := range e.Plugins {
+		if i == 5 {
+			shown = append(shown, fmt.Sprintf("und %d weitere", len(e.Plugins)-5))
+			break
+		}
+		s := p.Unit
+		if p.Why != "" {
+			s += " (" + p.Why
+			if p.Needs != "" {
+				s += ": verlangt " + agentapi.Printable(p.Needs)
+				if p.Has != "" {
+					s += ", vorhanden " + agentapi.Printable(p.Has)
+				}
+			}
+			s += ")"
+		}
+		shown = append(shown, s)
+	}
+	if len(shown) > 0 {
+		msg += " – " + strings.Join(shown, ", ")
+	}
+	if e.Detail != "" {
+		return fmt.Sprintf("%s (%s: %s)", msg, e.Reason, e.Detail)
+	}
+	return fmt.Sprintf("%s (%s)", msg, e.Reason)
+}
+
+func (e *PluginsError) Unwrap() error { return e.Err }
+
+// pluginsFailure turns the refusal inside a dry run's answer into the error. A reason of the
+// content channel (engine_unsupported, content_failed) stays one.
+func pluginsFailure(f *agentapi.PluginsFailure) error {
+	if !strings.HasPrefix(f.Code, "plugins_") {
+		return &ContentError{Reason: f.Code, Message: f.Message}
+	}
+	return &PluginsError{Reason: f.Code, Message: f.Message, Plugins: f.Plugins}
+}
+
+// pluginsError ties a refusal of the agent (code wpsync_plugins_<reason>) to a PluginsError; the
+// agent's answer stays reachable for errors.As. Other errors pass.
+func pluginsError(err error) error {
+	var apiErr *agentapi.APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	reason, ok := strings.CutPrefix(apiErr.Code, agentapi.PluginsCodePrefix)
+	if !ok {
+		return err
+	}
+	if reason == "rescue_db" {
+		return &PluginsError{Reason: WarningRescueDBUnavailable, Message: apiErr.Message, Detail: apiErr.Detail, Err: err}
+	}
+	return &PluginsError{Reason: "plugins_" + reason, Message: apiErr.Message, Plugins: apiErr.Plugins, Err: err}
+}
+
+// pluginLabel is "Name Version" of a plugin as the agent names it, or the unit when it names none.
+// Name and version passed agentapi.CleanText: they are safe to show, umlauts stay.
+func pluginLabel(unit string, name, version *string) string {
+	if name == nil || *name == "" {
+		return unit
+	}
+	if version == nil || *version == "" {
+		return *name
+	}
+	return *name + " " + *version
+}
+
+// deactivating lists the plugins the set switches off, by name – for the question before the push (A22).
+func deactivating(plan *agentapi.PluginsPlan) []string {
+	var out []string
+	for _, d := range plan.Deactivate {
+		if d.State == "active" {
+			out = append(out, pluginLabel(d.Unit, d.Name, d.Version))
+		}
+	}
+	return out
+}
+
+// deactHooked lists the units to deactivate whose main file registers a deactivation hook.
+func deactHooked(plan *agentapi.PluginsPlan) []string {
+	var out []string
+	for _, d := range plan.Deactivate {
+		if d.State == "active" && d.Hooks {
+			out = append(out, d.Unit)
+		}
+	}
+	return out
+}
+
+// printPlugins shows the agent's plan for the plugin state.
+func printPlugins(out io.Writer, plan *agentapi.PluginsPlan) {
+	for _, a := range plan.Activate {
+		line := "  aktivieren:   " + a.Unit
+		if a.Name != nil && *a.Name != "" {
+			line += " – " + pluginLabel(a.Unit, a.Name, a.Version)
+		}
+		switch a.State {
+		case "new":
+			line += " (neu)"
+		case "active":
+			line += " (schon aktiv – nichts zu tun)"
+		case "skipped":
+			line += " (auf diesem Ziel nicht aktiviert: " + a.Why + ")"
+		}
+		fmt.Fprintln(out, line)
+		for _, r := range a.Requirements.Failed {
+			fmt.Fprintf(out, "    ! %s: verlangt %s, das Ziel hat %s\n", r.Why, agentapi.Printable(r.Needs), agentapi.Printable(r.Has))
+		}
+		if a.Requirements.Checked == "at_commit" && a.State != "skipped" {
+			fmt.Fprintln(out, "    ! Kopf nicht vorab geprüft – PHP-, WordPress-Version und Abhängigkeiten prüft der Agent erst im Commit")
+		}
+	}
+	for _, d := range plan.Deactivate {
+		line := "  deaktivieren: " + d.Unit
+		if d.Name != nil && *d.Name != "" {
+			line += " – " + pluginLabel(d.Unit, d.Name, d.Version)
+		}
+		switch d.State {
+		case "active":
+			line += " (läuft danach nicht mehr)"
+		case "inactive":
+			line += " (schon inaktiv – nichts zu tun)"
+		case "absent":
+			line += " (auf dem Ziel nicht vorhanden – nichts zu tun)"
+		}
+		fmt.Fprintln(out, line)
+		if len(d.RequiredBy) > 0 {
+			fmt.Fprintf(out, "    ! vorausgesetzt von: %s\n", strings.Join(d.RequiredBy, ", "))
+		}
+	}
+	if !plan.OK && plan.Error != nil {
+		fmt.Fprintf(out, "  ! %v\n", pluginsFailure(plan.Error))
+	}
+	if slices.Contains(plan.Warnings, WarningDeactivationReview) {
+		fmt.Fprintln(out, "  ! Ein abgeschaltetes Plugin fehlt der Site sofort – bei einem Consent- oder Sicherheits-Plugin ohne dass ein Health-Check es merkt.")
+	}
+}
