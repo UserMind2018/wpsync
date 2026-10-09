@@ -128,7 +128,16 @@ final class Push
         if ($content instanceof \WP_Error) {
             return $content;
         }
-        $units = self::parseUnits($params['units'] ?? null);
+        // Inhalte (Spec Content-Push §7): kein Eintrag in units, sondern die sha256 eines Pakets, das
+        // vorher über /content/stage abgelegt wurde. Ein Satz nur aus Inhalten hat keine Einheit.
+        $contentSha = null;
+        if (array_key_exists('content', $params)) {
+            $contentSha = PushContent::sha256($params['content']);
+            if ($contentSha === null) {
+                return self::error('wpsync_push_content', 'content nennt keine gültige sha256 eines Pakets.', 400);
+            }
+        }
+        $units = self::parseUnits($params['units'] ?? null, $contentSha !== null);
         if ($units instanceof \WP_Error) {
             return $units;
         }
@@ -183,6 +192,19 @@ final class Push
                 $bytes += $file['size'];
             }
         }
+        // Das Paket wird im Probelauf wie im echten Begin vollständig geprüft (§7.2) – ohne zu schreiben.
+        $staged      = null;
+        $contentPlan = null;
+        if ($contentSha !== null) {
+            $uploadFiles = [];
+            foreach ($units as $unit) {
+                if ($unit['path'] === PushUploads::UNIT) {
+                    $uploadFiles = $unit['files'];
+                }
+            }
+            $staged      = PushContent::staged($live . '/' . Store::pushDirName(), $keyId, $contentSha, $now);
+            $contentPlan = PushContent::plan($staged, $target, $content, $uploadFiles, empty($params['dry']), Store::pushOpener($keyId));
+        }
         $pending = self::pending();
         $open    = PushWindow::open(Store::pushUntil($keyId), $now);
         $answer  = [
@@ -202,6 +224,9 @@ final class Push
                 'hardening' => PushRescueStub::hardening(self::activePlugins()),
             ],
         ];
+        if ($contentPlan !== null) {
+            $answer['content'] = $contentPlan;
+        }
         if (!empty($params['dry'])) {
             return new \WP_REST_Response($answer);
         }
@@ -211,6 +236,10 @@ final class Push
         }
         if ($pending !== null) {
             return self::error('wpsync_push_pending', 'Push ' . $pending['push_id'] . ' ist getauscht, aber nicht bestätigt.', 409);
+        }
+        // Was der Probelauf als content.error nennt, lehnt der echte Begin ab – mit denselben Einzelheiten.
+        if ($contentPlan !== null && !$contentPlan['ok']) {
+            return ContentException::fromArray((array) $contentPlan['error'])->toError();
         }
         // Ein Push ersetzt nie eine Datei unter uploads – auch nicht mit force (Spec Content-Push §8.2, W3).
         if ($upConflicts !== []) {
@@ -273,7 +302,16 @@ final class Push
             'key_hash' => hash('sha256', PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt)),
             'units'    => $planned,
         ];
-        $stored = false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
+        // Das geprüfte Paket kommt in den Arbeitsordner des Pushs (bei Staging: in die Kopie) – der
+        // Commit wendet genau diese Datei an, auch wenn die Ablage inzwischen verfallen ist.
+        $taken = true;
+        if ($contentSha !== null) {
+            $rows            = (int) array_sum((array) $contentPlan['rows']);
+            $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows];
+            $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows];
+            $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
+        }
+        $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
             && Store::addPush([
                 'push_id' => $pushId,
                 'key_id'  => $keyId,
@@ -893,10 +931,14 @@ final class Push
 
     /**
      * @param mixed $raw
+     * @param bool  $allowEmpty der Satz hat Inhalte: er darf ohne Code und ohne Uploads kommen
      * @return list<array{path: string, files: array<string, array{size: int, sha256: string, mtime: int}>, base: array<string, mixed>}>|\WP_Error
      */
-    private static function parseUnits($raw)
+    private static function parseUnits($raw, bool $allowEmpty = false)
     {
+        if ($allowEmpty && ($raw === null || $raw === [])) {
+            return [];
+        }
         if (!is_array($raw) || $raw === [] || count($raw) > self::MAX_UNITS) {
             return self::error('wpsync_push_units', 'units fehlt oder enthält zu viele Einheiten.', 400);
         }
