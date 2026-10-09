@@ -930,6 +930,15 @@ func Run(o Options) error {
 	if err != nil {
 		return err
 	}
+	if sw.any() {
+		for _, admin := range plan.Plugins.HealthURLs {
+			if !slices.Contains(urls, admin) {
+				fmt.Fprintln(o.Out, "  ! Plugins im Admin-Kontext prüft dieser Push nicht: die Seite, die der Agent dafür nennt, gehört nicht zur gekoppelten Adresse (http/https, www?)")
+				report.Warnings = append(report.Warnings, WarningAdminCheckSkipped)
+				break
+			}
+		}
+	}
 	before := check(o.ctx(), o.HTTP, urls, o.pause, acc)
 	if err := o.interrupted(); err != nil {
 		return err

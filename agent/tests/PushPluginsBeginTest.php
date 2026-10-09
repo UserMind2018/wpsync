@@ -204,4 +204,17 @@ final class PushPluginsBeginTest extends PushPluginsFlowCase
         }
         $this->assertSame([], Store::$pushes);
     }
+
+    /**
+     * Security-Review P4 H2: ein Plugin, das rescue.php sperren kann, zählt für rescue.hardening schon, wenn
+     * der Satz es erst aktiviert – die CLI nennt es dann als wahrscheinliche Ursache, wenn der Rückweg zu ist.
+     */
+    public function testAHardeningPluginThatThePushActivatesIsNamed(): void
+    {
+        $units = ['plugins/better-wp-security' => ['better-wp-security.php' => "<?php\n/* Plugin Name: Solid Security\n * Version: 9.0 */\n"]];
+        $begin = $this->beginSet($units, ['dry' => true] + $this->wish(['plugins/better-wp-security'], [], $units));
+        $this->assertSame(['better-wp-security'], $begin->data['rescue']['hardening']);
+        $this->assertSame([], $this->beginSet($units, ['dry' => true])->data['rescue']['hardening'], 'ohne --activate liegt es nur da');
+        $this->assertSame([], $this->beginSet([], ['dry' => true, 'deactivate' => ['plugins/better-wp-security']])->data['rescue']['hardening']);
+    }
 }

@@ -136,6 +136,7 @@ type fakeSite struct {
 	adminBroken   bool                           // admin-ajax.php fails after the swap, the frontend does not
 	noSwitch      bool                           // /push/commit answers without plugins
 	tamperPlugins func(*agentapi.PluginsApplied) // changes what the commit answers about the plugins
+	adminURL      string                         // health url of the plugin plan; empty: admin-ajax.php of this site
 	hookAnswer    string                         // answer of /push/hooks; empty: every hook ok (Block B)
 }
 
@@ -541,6 +542,9 @@ func (f *fakeSite) pluginsPlan(req agentapi.PushBeginRequest) *agentapi.PluginsP
 		HealthURLs: []string{f.srv.URL + "/wp-admin/admin-ajax.php"}}
 	if req.Target == "staging" {
 		plan.HealthURLs = []string{f.srv.URL + testStaging + "/wp-admin/admin-ajax.php"}
+	}
+	if f.adminURL != "" {
+		plan.HealthURLs = []string{f.adminURL}
 	}
 	label := func(unit string) (name, version *string) {
 		if n, ok := f.pluginNames[unit]; ok {

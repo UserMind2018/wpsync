@@ -202,6 +202,10 @@ const (
 	// WarningPluginsNotRestored: rescue.php left the database part of the push on the site – and with
 	// it the plugin state: active_plugins still carries the entries of the push (A18).
 	WarningPluginsNotRestored = "plugins_not_restored"
+	// WarningAdminCheckSkipped: the page in the admin context the agent named for the health check is not
+	// one of the paired site (another origin: http/https, www) and was left out – a plugin that only
+	// breaks the admin goes unnoticed (Security-Review P4 H3).
+	WarningAdminCheckSkipped = "admin_check_skipped"
 )
 
 // PluginsReport is the plugin part of a push that stands: the units it activated and deactivated,

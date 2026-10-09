@@ -309,7 +309,10 @@ final class Push
             'rescue'        => [
                 'url'       => self::rescueUrl(!empty($params['rescue_stub']) && $open, $now),
                 'salt'      => '',
-                'hardening' => PushRescueStub::hardening(self::activePlugins()),
+                // Auch, was dieser Satz erst aktiviert: ein Sicherheits-Plugin sperrt rescue.php ab dem nächsten Request (H2).
+                'hardening' => PushRescueStub::hardening(array_merge(self::activePlugins(), $wish === null ? [] : array_map(static function (string $unit): string {
+                    return PushPlugins::slug($unit) . '/';
+                }, $wish['activate']))),
             ],
         ];
         if ($contentPlan !== null) {

@@ -899,3 +899,34 @@ func TestRollbackNamesOddEntriesQuotedAndUnknownOnes(t *testing.T) {
 		t.Errorf("output:\n%s", out)
 	}
 }
+
+// Security-Review P4 H3: fällt die Seite im Admin-Kontext aus dem Health-Check (der Agent nennt sie unter
+// einem anderen Origin – http/https, www), steht das als Warnung im Ergebnis, nicht nur als Textzeile.
+func TestRunWarnsWhenTheAdminPageIsNotChecked(t *testing.T) {
+	f := newFakeSite(t)
+	f.adminURL = "https://www.anderswo.example/wp-admin/admin-ajax.php"
+	o, _, out := pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	var report Result
+	o.Report = &report
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if report.Status != "confirmed" || !slices.Contains(report.Warnings, WarningAdminCheckSkipped) {
+		t.Errorf("report = %+v", report)
+	}
+	if !strings.Contains(out.String(), "Plugins im Admin-Kontext prüft dieser Push nicht") {
+		t.Errorf("output:\n%s", out)
+	}
+	// Mit der Seite der eigenen Site: keine Warnung.
+	f = newFakeSite(t)
+	o, _, _ = pluginSite(t, f)
+	o.Activate = []string{"plugins/kunde"}
+	o.Report = &report
+	if err := Run(o); err != nil || slices.Contains(report.Warnings, WarningAdminCheckSkipped) {
+		t.Errorf("err = %v, warnings = %v", err, report.Warnings)
+	}
+	if WarningAdminCheckSkipped != "admin_check_skipped" {
+		t.Errorf("warning = %s", WarningAdminCheckSkipped)
+	}
+}

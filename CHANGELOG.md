@@ -31,6 +31,7 @@ Agent ≥ 0.9.0 wie bisher.
 - Rücknahme der Liste als **Delta** des authentisierten Vorher-Abbilds – über den Agent und über
   `rescue.php` ohne WordPress; fremde Änderungen an der Liste bleiben und sperren nichts
 - Der Health-Check prüft zusätzlich `wp-admin/admin-ajax.php` (Plugins im Admin-Kontext)
+- `rescue.hardening` nennt ein Sicherheits-Plugin auch dann, wenn der Satz es erst aktiviert
 - Nacharbeit `plugins_effective`: der Agent liest nach dem Leeren des Object-Cache zurück, welche
   Liste WordPress als Nächstes lädt. Scheitert sie oder `object_cache`/`plugins_cache`, bestätigt die
   CLI einen Satz mit Plugin-Zustand nicht, sondern nimmt ihn zurück (Exit 43)
@@ -39,7 +40,7 @@ Agent ≥ 0.9.0 wie bisher.
 - `--json`: im `plan` `plugins` und `hooks_skipped`; im Ergebnis `plugins`, nach einer Rücknahme
   `plugins_back` und ggf. `plugins_not_restored`; Warnungen `deactivation_review`,
   `requirements_unchecked`, `activation_hooks_skipped`, `deactivation_hooks_skipped`,
-  `plugins_not_restored`; `error.reason` `plugins_invalid`, `plugins_requirements`,
+  `plugins_not_restored`, `admin_check_skipped`; `error.reason` `plugins_invalid`, `plugins_requirements`,
   `plugins_not_allowed`, `plugins_unsupported`, `plugins_failed` mit `error.plugins`
 - Agent und CLI nennen jeden Eintrag, den ein Push schaltet – auch mit Klammern oder Umlauten im
   Dateinamen (in der Ausgabe gequotet); gekappte Listen tragen `<liste>_total`, und
@@ -68,6 +69,8 @@ Agent ≥ 0.9.0 wie bisher.
   Hinweis „Nach dem Test nach Live“ nach einem Push nach Staging nennt die Schalter mit
 
 **Grenzen**
+- Kein Downgrade des Agents auf 0.8.x, solange Pushes mit Plugin-Zustand offen oder aufbewahrt sind:
+  der ältere Agent nimmt sie ohne die Liste zurück
 - Die Aktivierungsroutine (`register_activation_hook`) läuft nicht – die CLI warnt mit
   `activation_hooks_skipped` (Textsuche im Code der Einheit); Deaktivierungsroutinen laufen nie.
   Keine Multisite, keine Themes, keine Einzeldatei-Plugins

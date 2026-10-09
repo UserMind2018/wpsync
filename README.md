@@ -535,6 +535,13 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   `plugins_not_restored: {"added": […], "removed": […]}`. Den Eintrag eines Plugins, dessen Ordner
   wieder fehlt, überspringt WordPress. Sobald WordPress wieder antwortet, schliesst
   `wpsync rollback <site> <push-id>` ab.
+  Lädt WordPress danach nicht, weil die Liste noch den Stand des Pushs trägt – typisch: ein
+  abgeschaltetes Plugin fehlt einem anderen –, hilft ohne wpsync einer von zwei Handgriffen: per
+  FTP/SFTP den Ordner des Plugins, das den Fehler wirft, umbenennen (`wp-content/plugins/<slug>` →
+  `<slug>.aus`; WordPress überspringt einen Eintrag ohne Datei), oder in der Datenbank die Option
+  `active_plugins` (Tabelle `<präfix>options`) auf `a:0:{}` setzen – das schaltet alle Plugins ab,
+  auch den Agent. Danach im WP-Admin unter Plugins wieder einschalten, was laufen soll (zuerst
+  `wpsync-agent`), und mit `wpsync rollback <site> <push-id>` abschliessen.
 - **Unquittierter Commit.** Stirbt der Agent zwischen dem COMMIT der Datenbank und seinem Vermerk
   „angewandt“, gilt für die Liste statt des Deltas der Abdruck: Sie geht nur zurück, wenn ihr Wert
   bytegleich der des Pushs ist; sonst bleibt der Satz stehen (`changed_since_push` mit dem Schlüssel
@@ -549,6 +556,14 @@ plugins/kunde-widgets – 2 von 2 Dateien zu übertragen (neu)
   `[A-Za-z0-9._/ -]` (Klammern, Umlaute), nennt die CLI den Eintrag in der Ausgabe in
   Anführungszeichen; in `--json` steht er unverändert. Zeigt eine Liste nicht alle Einträge (mehr
   als 100), steht daneben `<liste>_total`.
+- **Kein Downgrade des Agents mit offenen Plugin-Pushes.** Ein Agent 0.8.x kennt das Delta nicht:
+  Er nähme einen Push von 0.9.0 zurück, ohne die Liste der Plugins anzufassen – Code zurück, Plugin
+  weiter aktiv bzw. weiter aus. Solange Pushes mit Plugin-Zustand unbestätigt sind oder ihr Snapshot
+  noch aufbewahrt wird, den Agent nicht auf eine ältere Version zurücksetzen.
+- **`admin_check_skipped`.** Nennt der Agent `admin-ajax.php` unter einer anderen Adresse als der
+  gekoppelten (http statt https, mit/ohne www), fällt die Seite aus dem Health-Check; der Push geht
+  durch, das Ergebnis trägt die Warnung. Abhilfe: mit der Adresse koppeln, unter der WordPress läuft
+  (`siteurl`).
 - Themes schaltet ein Push nicht; `mu-plugins` sind immer aktiv; Einzeldatei-Plugins (`hello.php`)
   und Multisite gehen nicht.
 
@@ -564,7 +579,7 @@ immer alle vier Listen); `units` nennt den Plugin-Zustand nie – ein Satz nur a
 `unknown: true`, wenn der Commit nicht mehr vermerken konnte, was er geändert hat (leere Listen
 heissen dann „nicht bekannt“). Warnungen:
 `deactivation_review`, `requirements_unchecked`, `activation_hooks_skipped`,
-`deactivation_hooks_skipped`, `plugins_not_restored`. `error.reason` (Exit 1): `plugins_invalid`,
+`deactivation_hooks_skipped`, `plugins_not_restored`, `admin_check_skipped`. `error.reason` (Exit 1): `plugins_invalid`,
 `plugins_requirements`, `plugins_not_allowed`, `plugins_unsupported`, `plugins_failed` – mit
 `error.plugins: [{"unit", "why", "needs"?, "has"?}]` – und `rescue_db_unavailable` mit
 `error.detail`.
