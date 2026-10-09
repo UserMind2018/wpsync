@@ -116,10 +116,13 @@ final class RescueContent
      *
      * @param string $contentDir wp-content, in dem der Datensatz des Pushs liegt
      * @param string $key        der Rescue-Key, wie die CLI ihn geschickt hat – schon gegen seinen Hash geprüft
-     * @return array{state: string, wrote: bool, error?: array<string, mixed>, left?: list<array{table: string, key: string}>, left_total?: int}
-     *         wrote: es wurden Zeilen zurückgeschrieben (nicht bei nothing)
+     * @param bool   $landed     rescue.json sagt content.state = applied: der COMMIT des Pushs kam an. Sonst zählt
+     *                           für active_plugins der Abdruck statt des Deltas (ContentRollback::run(), P4)
+     * @return array{state: string, wrote: bool, error?: array<string, mixed>, left?: list<array{table: string, key: string}>, left_total?: int, plugins?: array{deactivated: list<string>, reactivated: list<string>}}
+     *         wrote: es wurden Zeilen zurückgeschrieben (nicht bei nothing). plugins: was an der Liste der
+     *         aktiven Plugins geändert wurde – nur, wenn der Push einen Plugin-Zustand hatte
      */
-    public static function run(string $contentDir, string $workDir, string $pushId, string $key): array
+    public static function run(string $contentDir, string $workDir, string $pushId, string $key, bool $landed = true): array
     {
         $kept = static function (string $code, array $more = []): array {
             return ['state' => self::KEPT, 'wrote' => false, 'error' => ['code' => $code] + $more];
@@ -144,12 +147,15 @@ final class RescueContent
                 return $kept(self::UNREACHABLE);
             }
             ContentImage::$fileKeys = $data['image_keys'];
-            $back                   = ContentRollback::run($target, $workDir . '/' . $pushId . '/content', true);
+            $back                   = ContentRollback::run($target, $workDir . '/' . $pushId . '/content', true, $landed);
             $left                   = array_values((array) ($back['left'] ?? []));
             $out                    = ['state' => $back['state'] === ContentRollback::DONE ? self::DONE : self::NOTHING, 'wrote' => $back['state'] === ContentRollback::DONE];
             if ($left !== []) {
                 $out['left']       = array_slice($left, 0, ContentException::MAX_KEYS);
                 $out['left_total'] = count($left);
+            }
+            if (is_array($back['plugins'] ?? null)) {
+                $out['plugins'] = $back['plugins'];
             }
             return $out;
         } catch (ContentException $e) {
