@@ -805,7 +805,7 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
 	}
-	conflict, readonly, versionChange := printPlan(o.Out, units, plan)
+	conflict, readonly, versionChange := printPlan(o.Out, units, plan, sw.Activate)
 	for i, u := range units {
 		// Such a unit was compared with the last push to staging, not with the last pull.
 		if len(plan.Units[i].Conflicts) > 0 && known.unit(u.Path) != nil {
@@ -1126,6 +1126,13 @@ func Run(o Options) error {
 		if o.NoCode {
 			next = strings.TrimSpace(next + " --no-code")
 		}
+		// The plugin state belongs to the set: without the switches the push to live would only carry the code.
+		if len(sw.Activate) > 0 {
+			next = strings.TrimSpace(next + " --activate " + strings.Join(sw.Activate, ","))
+		}
+		if len(sw.Deactivate) > 0 {
+			next = strings.TrimSpace(next + " --deactivate " + strings.Join(sw.Deactivate, ","))
+		}
 		fmt.Fprintf(o.Out, "\n✓ Push %s ist auf Staging – %d Requests\n  Zurücknehmen: wpsync rollback %s %s\n  Nach dem Test nach Live: wpsync push %s code %s\n",
 			begin.PushID, o.Client.Stats.Requests, o.Site.Name, begin.PushID, o.Site.Name, next)
 		return nil
@@ -1208,7 +1215,7 @@ func selectUnits(changed []Unit, only []string, out io.Writer) ([]Unit, error) {
 }
 
 // printPlan shows what would happen and reports conflicts, missing permissions and version changes.
-func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict, readonly, versionChange bool) {
+func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin, activate []string) (conflict, readonly, versionChange bool) {
 	if plan.WindowOpen {
 		fmt.Fprintln(out, "Push-Fenster: offen")
 	} else {
@@ -1218,6 +1225,8 @@ func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin) (conflict,
 		p := plan.Units[i]
 		line := fmt.Sprintf("%s – %d von %d Dateien zu übertragen", u.Path, len(p.Need), len(u.Files))
 		switch {
+		case !p.Exists && slices.Contains(activate, u.Path):
+			line += " (neu)" // what becomes of it says the line „aktivieren:“ of the plugin plan
 		case !p.Exists:
 			line += " (neu, bleibt auf der Site inaktiv)"
 		case u.Version != p.Version:

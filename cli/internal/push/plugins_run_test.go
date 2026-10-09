@@ -763,3 +763,42 @@ func TestPluginWordsOfTheJSONResult(t *testing.T) {
 		t.Errorf("a result without a plugin state names none: %s", raw)
 	}
 }
+
+// Im E2E gefunden (Lauf 4): der Plan nannte eine neue Einheit „(neu, bleibt auf der Site inaktiv)“,
+// obwohl derselbe Push sie aktiviert. Für eine Einheit aus --activate sagt die Zeile nur noch „(neu)“ –
+// was mit ihr geschieht, steht in der Zeile „aktivieren:“ darunter.
+func TestRunPlanDoesNotCallAnActivatedUnitInactive(t *testing.T) {
+	f := newFakeSite(t)
+	o, siteDir, out := pluginSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/nurcode/nurcode.php", "<?php\n/* Plugin Name: Nur Code */\n", 1800000000)
+	o.DryRun = true
+	o.Units = []string{"plugins/nurcode"}
+	o.Activate = []string{"plugins/kunde"}
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, want := range []string{"plugins/kunde – 1 von 1 Dateien zu übertragen (neu)\n", "plugins/nurcode – 1 von 1 Dateien zu übertragen (neu, bleibt auf der Site inaktiv)\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+}
+
+// Im E2E gefunden (Lauf 4): der Hinweis „Nach dem Test nach Live“ nach einem Push nach Staging nannte
+// die Schalter nicht – wer ihn kopierte, pushte den Code ohne den Plugin-Zustand.
+func TestRunToStagingNamesTheSwitchesForLive(t *testing.T) {
+	f := newFakeSite(t)
+	f.skipped = map[string]string{"plugins/wp-rocket": "disabled_on_staging"}
+	o, siteDir, out := pluginSite(t, f)
+	write(t, filepath.Join(siteDir, "public"), "plugins/wp-rocket/wp-rocket.php", "<?php\n/* Plugin Name: WP Rocket */\n", 1800000000)
+	o.Target = TargetStaging
+	o.Units = []string{"plugins/x"}
+	o.Activate, o.Deactivate = []string{"plugins/kunde", "plugins/wp-rocket"}, []string{"plugins/alt"}
+	if err := Run(o); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	want := "Nach dem Test nach Live: wpsync push kunde code plugins/kunde plugins/wp-rocket plugins/x --activate plugins/kunde,plugins/wp-rocket --deactivate plugins/alt\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output misses %q:\n%s", want, out)
+	}
+}
