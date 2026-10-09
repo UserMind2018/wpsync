@@ -1,7 +1,6 @@
 package agentapi
 
 import (
-	"fmt"
 	"regexp"
 )
 
@@ -36,6 +35,9 @@ type PushBeginRequest struct {
 	// RescueStub asks agent 0.5.1 for rescue.php through a stub in the webroot (Spec Stufe 2, 12).
 	// An older agent ignores it and names rescue.php in its plugin folder.
 	RescueStub bool `json:"rescue_stub,omitempty"`
+	// Content names a package staged before through /content/stage (agent 0.7.0, Spec Content-Push
+	// §7). With it Units may be empty: a push of content alone.
+	Content *PushContentRef `json:"content,omitempty"`
 }
 
 // PushUnitPlan is the agent's view of one unit.
@@ -77,6 +79,9 @@ type PushBegin struct {
 	Pending      *PushPending   `json:"pending"`
 	Units        []PushUnitPlan `json:"units"`
 	Rescue       PushRescue     `json:"rescue"`
+	// Content: the agent's check of the package the request named; nil when it named none – or
+	// when the agent does not know the content channel.
+	Content *ContentPlan `json:"content"`
 }
 
 // PushChunk is a file or a piece of one; Data travels base64-encoded.
@@ -124,6 +129,9 @@ func (c *Client) PushBegin(req PushBeginRequest) (*PushBegin, error) {
 	if err := c.PostJSON("/wpsync/v1/push/begin", req, &res); err != nil {
 		return nil, err
 	}
+	if res.Content != nil {
+		res.Content.Clean()
+	}
 	return &res, nil
 }
 
@@ -136,24 +144,11 @@ func (c *Client) PushUpload(pushID string, unit int, chunks []PushChunk) error {
 // PushCommit builds and swaps the units; large units take several requests. It returns the new
 // stamps per unit for the baseline.
 func (c *Client) PushCommit(pushID string) (map[string]map[string]PushStamp, error) {
-	var cursor *pushCursor
-	for {
-		var res struct {
-			Next   *pushCursor                     `json:"next"`
-			Stamps map[string]map[string]PushStamp `json:"stamps"`
-		}
-		if err := c.PostJSON("/wpsync/v1/push/commit", map[string]any{"push_id": pushID, "cursor": cursor}, &res); err != nil {
-			return nil, err
-		}
-		if res.Next == nil {
-			return res.Stamps, nil
-		}
-		// Each call places at least one file; a cursor that does not move would loop forever.
-		if cursor != nil && (res.Next.U < cursor.U || (res.Next.U == cursor.U && res.Next.I <= cursor.I)) {
-			return nil, fmt.Errorf("push commit: agent cursor did not advance (%d/%d)", res.Next.U, res.Next.I)
-		}
-		cursor = res.Next
+	res, err := c.PushCommitFull(pushID)
+	if err != nil {
+		return nil, err
 	}
+	return res.Stamps, nil
 }
 
 // PushConfirm marks a swapped push as healthy.
@@ -167,6 +162,8 @@ func (c *Client) PushConfirm(pushID string) error {
 type RollbackNotes struct {
 	Warnings []string `json:"warnings"`
 	Kept     []string `json:"kept"`
+	// PostActions: the steps after taking content back (agent 0.7.0, Spec Content-Push §7.7).
+	PostActions []PostAction `json:"post_actions"`
 }
 
 var warningRe = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
@@ -186,6 +183,7 @@ func (n RollbackNotes) Clean() RollbackNotes {
 		}
 		out.Kept = append(out.Kept, k)
 	}
+	out.PostActions = CleanActions(n.PostActions)
 	return out
 }
 
