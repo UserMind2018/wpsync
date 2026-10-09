@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -563,6 +564,46 @@ func TestRollbackThroughRescueNamesTheContentLeftBehind(t *testing.T) {
 		t.Error("while the content stands, the manifest keeps the pushed state")
 	}
 	if j, _ := LoadJournal(siteDir, testID); !j.Content.Applied {
+		t.Errorf("journal = %+v", j)
+	}
+}
+
+// AC-157: holt ein späterer rollback die Inhalte über den Agent nach, gehen auch Manifest und
+// Baseline zurück – der erste, über rescue.php, hat die Baseline der Dateien schon zurückgesetzt.
+func TestRollbackCatchingUpRevertsManifestAndBaseline(t *testing.T) {
+	f, o, siteDir := contentPushed(t)
+	f.rollback = 500
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if contentFile(t, siteDir, "manifest.jsonl") == manifestBefore {
+		t.Fatal("while the content stands, the manifest keeps the pushed state")
+	}
+
+	f.rollback, f.routes = 200, nil
+	var out bytes.Buffer
+	o.Out = &out
+	var report Result
+	o.Report = &report
+	if err := Rollback(o, testID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.routes, " "); got != "rollback" {
+		t.Errorf("routes = %s", got)
+	}
+	for name, before := range map[string]string{"manifest.jsonl": manifestBefore, "baseline.jsonl": baselineBefore} {
+		got := strings.Split(strings.TrimSpace(contentFile(t, siteDir, name)), "\n")
+		want := strings.Split(strings.TrimSpace(before), "\n")
+		sort.Strings(got)
+		sort.Strings(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s:\n%s", name, strings.Join(got, "\n"))
+		}
+	}
+	if len(report.Warnings) != 0 {
+		t.Errorf("report = %+v\n%s", report, &out)
+	}
+	if j, _ := LoadJournal(siteDir, testID); j.Content.Applied {
 		t.Errorf("journal = %+v", j)
 	}
 }

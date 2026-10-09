@@ -195,21 +195,26 @@ func Rollback(o Options, pushID string) error {
 		}
 		return nil
 	}
-	if jerr != nil || !j.Applied {
+	// Manifest and baseline go back with the content – not while the content still stands. They
+	// are a state of their own: a rollback that catches up on the content, after rescue.php took
+	// code and uploads back, finds the baseline of the files reverted already.
+	contentBack := jerr == nil && j.Content != nil && j.Content.Applied && !contentLeft
+	if jerr != nil || (!j.Applied && !contentBack) {
 		fmt.Fprintf(o.Out, "  Die Baseline dieses Rechners kennt den Push nicht – auffrischen mit: wpsync pull %s\n", o.Site.Name)
 		return nil
 	}
-	base, err := baseline.Load(siteDir)
-	if err != nil {
-		return fmt.Errorf("load baseline: %w", err)
+	if j.Applied {
+		base, err := baseline.Load(siteDir)
+		if err != nil {
+			return fmt.Errorf("load baseline: %w", err)
+		}
+		Revert(base, j)
+		RevertUploads(base, j, notes.Kept)
+		if err := baseline.Save(siteDir, base); err != nil {
+			return fmt.Errorf("save baseline: %w", err)
+		}
 	}
-	Revert(base, j)
-	RevertUploads(base, j, notes.Kept)
-	if err := baseline.Save(siteDir, base); err != nil {
-		return fmt.Errorf("save baseline: %w", err)
-	}
-	// Manifest and baseline go back with the content – not while the content still stands.
-	if j.Content != nil && j.Content.Applied && !contentLeft {
+	if contentBack {
 		if err := revertContent(siteDir, j); err != nil {
 			fmt.Fprintf(o.Out, "  ! Manifest und Baseline liessen sich nicht zurücksetzen – vor dem nächsten Inhalts-Push: wpsync pull %s --content (%v)\n", o.Site.Name, err)
 			if o.Report != nil {
