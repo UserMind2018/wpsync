@@ -344,16 +344,17 @@ final class PushContent
     /**
      * Wendet das Paket eines Pushs an – der letzte Schritt des Commits (§7.3).
      *
-     * @param string $pushDir Arbeitsordner des Pushs
+     * @param string                  $pushDir Arbeitsordner des Pushs
+     * @param (callable(): bool)|null $gate    Naht vor COMMIT (ContentApply::run())
      * @return array{rows: int, after: list<array<string, mixed>>, changes: array<string, mixed>, seconds: float}
      * @throws ContentException
      */
-    public static function apply(string $file, string $name, string $content, string $pushDir, ?int $author): array
+    public static function apply(string $file, string $name, string $content, string $pushDir, ?int $author, ?callable $gate = null): array
     {
         $started           = microtime(true);
         $now               = time();
         $local             = function_exists('wp_date') ? (string) wp_date('Y-m-d H:i:s', $now) : gmdate('Y-m-d H:i:s', $now);
-        $result            = ContentApply::run(ContentPackage::read($file), self::target($name, $content), $pushDir . '/' . self::UNIT, $author, $now, $local);
+        $result            = ContentApply::run(ContentPackage::read($file), self::target($name, $content), $pushDir . '/' . self::UNIT, $author, $now, $local, $gate);
         $result['seconds'] = round(microtime(true) - $started, 3);
         return $result;
     }
