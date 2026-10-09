@@ -217,7 +217,15 @@ final class ContentImageTest extends TestCase
     public function testWhatRescueLoadsBeforeTheKeyCheckKnowsNeitherImagesNorKeysNorTheDatabase(): void
     {
         foreach (['rescue.php', 'src/PushRescue.php', 'src/PushSwap.php'] as $file) {
-            $source = (string) file_get_contents(__DIR__ . '/../' . $file);
+            // Der Code ohne seine Kommentare: die dürfen sagen, was hier nie geschieht.
+            $source = '';
+            foreach (token_get_all((string) file_get_contents(__DIR__ . '/../' . $file)) as $token) {
+                if (!is_array($token)) {
+                    $source .= $token;
+                } elseif ($token[0] !== T_COMMENT && $token[0] !== T_DOC_COMMENT) {
+                    $source .= $token[1];
+                }
+            }
             foreach (['ContentImage', 'ContentApply', 'ContentRollback', 'ContentSql', 'SecretKey', 'SecretBox', 'RescueSeal::', 'RescueDb', 'MysqliLink', 'sodium_', 'openssl_', 'mysqli', 'DB_PASSWORD', 'wp-config'] as $word) {
                 $this->assertStringNotContainsString($word, $source, $file . ': ' . $word);
             }
