@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Listen des Agents für den Inhalts-Push (Studio-Spec §5, Spec Content-Push §11): was ein Paket

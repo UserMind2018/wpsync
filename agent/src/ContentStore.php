@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Lesen und Schreiben der sieben Inhaltstabellen eines Ziels (Spec Content-Push §7.3) mit einem
@@ -85,8 +85,10 @@ interface ContentStore
      *                  (<ID>\0 für verwaiste, ohne term_taxonomy-Zeile); comments: Zahl seiner
      *                  Kommentare; children: IDs der Beiträge mit diesem post_parent (auch Revisionen)
      *   terms          meta: Meta-Schlüssel; children: term_taxonomy_ids des Terms
-     *   term_taxonomy  relations: Schlüssel <object_id>\0<Taxonomie> jeder Zuordnung auf diese Zeile;
+     *   term_taxonomy  relations: Schlüssel <object_id>\0<Taxonomie> jeder Zuordnung auf diese Zeile
+     *                  (<object_id>\0, wenn es zu der ID keine Zeile gibt – verwaist);
      *                  children: term_taxonomy_ids der Kind-Terme (parent = term_id, dieselbe Taxonomie)
+     * Die Objekte selbst müssen nicht existieren: auch was an einer freien ID hängt, wird genannt.
      *
      * @param list<string> $ids
      * @param bool         $lock wie bei read()
@@ -94,6 +96,18 @@ interface ContentStore
      * @throws ContentException
      */
     public function attached(string $table, array $ids, bool $lock): array;
+
+    /**
+     * Kind-Terme: die term_taxonomy-Zeilen, deren parent einer der Terme ist (parent trägt die
+     * term_id des Eltern-Terms). Ohne dass es zu dem Term oder seiner term_taxonomy-Zeile etwas
+     * geben muss – so findet die Prüfung eines Pakets, was unter einer freien ID noch hängt.
+     *
+     * @param list<string> $termIds
+     * @param bool         $lock    wie bei read()
+     * @return array<string, list<array{id: string, taxonomy: string}>> term_id → Kinder (leer, wenn es keine gibt)
+     * @throws ContentException
+     */
+    public function childTerms(array $termIds, bool $lock): array;
 
     /**
      * Was an einem eingefügten Objekt hängt, wenn es wieder verschwindet: posts → alle Meta und

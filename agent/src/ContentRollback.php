@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Nimmt den DB-Anteil eines Pushs zurück (Spec Content-Push §7.6): in einer Transaktion, nur wenn
@@ -10,6 +10,11 @@ defined('ABSPATH') || exit;
  * changed_since_push – dann wird nichts zurückgenommen, und der Aufrufer lässt auch Code und
  * Uploads stehen. Stehen alle Zeilen noch im Vorher-Zustand, kam die Transaktion des Pushs nie
  * an, und es ist nichts zu tun.
+ *
+ * Dieselbe Rücknahme läuft ohne WordPress in rescue.php (Spec Content-Push P3 R4). Dort – und nur
+ * dort – gilt der Schalter $leave (R15): was an eingefügten Objekten hängt und nicht vom Push
+ * stammt, lehnt die Rücknahme dann nicht ab; es bleibt stehen (verwaist) und wird genannt. Der
+ * Abdruckvergleich bleibt in beiden Fällen hart.
  */
 final class ContentRollback
 {
@@ -17,20 +22,25 @@ final class ContentRollback
     public const DONE    = 'rolled_back';
 
     /**
-     * @param string $dir Ordner content im Arbeitsordner des Pushs
-     * @return array{state: string, changes: array<string, mixed>|null} changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war
+     * @param string $dir   Ordner content im Arbeitsordner des Pushs
+     * @param bool   $leave nur für rescue.php (R15): Fremdes an eingefügten Objekten stehen lassen und in left
+     *                      nennen, statt abzulehnen. Gelöscht und überschrieben wird dann nur, was der Push
+     *                      selbst geschrieben hat – purge() läuft nicht. Unter WordPress immer false (D31)
+     * @return array{state: string, changes: array<string, mixed>|null, left?: list<array{table: string, key: string}>}
+     *         changes: was die Nacharbeiten wissen müssen; null, wenn nichts zu tun war. left nur mit $leave
      * @throws ContentException changed_since_push, before_image_invalid, engine_unsupported oder content_failed
      */
-    public static function run(ContentTarget $target, string $dir): array
+    public static function run(ContentTarget $target, string $dir, bool $leave = false): array
     {
+        $none = ['state' => self::NOTHING, 'changes' => null] + ($leave ? ['left' => []] : []);
         // Beide Abbilder müssen unverändert die sein, die der Push abgelegt hat (ContentImage) – und
         // zueinander passen: zurückgeschrieben wird nur ein Schlüssel, den der Push geschrieben hat.
-        $image = ContentImage::get($dir, ContentApply::BEFORE);
+        $image = ContentImage::get($dir, ContentImage::BEFORE);
         if ($image === null) {
-            return ['state' => self::NOTHING, 'changes' => null]; // ohne Vorher-Abbild wurde nie geschrieben
+            return $none; // ohne Vorher-Abbild wurde nie geschrieben
         }
         $before = self::keys($image, true);
-        $pushed = ContentImage::get($dir, ContentApply::AFTER);
+        $pushed = ContentImage::get($dir, ContentImage::AFTER);
         $after  = $pushed === null ? null : self::keys($pushed, false);
         if ($before === null || ($pushed !== null && $after === null)) {
             throw ContentImage::invalid();
@@ -48,11 +58,12 @@ final class ContentRollback
         $changes = $pushed['changes'] ?? null;
         unset($image, $pushed);
         // Ohne InnoDB gäbe es keine Transaktion – auch nicht, wenn die Tabelle erst seit dem Push eine andere Engine hat.
-        ContentCheck::innodb($target->store);
+        ContentState::innodb($target->store);
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
+        $left  = [];   // mit $leave: was an eingefügten Objekten stehen bleibt
         try {
-            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, &$lost): array {
+            return $store->transaction(static function () use ($target, $store, $before, $after, $changes, $leave, $none, &$lost, &$left): array {
                 $byTable = array_fill_keys(ContentState::ORDER, []);
                 foreach ($before as $entry) {
                     $byTable[$entry['t']][] = $entry['k'];
@@ -81,7 +92,7 @@ final class ContentRollback
                     throw ContentRepair::lost();
                 }
                 if ($untouched) {
-                    return ['state' => self::NOTHING, 'changes' => null];
+                    return $none;
                 }
                 if ($changed !== []) {
                     throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
@@ -92,14 +103,17 @@ final class ContentRollback
                 if (!$store->alive()) {
                     throw ContentRepair::lost();
                 }
-                if ($grown !== []) {
+                if ($grown !== [] && !$leave) {
                     throw new ContentException(ContentException::CHANGED, 'Seit dem Push kam an eingefügten Objekten etwas dazu (Meta, Zuordnungen, Kommentare, Kinder): ' . count($grown) . ' Stelle(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $grown);
                 }
+                $left = $grown;
                 // Zuerst geht, was an den eingefügten Objekten hängt: was der Push dort geschrieben hat und
                 // die Meta der festen Sperrliste, die WordPress selbst anlegt (_edit_lock …).
                 // Lag an derselben ID schon vor dem Push etwas (verwaiste Meta oder Zuordnungen eines
                 // früher gelöschten Objekts), bringt es das Vorher-Abbild danach zurück.
-                foreach (array_reverse($before) as $entry) {
+                // Mit $leave nicht: purge() nähme das Fremde mit. Was der Push an das Objekt geschrieben hat,
+                // steht mit eigenem Schlüssel im Vorher-Abbild und geht in der Schleife danach.
+                foreach ($leave ? [] : array_reverse($before) as $entry) {
                     $table = $entry['t'];
                     $key   = $entry['k'];
                     if ($entry['state'] !== null || !isset(ContentState::PK[$table])) {
@@ -139,7 +153,7 @@ final class ContentRollback
                         throw ContentRepair::lost();
                     }
                 }
-                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null];
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null] + ($leave ? ['left' => $left] : []);
             });
         } catch (ContentException $e) {
             if ($lost !== null) {
@@ -156,9 +170,115 @@ final class ContentRollback
                 $prints[] = ['t' => $entry['t'], 'k' => $entry['k'], 'h' => $print === 'absent' ? null : $print];
             }
             if (ContentRepair::settled($target, $prints)) {
-                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null];
+                return ['state' => self::DONE, 'changes' => is_array($changes) ? $changes : null] + ($leave ? ['left' => $left] : []);
             }
             throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren – nichts wurde zurückgenommen.');
+        }
+    }
+
+    /**
+     * Räumt auf, was eine Rücknahme mit $leave an den vom Push eingefügten Objekten stehen liess
+     * (R15; Security-Review P3 M2) – für den Agent, sobald WordPress wieder lädt. Für jeden Beitrag,
+     * jeden Term und jede term_taxonomy-Zeile, die der Push eingefügt hat und die es weiterhin nicht
+     * gibt, gehen die Meta an dieser ID (die der festen Sperrliste eingeschlossen) und die
+     * Zuordnungen: an einem Term und einer term_taxonomy-Zeile alle, an einem Beitrag nur die in
+     * Taxonomien, die für Beiträge gelten (ContentTarget::postTaxonomy()) – object_id ist dort nicht
+     * nur die ID eines Beitrags, eine Zuordnung in einer Taxonomie für Benutzer oder Links gehört
+     * einem anderen Objekt mit derselben Zahl. Was sich nicht zuordnen lässt (ohne
+     * term_taxonomy-Zeile, nicht registrierte Taxonomie), bleibt ebenfalls. Was geht, ist für
+     * WordPress unerreichbar, solange das Objekt fehlt – und hinge sich an das nächste mit dieser ID.
+     * Gibt es das Objekt wieder, gehört ihm, was an ihm hängt: dann geschieht dort nichts.
+     * Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms, Kind-Terme)
+     * bleiben – das sind eigene Zeilen, die niemand ungefragt löscht. Für alles, was bleibt und einem
+     * Beitrag gehören könnte, lehnt ContentCheck ein neues Objekt an dieser ID ab (id_has_leftovers).
+     *
+     * @param string $dir Ordner content im Arbeitsordner des Pushs
+     * @return int an so vielen Objekten hing etwas, das entfernt wurde
+     * @throws ContentException before_image_invalid, engine_unsupported oder content_failed
+     */
+    public static function sweep(ContentTarget $target, string $dir): int
+    {
+        $image = ContentImage::get($dir, ContentImage::BEFORE);
+        if ($image === null) {
+            return 0; // ohne Vorher-Abbild wurde nie geschrieben
+        }
+        $before = self::keys($image, true);
+        if ($before === null) {
+            throw ContentImage::invalid();
+        }
+        unset($image);
+        $inserted = [];
+        foreach ($before as $entry) {
+            if ($entry['state'] === null && isset(ContentState::PK[$entry['t']])) {
+                $inserted[$entry['t']][] = $entry['k'];
+            }
+        }
+        if ($inserted === []) {
+            return 0;
+        }
+        ContentState::innodb($target->store);
+        $store = $target->store;
+        try {
+            return $store->transaction(static function () use ($store, $target, $inserted): int {
+                $swept   = 0;
+                $recount = [];
+                foreach ($inserted as $table => $ids) {
+                    $gone = [];
+                    foreach ($store->read($table, $ids, true) as $id => $raw) {
+                        if ($raw === null) {
+                            $gone[] = (string) $id;
+                        }
+                    }
+                    if ($gone === []) {
+                        continue;
+                    }
+                    $hanging = $store->attached($table, $gone, true);
+                    // Die Zähler der Terme, aus denen ein verschwundener Beitrag dabei fällt, stimmen danach nicht mehr.
+                    $terms = $table === 'posts' ? $store->relations($gone, true) : [];
+                    foreach ($gone as $id) {
+                        $have = $hanging[$id] ?? ['meta' => [], 'relations' => []];
+                        if ($table === 'posts') {
+                            // Nicht purge(): das löschte jede Zuordnung mit dieser object_id – auch die eines
+                            // Benutzers oder Links mit derselben Zahl. Nur Taxonomien, die für Beiträge gelten.
+                            $pairs = [];
+                            foreach ($have['relations'] as $pair) {
+                                if ($target->postTaxonomy(ContentState::split((string) $pair)[1]) === true) {
+                                    $pairs[] = (string) $pair;
+                                }
+                            }
+                            if ($have['meta'] === [] && $pairs === []) {
+                                continue;
+                            }
+                            foreach ($have['meta'] as $name) {
+                                $store->write('postmeta', Canon::pairKey($id, (string) $name), null);
+                            }
+                            foreach ($pairs as $pair) {
+                                $store->write('term_relationships', $pair, null);
+                            }
+                        } else {
+                            if ($have['meta'] === [] && $have['relations'] === []) {
+                                continue;
+                            }
+                            $store->purge($table, $id); // termmeta nach term_id, Zuordnungen nach term_taxonomy_id: eindeutig
+                        }
+                        $swept++;
+                        foreach ($terms[$id] ?? [] as $tt) {
+                            $recount[(string) $tt] = true;
+                        }
+                    }
+                }
+                if ($recount !== []) {
+                    $store->recount(array_map('strval', array_keys($recount)));
+                }
+                // Ging die Verbindung verloren, hat der Server verworfen, was die Transaktion schrieb.
+                if (!$store->alive()) {
+                    throw ContentRepair::lost();
+                }
+                return $swept;
+            });
+        } catch (ContentException $e) {
+            // Auch ein unklarer COMMIT ist hier nur ein Fehlschlag: ein zweiter Lauf fände nichts oder räumte zu Ende.
+            throw $e->reason() === ContentException::UNCLEAR ? new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Aufräumen verloren.') : $e;
         }
     }
 
@@ -239,7 +359,7 @@ final class ContentRollback
      */
     private static function keys(array $data, bool $states): ?array
     {
-        if (!is_array($data['keys'] ?? null) || count($data['keys']) > 4 * ContentPackage::MAX_ROWS) {
+        if (!is_array($data['keys'] ?? null) || count($data['keys']) > ContentState::MAX_KEYS) {
             return null;
         }
         $out  = [];

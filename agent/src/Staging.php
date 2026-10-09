@@ -173,7 +173,10 @@ final class Staging
      * Kopie gibt oder ihr Datensatz den Guard nicht besteht. Ob die Kopie gerade benutzbar ist,
      * entscheidet pushContent().
      *
-     * @return array{prefix: string, tables: array<string, string>, indexables: string, comments: string, replace: StagingReplace, url: string}|null
+     * dir, live_home und live_prefix nennt der Umschlag für rescue.php (Spec Content-Push P3 §5.2):
+     * daraus baut es denselben Ersetzer und prüft Ordner und Präfix ohne WordPress.
+     *
+     * @return array{prefix: string, tables: array<string, string>, indexables: string, comments: string, replace: StagingReplace, url: string, dir: string, live_home: string, live_prefix: string}|null
      */
     public static function contentTarget(): ?array
     {
@@ -195,6 +198,9 @@ final class Staging
                 'comments'   => $guard->table($prefix . 'comments'), // nur gelesen: Kommentare an eingefügten Beiträgen (Rücknahme)
                 'replace'    => new StagingReplace(home_url(), '/' . (string) $record['dir']),
                 'url'        => self::url($record),
+                'dir'        => (string) $record['dir'],
+                'live_home'  => (string) home_url(),
+                'live_prefix' => $guard->livePrefix(),
             ];
         } catch (StagingException | \InvalidArgumentException $e) {
             return null;
@@ -1316,7 +1322,7 @@ final class Staging
     private static function write(StagingGuard $guard, string $file, string $content, ?int $mode = null): void
     {
         $file = $guard->path($file);
-        foreach (glob($file . '.*.tmp') ?: [] as $stale) {
+        foreach (PushSwap::entries(dirname($file), '/^' . preg_quote(basename($file), '/') . '\..*\.tmp\z/') as $stale) {
             @unlink($guard->path((string) $stale)); // Rest eines abgebrochenen Schreibens
         }
         $tmp = $guard->path($file . '.' . bin2hex(random_bytes(6)) . '.tmp');

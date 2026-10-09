@@ -1,10 +1,20 @@
 <?php
 /**
- * Notfall-Rollback für wpsync push. Lädt kein WordPress und keine Datenbank, damit es auch
- * antwortet, wenn der gepushte Code einen Fatal auslöst. Kennt nur „ping“ und „rollback“ und
- * prüft dafür einen pro Push abgeleiteten Schlüssel gegen dessen Hash (src/PushRescue.php).
- * Nimmt Code und Uploads zurück, nie Inhalte: hat der Push einen DB-Anteil, meldet die Antwort
- * warnings: ["content_not_rolled_back"] (Spec Content-Push §7.6).
+ * Notfall-Rollback für wpsync push. Lädt kein WordPress, damit es auch antwortet, wenn der gepushte
+ * Code oder Inhalt einen Fatal auslöst. Kennt „ping“, „rollback“ und „cache“ und prüft dafür einen
+ * pro Push abgeleiteten Schlüssel gegen dessen Hash (src/PushRescue.php).
+ *
+ * rollback nimmt in der Reihenfolge DB → Code → Uploads zurück (Spec Content-Push P3 §4.1). Die
+ * Inhalte nur, wenn der Aufrufer content=1 schickt – über eine eigene Datenbankverbindung aus dem
+ * versiegelten Umschlag des Pushs, den nur dieser Schlüssel öffnet; wp-config.php wird dafür nie
+ * gelesen. Bis zur bestandenen Schlüsselprüfung ist nichts geladen ausser PushSwap und PushRescue.
+ * Bleiben die Inhalte stehen, sagt es die Antwort: warnings: ["content_not_rolled_back"].
+ *
+ * cache ist ein getrennter zweiter Schritt (R8): er lädt WordPress mit SHORTINIT – ohne Plugins,
+ * Themes und mu-plugins – und leert den Object-Cache, der sonst den gepushten Stand weiter
+ * auslieferte. Ein Fehler darin gefährdet die Rücknahme nie; sie ist dann schon abgeschlossen.
+ * Vorher verschwindet der Schlüssel aus $_POST und $_REQUEST, und ein Location-Header, den
+ * WordPress oder ein Drop-in setzt, verlässt den Server nicht.
  */
 define('WPSYNC_RESCUE', true);
 
@@ -27,8 +37,70 @@ require __DIR__ . '/src/PushRescue.php';
 try {
     list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::handle(\WpSync\PushRescue::contentDirs(dirname(__DIR__, 2)), $_POST, time());
 } catch (\Throwable $e) {
-    // z. B. rescue.json nicht schreibbar: als JSON antworten statt mit leerem 500.
+    // z. B. rescue.json nicht schreibbar: als JSON antworten statt mit leerem 500. Ohne Meldung –
+    // sie könnte Pfade oder, bei der Datenbank, Zugangsdaten nennen.
     list($wpsync_status, $wpsync_body) = [500, ['ok' => false, 'error' => 'rescue failed']];
+}
+// Der Schlüssel hat ausgedient: was ab hier geladen wird (WordPress im Cache-Schritt, mit
+// wp-config.php und Drop-ins), findet ihn nicht mehr in den Request-Variablen.
+unset($_POST['key'], $_REQUEST['key']);
+
+// action=cache: der Schlüssel stimmt, der Push ist ganz zurück, und der Object-Cache trägt noch den
+// gepushten Stand. WordPress wird hier geladen, im globalen Geltungsbereich – wie in index.php:
+// wp-config.php setzt Variablen (etwa $memcached_servers, $redis_server), die ein
+// Object-Cache-Drop-in als globale liest. In einer Funktion geladen sähe es sie nicht.
+if ($wpsync_status === \WpSync\PushRescue::FLUSH) {
+    $wpsync_flush = $wpsync_body;
+    $wpsync_done  = false;
+    $wpsync_ok    = false;
+    // WordPress beendet sich an mehreren Stellen selbst (Wartungsmodus, keine Datenbank, Fatal im
+    // Drop-in): dann antwortet diese Funktion – mit JSON statt einer HTML-Seite – und beendet den
+    // Request, bevor die Fehlerseite von WordPress folgt.
+    register_shutdown_function(static function () use (&$wpsync_done): void {
+        if ($wpsync_done) {
+            return;
+        }
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
+        if (!headers_sent()) {
+            header_remove('Location'); // keine Umleitung, der ein Client samt Schlüssel im Body folgen könnte
+            http_response_code(500);
+            header('Content-Type: application/json');
+            header('Cache-Control: no-store');
+        }
+        echo '{"ok":false,"error":"cache failed"}';
+        exit;
+    });
+    ob_start(); // was WordPress oder ein Drop-in ausgibt, verlässt den Server nicht
+    try {
+        $wpsync_load = dirname(__DIR__, 3) . '/wp-load.php';
+        if (!defined('SHORTINIT') && is_file($wpsync_load)) {
+            define('SHORTINIT', true);
+            require $wpsync_load;
+            $wpsync_ok = function_exists('wp_cache_flush') && wp_cache_flush() !== false;
+        }
+    } catch (\Throwable $wpsync_error) {
+        $wpsync_ok = false;
+    }
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    $wpsync_done = true;
+    ini_set('display_errors', '0'); // WordPress stellt es mit WP_DEBUG_DISPLAY um
+    if (!headers_sent()) {
+        // Was WordPress oder ein Drop-in an Umleitung gesetzt hat, geht nicht mit: die Antwort ist JSON
+        // mit dem Status von unten, nie ein 3xx mit Ziel.
+        header_remove('Location');
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store');
+        header('X-Robots-Tag: noindex');
+    }
+    try {
+        list($wpsync_status, $wpsync_body) = \WpSync\PushRescue::flushed((string) $wpsync_flush['work'], (string) $wpsync_flush['push_id'], $wpsync_ok);
+    } catch (\Throwable $e) {
+        list($wpsync_status, $wpsync_body) = [500, ['ok' => false, 'error' => 'cache failed']];
+    }
 }
 http_response_code($wpsync_status);
 echo json_encode($wpsync_body);

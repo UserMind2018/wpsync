@@ -79,7 +79,7 @@ final class PushRescueUploadsTest extends TestCase
         [$status, $body] = PushRescue::handle([$this->content], ['action' => 'rollback', 'push_id' => self::ID, 'key' => $this->key], 1000);
 
         $this->assertSame(200, $status);
-        $this->assertSame(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::UPLOAD_CHANGED], 'kept' => ['2026/10/b.png']], $body);
+        $this->assertSame(['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::UPLOAD_CHANGED], 'kept' => ['2026/10/b.png'], 'push_id' => self::ID], $body);
         $this->assertFalse($this->here('2026/12/a.png'));
         $this->assertDirectoryDoesNotExist($this->content . '/uploads/2026/12');
         $this->assertSame('seither geändert', file_get_contents($this->content . '/uploads/2026/10/b.png'));

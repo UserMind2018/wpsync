@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * ContentStore auf $wpdb (Spec Content-Push §7.3, §11): schreibt nur in die sieben
@@ -348,15 +348,33 @@ final class ContentSql implements ContentStore
                     $add($row, 'children', (string) $row['c']);
                 }
             } else {
-                $sql = 'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r JOIN ' . $this->quoted('term_taxonomy')
+                // LEFT JOIN: auch Zuordnungen auf eine ID, zu der es (noch oder nicht mehr) keine Zeile gibt –
+                // sie hingen sich an eine neue term_taxonomy-Zeile dieser ID (ContentCheck::leftovers()).
+                $sql = 'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r LEFT JOIN ' . $this->quoted('term_taxonomy')
                     . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id`' . $in . ' ORDER BY r.`object_id`' . $tail;
                 foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
-                    $add($row, 'relations', Canon::pairKey((string) $row['obj'], (string) $row['tax']));
+                    $add($row, 'relations', Canon::pairKey((string) $row['obj'], (string) ($row['tax'] ?? '')));
                 }
                 $sql = 'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM ' . $this->quoted('term_taxonomy') . ' p JOIN ' . $this->quoted('term_taxonomy')
                     . ' c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id`' . $in . ' ORDER BY c.`term_taxonomy_id`' . $tail;
                 foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
                     $add($row, 'children', (string) $row['c']);
+                }
+            }
+        }
+        return $out;
+    }
+
+    public function childTerms(array $termIds, bool $lock): array
+    {
+        $ids = array_values(array_unique(array_map('strval', $termIds)));
+        $out = array_fill_keys($ids, []);
+        foreach (array_chunk($ids, self::CHUNK) as $chunk) {
+            $sql = 'SELECT `parent` AS o, `term_taxonomy_id` AS c, `taxonomy` AS tax FROM ' . $this->quoted('term_taxonomy')
+                . ' WHERE `parent` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ') ORDER BY `term_taxonomy_id`' . ($lock ? ' FOR UPDATE' : '');
+            foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                if (isset($out[(string) $row['o']])) {
+                    $out[(string) $row['o']][] = ['id' => (string) $row['c'], 'taxonomy' => (string) $row['tax']];
                 }
             }
         }
@@ -627,8 +645,12 @@ final class ContentSql implements ContentStore
         if (!is_object($db) || (string) ($db->last_error ?? '') === '') {
             return;
         }
-        $link  = $db->dbh ?? null;
-        $errno = $link instanceof \mysqli ? (int) mysqli_errno($link) : 0;
+        $link = $db->dbh ?? null;
+        try {
+            $errno = $link instanceof \mysqli ? (int) mysqli_errno($link) : 0;
+        } catch (\Throwable $e) {
+            $errno = 0; // eine Verbindung, die keine mehr ist: das Protokollieren wirft nie
+        }
         if ($errno > 0) {
             error_log('wpsync: a query of the content channel failed (MySQL error ' . $errno . '); query and values are withheld');
         }

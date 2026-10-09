@@ -101,7 +101,10 @@ namespace {
      */
     function get_option(string $name, $default = false)
     {
-        return $name === 'active_plugins' ? ($GLOBALS['wpsync_test_active_plugins'] ?? []) : $default;
+        if ($name === 'active_plugins') {
+            return $GLOBALS['wpsync_test_active_plugins'] ?? [];
+        }
+        return $GLOBALS['wpsync_test_options'][$name] ?? $default;
     }
 
     function is_multisite(): bool
@@ -392,6 +395,15 @@ namespace WpSync {
         public static function healthUrls(): array
         {
             return ['https://example.test/' . self::DIR . '/'];
+        }
+
+        /** @var array<string, mixed>|null was contentTarget() liefert; null: keine benutzbare Kopie */
+        public static $copy = null;
+
+        /** @return array<string, mixed>|null */
+        public static function contentTarget(): ?array
+        {
+            return self::$copy;
         }
 
         public static function markUsed(): void

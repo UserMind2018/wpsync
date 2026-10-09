@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Normalisieren statt übersetzen (Spec Content-Push §5, C2): Jede Site ersetzt ihre eigene Origin

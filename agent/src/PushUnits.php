@@ -63,7 +63,7 @@ final class PushUnits
         }
         $isTheme    = strpos($unit, 'themes/') === 0;
         $marker     = $isTheme ? 'Theme Name:' : 'Plugin Name:';
-        $candidates = $isTheme ? [$dir . '/style.css'] : (glob($dir . '/*.php') ?: []);
+        $candidates = $isTheme ? [$dir . '/style.css'] : PushSwap::entries($dir, '/^[^.].*\.php\z/');
         foreach ($candidates as $file) {
             $head = (string) @file_get_contents($file, false, null, 0, 8192);
             if (stripos($head, $marker) !== false && preg_match('/^[ \t\/*#@]*Version:[ \t]*(\S+)/mi', $head, $m) === 1) {

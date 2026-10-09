@@ -220,6 +220,15 @@ push() {
 }
 rcode() { code -X POST "$RESCUE" --data-urlencode action=rollback --data-urlencode "push_id=$PUSH" --data-urlencode "key=$1"; }
 rkey() { printf 'rescue:%s:%s' "$PUSH" "$SALT" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1; }
+rbody() { curl -s -X POST "$RESCUE" --data-urlencode action=rollback --data-urlencode "push_id=$PUSH" --data-urlencode "key=$1"; }
+pushdir() { printf '%s/%s' "$(find "$WPC" -maxdepth 1 -name 'wpsync-push-*' | head -1)" "$PUSH"; } # Ordner des Pushs im Arbeitsordner
+# tries <datei>: Fehlversuche und Sperre eines Datensatzes als „<attempts> <gesperrt|frei>“; „- -“, wenn es die Datei nicht gibt
+tries() { python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("attempts"), "gesperrt" if d.get("locked_until", 0) > 0 else "frei")
+except OSError:
+    print("- -")' "$1"; }
 
 window "$KEY" "time() + 900"
 push
@@ -229,13 +238,25 @@ check AC-66 "rescue.php antwortet ohne WordPress" "$(curl -s -X POST "$RESCUE" -
 check AC-65 "rescue.php nur per POST" "$(code "$RESCUE")" 405
 for _ in 1 2 3 4; do rcode "$FAKE_SIG" >/dev/null; done
 check AC-65 "falscher Schlüssel abgelehnt" "$(rcode "$FAKE_SIG")" 403
-check AC-65 "nach 5 Fehlversuchen gesperrt, auch für den richtigen Schlüssel" "$(rcode "$(rkey)")" 429
+# Ab Agent 0.8.0 (Content-Push P3, R9): fünf Fehlversuche sperren nur noch falsche Schlüssel – sie bekommen
+# 429, ohne weiter zu zählen. Der richtige gilt weiter (unten, am zweiten Push): sonst könnte, wer die
+# Push-ID kennt, den Notfallweg genau dann sperren, wenn er gebraucht wird.
+check AC-65 "nach 5 Fehlversuchen: ein weiterer falscher Schlüssel bekommt 429" "$(rcode "$FAKE_SIG")" 429
 check AC-65 "Einheit steht noch" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" da
+check AC-65 "die Fehlversuche stehen in rescue.tries: gesperrt" "$(tries "$(pushdir)/rescue.tries")" "0 gesperrt"
+check AC-65 "rescue.json nennt keine Fehlversuche und keine Sperre" "$(tries "$(pushdir)/rescue.json")" "0 frei"
 check AC-55 "Rollback über den Agent" "$(pcode /wpsync/v1/push/rollback "$(byid)")" 200
 check AC-55 "neue Einheit ist wieder weg" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" weg
 
 push
-check AC-64 "Rollback über rescue.php mit richtigem Schlüssel" "$(rcode "$(rkey)")" 200
+# R9: auch dieser Push ist für falsche Schlüssel gesperrt – der richtige geht trotzdem durch.
+for _ in 1 2 3 4 5; do rcode "$FAKE_SIG" >/dev/null; done
+check AC-65 "zweiter Push: für falsche Schlüssel gesperrt" "$(rcode "$FAKE_SIG")" 429
+check AC-65 "zweiter Push: die Einheit steht noch" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" da
+res="$(rbody "$(rkey)")"
+check AC-64 "Rollback über rescue.php mit richtigem Schlüssel – trotz der Sperre für falsche (R9)" "$(printf %s "$res" | field '["status"]')" rolled_back
+check AC-64 "die Antwort nennt den Push" "$(printf %s "$res" | field '["push_id"]')" "$PUSH"
+check AC-64 "ein zweiter Aufruf antwortet gleich (HTTP 200)" "$(rcode "$(rkey)")" 200
 check AC-64 "Einheit ist weg" "$([ -e "$WPC/plugins/sec-push" ] && echo da || echo weg)" weg
 signed /wpsync/v1/push/list '{}' >/dev/null # übernimmt den Rollback ins Protokoll
 check AC-64 "Protokoll kennt den Rollback" "$(pushes "push_id = '$PUSH' AND status = 'rolled_back'")" 1

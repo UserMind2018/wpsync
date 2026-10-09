@@ -138,7 +138,8 @@ final class PushRescueStagingTest extends TestCase
         $result = PushRescue::handle([$this->live, $this->staging], ['action' => 'rollback', 'push_id' => self::ID, 'key' => 'nope'], 1000);
         $this->assertSame(403, $result[0]);
         $this->assertSame('new', file_get_contents($this->staging . '/plugins/x/main.php'));
-        $this->assertSame(1, PushRescue::read($this->work(), self::ID)['attempts']);
+        $this->assertSame(1, PushRescue::tries($this->work(), self::ID)['attempts']);
+        $this->assertSame(0, PushRescue::tries($this->liveWork(), self::ID)['attempts']);
     }
 
     public function testContentDirsFindsLiveAndTheStagingCopy(): void

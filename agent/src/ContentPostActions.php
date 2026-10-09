@@ -159,7 +159,7 @@ final class ContentPostActions
                     $store->write('options', '_elementor_global_css', null);
                     $store->write('options', 'elementor-custom-breakpoints-files', null);
                 });
-                foreach ($uploadsDir === '' ? [] : (glob($uploadsDir . '/elementor/css/*.css') ?: []) as $file) {
+                foreach ($uploadsDir === '' ? [] : PushSwap::entries($uploadsDir . '/elementor/css', '/^[^.].*\.css\z/') as $file) {
                     if (is_file($file) && !is_link($file)) {
                         @unlink($file);
                     }

@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Ablage der beiden Abbilder eines Inhalts-Pushs (before.json, after.json) im Arbeitsordner des
@@ -20,6 +20,10 @@ defined('ABSPATH') || exit;
  */
 final class ContentImage
 {
+    /** Die beiden Abbilder eines Pushs im Ordner content seines Arbeitsordners. */
+    public const BEFORE = 'before.json';
+    public const AFTER  = 'after.json';
+
     /** Datei beginnt so: Nonce und Chiffrat folgen roh. */
     public const SEALED = "wpsync-image:v1\n";
     /** Datei beginnt so: 64 Hex-Zeichen HMAC, ein Zeilenvorschub, dann das JSON. */
@@ -33,6 +37,13 @@ final class ContentImage
     public static $keys = null;
     /** @var bool|null für Tests: verschlüsseln (true) oder nur signieren (false); null: je nach sodium */
     public static $encrypt = null;
+    /**
+     * @var array<string, list<string>>|null Name der Datei → ihre schon abgeleiteten Dateischlüssel (roh,
+     *      32 Byte). Gesetzt – von rescue.php aus dem Umschlag des Pushs (Spec Content-Push P3 R2) –,
+     *      ersetzt es den Schlüssel der Installation samt Ableitung: SecretKey wird dann nie gefragt.
+     *      Ohne Schlüssel für eine Datei gilt sie nicht (nie Klartext), und geschrieben wird so nichts.
+     */
+    public static $fileKeys = null;
 
     /**
      * Schreibt ein Abbild vollständig oder gar nicht – nur für den Besitzer lesbar.
@@ -47,6 +58,9 @@ final class ContentImage
         $json   = json_encode($data, JSON_UNESCAPED_SLASHES);
         if (!is_string($json)) {
             throw $failed;
+        }
+        if (self::$fileKeys !== null) {
+            throw $failed; // die Rücknahme ohne WordPress liest Abbilder, sie legt keine an
         }
         try {
             $packed = self::pack($json, self::keys(), self::context($dir, $name), self::$encrypt ?? extension_loaded('sodium'));
@@ -81,7 +95,14 @@ final class ContentImage
             return null;
         }
         $raw  = is_file($file) && !is_link($file) ? @file_get_contents($file) : false;
-        $json = is_string($raw) ? self::unpack($raw, self::keys(), self::context($dir, $name)) : null;
+        $json = null;
+        if (is_string($raw) && self::$fileKeys !== null) {
+            // Schlüssel aus dem Umschlag: ohne einen für diese Datei gilt sie nicht – auch nicht als Klartext.
+            $given = self::$fileKeys[$name] ?? [];
+            $json  = is_array($given) && $given !== [] ? self::unpackWith($raw, array_values(array_map('strval', $given))) : null;
+        } elseif (is_string($raw)) {
+            $json = self::unpack($raw, self::keys(), self::context($dir, $name));
+        }
         unset($raw);
         $data = $json === null ? null : json_decode($json, true);
         if (!is_array($data)) {
@@ -124,9 +145,38 @@ final class ContentImage
      */
     public static function unpack(string $raw, array $keys, string $context): ?string
     {
+        $derived = [];
+        foreach ($keys as $key) {
+            $derived[] = self::derive($key, $context);
+        }
+        return self::unpackWith($raw, $derived);
+    }
+
+    /**
+     * Die Dateischlüssel eines Abbilds, wie get() sie ableitet – für den Umschlag des Pushs (Spec
+     * Content-Push P3 R2): wer ihn öffnet, liest die Abbilder dieses einen Pushs, nicht mehr.
+     *
+     * @return list<string> roh, je 32 Byte, der zum Schützen zuerst; leer: die Installation hat keinen Schlüssel
+     */
+    public static function fileKeys(string $pushId, string $name): array
+    {
+        $out = [];
+        foreach (self::keys() as $key) {
+            $out[] = self::derive($key, $pushId . '/' . $name);
+        }
+        return $out;
+    }
+
+    /**
+     * @param list<string> $derived Dateischlüssel, schon abgeleitet; leer: nur Klartext gilt
+     * @return string|null das JSON; null: nicht zu öffnen, verändert, für einen anderen Push oder Namen
+     *                     – oder Klartext, obwohl es einen Schlüssel gibt
+     */
+    private static function unpackWith(string $raw, array $derived): ?string
+    {
         $sealed = strncmp($raw, self::SEALED, strlen(self::SEALED)) === 0;
         $signed = strncmp($raw, self::SIGNED, strlen(self::SIGNED)) === 0;
-        if ($keys === []) {
+        if ($derived === []) {
             return !$sealed && !$signed && $raw !== '' ? $raw : null;
         }
         if ($sealed) {
@@ -134,9 +184,9 @@ final class ContentImage
             if (strlen($body) < self::NONCE_BYTES + self::MAC_BYTES || !function_exists('sodium_crypto_secretbox_open')) {
                 return null;
             }
-            foreach ($keys as $key) {
+            foreach ($derived as $key) {
                 try {
-                    $plain = sodium_crypto_secretbox_open(substr($body, self::NONCE_BYTES), substr($body, 0, self::NONCE_BYTES), self::derive($key, $context));
+                    $plain = sodium_crypto_secretbox_open(substr($body, self::NONCE_BYTES), substr($body, 0, self::NONCE_BYTES), $key);
                 } catch (\Throwable $e) {
                     $plain = false;
                 }
@@ -152,8 +202,8 @@ final class ContentImage
             if (preg_match('/^[a-f0-9]{64}\z/', $mac) !== 1 || substr($raw, strlen(self::SIGNED) + 64, 1) !== "\n") {
                 return null;
             }
-            foreach ($keys as $key) {
-                if (hash_equals(hash_hmac('sha256', $json, self::derive($key, $context)), $mac)) {
+            foreach ($derived as $key) {
+                if (hash_equals(hash_hmac('sha256', $json, $key), $mac)) {
                     return $json;
                 }
             }

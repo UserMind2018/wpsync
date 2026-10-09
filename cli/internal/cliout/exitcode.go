@@ -77,13 +77,17 @@ type Failure struct {
 	// Reason names a case within Code for callers that must not parse Message ("site_locked",
 	// and the staging and push cases without an exit code of their own, see reason).
 	Reason string `json:"reason,omitempty"`
+	// Detail: with reason rescue_db_unavailable why rescue.php cannot take the content of the push
+	// back without WordPress – the agent's word (no_crypto, driver, no_image_key, probe_failed,
+	// write_failed) or agent_outdated (Spec Content-Push P3 §9).
+	Detail string `json:"detail,omitempty"`
 	// Path: with reason not_readable the file or folder, relative to the docroot.
 	Path string `json:"path,omitempty"`
 	// SkippedNew: with reason nothing_to_push the local units that are new and were not named
 	// (Spec Content-Push §10, S7); left out when there are none.
 	SkippedNew []string `json:"skipped_new,omitempty"`
 	// Keys and Paths: with a refusal of the content of a push (reason conflict, blocked_row,
-	// id_taken, upload_missing, changed_since_push …) the rows as {table, key} and the files
+	// id_taken, id_has_leftovers, upload_missing, changed_since_push …) the rows as {table, key} and the files
 	// relative to wp-content/uploads/ it is about (Spec Content-Push §10). Never a value.
 	Keys  []agentapi.ContentKey `json:"keys,omitempty"`
 	Paths []string              `json:"paths,omitempty"`
@@ -154,6 +158,10 @@ func Classify(err error) Failure {
 	if errors.As(err, &refused) {
 		f.Keys, f.Paths = refused.Keys, refused.Paths
 	}
+	var needDB *push.RescueDBError
+	if f.Reason == "rescue_db_unavailable" && errors.As(err, &needDB) {
+		f.Detail = needDB.Reason
+	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
 		f.Device, f.AdminURL = window.Device, window.AdminURL
@@ -164,8 +172,9 @@ func Classify(err error) Failure {
 // reason: the local site lock, and what stays unknown although a caller can tell it apart – a
 // staging job that stopped, a copy in a status that does not allow the call, a request that
 // reached the copy instead of the live site, an address of the agent outside the paired site,
-// the push cases of Spec Container-Push C11 and P-O3, and what stops pull --content after the
-// tables are loaded (manifest, export of the working copy, canonical form).
+// the push cases of Spec Container-Push C11 and P-O3, what stops pull --content after the tables
+// are loaded (manifest, export of the working copy, canonical form), and a push that
+// --require-rescue-db stopped.
 func reason(err error, exit int) string {
 	if errors.Is(err, pull.ErrPullRunning) {
 		return "site_locked"
@@ -182,6 +191,11 @@ func reason(err error, exit int) string {
 	var refused *push.ContentError
 	if errors.As(err, &refused) {
 		return refused.Reason
+	}
+	// --require-rescue-db: rescue.php could not take the content back without WordPress.
+	var needDB *push.RescueDBError
+	if errors.As(err, &needDB) {
+		return "rescue_db_unavailable"
 	}
 	switch {
 	case errors.Is(err, agentapi.ErrForeignURL):

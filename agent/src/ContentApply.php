@@ -12,8 +12,9 @@ defined('ABSPATH') || exit;
  */
 final class ContentApply
 {
-    public const BEFORE = 'before.json';
-    public const AFTER  = 'after.json';
+    /** Verweise: die Namen der beiden Abbilder gehören ContentImage (auch ohne WordPress geladen). */
+    public const BEFORE = ContentImage::BEFORE;
+    public const AFTER  = ContentImage::AFTER;
 
     /** Optionen, deren Änderung die Rewrite-Regeln betrifft (Studio §7.4 Nr. 5). */
     private const REWRITE_OPTIONS = ['page_on_front', 'page_for_posts', 'show_on_front'];
@@ -23,16 +24,19 @@ final class ContentApply
      * @param int|null $author   post_author neuer Beiträge: wer das Push-Fenster geöffnet hat (§9)
      * @param int      $now      Unix-Zeit des Pushs
      * @param string   $nowLocal dieselbe Zeit in der Zeitzone der Site, 'Y-m-d H:i:s' (post_modified)
+     * @param (callable(): bool)|null $gate Naht unmittelbar vor COMMIT (Spec Content-Push P3 R10): gilt der Push
+     *                                      noch? Der Commit nimmt darin die Sperre des Pushs und liest rescue.json
+     *                                      neu. false: rescue.php hat ihn inzwischen zurückgenommen – ROLLBACK
      * @return array{rows: int, after: list<array{t: string, k: string, h: string|null}>, changes: array<string, mixed>}
      * @throws ContentException
      */
-    public static function run(ContentPackage $package, ContentTarget $target, string $dir, ?int $author, int $now, string $nowLocal): array
+    public static function run(ContentPackage $package, ContentTarget $target, string $dir, ?int $author, int $now, string $nowLocal, ?callable $gate = null): array
     {
         $store = $target->store;
         $lost  = null; // [Tabelle, Schlüssel, Rohzustand davor]: bei diesem Schreibzugriff ging die Verbindung verloren
         $done  = null; // das Ergebnis, sobald alles geschrieben und zurückgelesen ist
         try {
-            return $store->transaction(static function () use ($package, $target, $store, $dir, $author, $now, $nowLocal, &$lost, &$done): array {
+            return $store->transaction(static function () use ($package, $target, $store, $dir, $author, $now, $nowLocal, $gate, &$lost, &$done): array {
                 $check = new ContentCheck($package, $target);
                 $check->run([], true); // die Uploads des Satzes liegen schon an ihrem Platz
                 $writes = self::writes($package, $check, $target, $author, $now, $nowLocal);
@@ -72,6 +76,11 @@ final class ContentApply
                 $after = self::verify($writes, $target, $wanted);
                 $out   = ['rows' => count($package->rows()), 'after' => $after, 'changes' => self::changes($writes, $check)];
                 ContentImage::put($dir, self::AFTER, ['keys' => $after, 'changes' => $out['changes']]);
+                // Zuletzt, vor COMMIT: ohne das schriebe ein Commit Inhalte fest, deren Push rescue.php
+                // gerade als zurückgenommen abgeschlossen hat – Inhalte ohne Rückweg.
+                if ($gate !== null && !$gate()) {
+                    throw new ContentException(ContentException::FAILED, 'Der Push wurde inzwischen zurückgenommen – nichts wurde übernommen.');
+                }
                 $done = $out;
                 return $out;
             });

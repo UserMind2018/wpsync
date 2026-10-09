@@ -62,6 +62,10 @@ func Pushes(o Options) error {
 					name += " (Erweiterungen: " + strings.Join(all, " ") + ")"
 				}
 			}
+			// The content went back without WordPress (Spec Content-Push P3 §8.2).
+			if u.Via == "rescue" && u.Path == ContentUnit {
+				name += " (über rescue.php zurückgenommen)"
+			}
 			units = append(units, name)
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ShowID(r.PushID), time.Unix(r.Created, 0).Format("02.01.2006 15:04"),
@@ -171,7 +175,8 @@ func Rollback(o Options, pushID string) error {
 		return &TargetError{PushID: pushID, Is: target, Want: o.Target}
 	}
 
-	notes, err := o.Client.PushRollbackNotes(pushID)
+	via := "agent"
+	notes, err := agentRollback(o, pushID)
 	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "wpsync_push_window" {
@@ -193,12 +198,12 @@ func Rollback(o Options, pushID string) error {
 				"rescue.php wird nicht aufgerufen; im WP-Admin unter Werkzeuge → wpsync zurückrollen", err, pushID, o.Site.URL, agentapi.Printable(j.RescueURL))
 		}
 		fmt.Fprintln(o.Out, "  der Agent antwortet nicht – nehme den Weg über rescue.php")
+		via = "rescue"
 		var rerr error
-		if notes, rerr = RescueRollbackNotes(o.HTTP, j.RescueURL, pushID, RescueKey(o.Secret, pushID, j.Salt)); rerr != nil {
+		// With content=1 when the push carried content: rescue.php of an agent 0.8.0 takes it back
+		// too, any older one leaves it and the result says so (Spec Content-Push P3 §9).
+		if notes, rerr = rescueBack(o, j); rerr != nil {
 			return fmt.Errorf("Rollback über rescue.php fehlgeschlagen: %w", rerr)
-		}
-		if j.Content != nil && !slices.Contains(notes.Warnings, WarningContentNotRolledBack) {
-			notes.Warnings = append(notes.Warnings, WarningContentNotRolledBack) // rescue.php knows no database
 		}
 	}
 	fmt.Fprintf(o.Out, "✓ Push %s ist zurückgerollt.\n", pushID)
@@ -206,14 +211,24 @@ func Rollback(o Options, pushID string) error {
 	printActions(o.Out, notes.PostActions)
 	contentLeft := slices.Contains(notes.Warnings, WarningContentNotRolledBack)
 	if contentLeft {
-		fmt.Fprintf(o.Out, "  ! Nur Code und Uploads sind zurück – die Inhalte des Pushs stehen noch auf der Site.\n"+
-			"    Sobald WordPress wieder antwortet: wpsync rollback %s %s\n", o.Site.Name, pushID)
+		why := ""
+		if report := contentErrorReport(notes.Content); report != nil {
+			why = " (" + report.Code + ")"
+		}
+		fmt.Fprintf(o.Out, "  ! Nur Code und Uploads sind zurück – die Inhalte des Pushs stehen noch auf der Site%s.\n"+
+			"    Sobald WordPress wieder antwortet: wpsync rollback %s %s\n", why, o.Site.Name, pushID)
+	} else {
+		printLeft(o.Out, notes.Content)
 	}
 	if o.Report != nil {
 		if units == nil {
 			units = []string{}
 		}
-		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings, PostActions: notes.PostActions}
+		*o.Report = Result{PushID: pushID, Target: target, Status: "rolled_back", Units: units, Warnings: notes.Warnings, PostActions: notes.PostActions,
+			Via: via, ContentError: contentErrorReport(notes.Content)}
+		if notes.Content != nil && !contentLeft {
+			o.Report.ContentLeft, o.Report.ContentLeftTotal = notes.Content.Left, notes.Content.LeftTotal
+		}
 	}
 
 	if target == TargetStaging {

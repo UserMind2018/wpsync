@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Was bleibt, wenn eine Transaktion des Inhaltskanals ihre Verbindung verliert (ContentStore::alive()):

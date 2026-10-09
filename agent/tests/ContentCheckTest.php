@@ -313,6 +313,142 @@ final class ContentCheckTest extends TestCase
         $this->check([$this->updatePost(['post_content' => 'Musterstadt, 00000'])])->run();
     }
 
+    /** @return array<string, array{0: callable(ContentMemory): void, 1: list<array<string, mixed>>, 2: list<array{table: string, key: string}>}> */
+    public static function leftovers(): array
+    {
+        $post = [ContentFixtures::row('insert', 'posts', '1000001', 'absent', ContentFixtures::postRow('1000001'))];
+        $term = [
+            ContentFixtures::row('insert', 'terms', '1000001', 'absent', ['name' => 'Neu', 'slug' => 'neu', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '1000001', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+        ];
+        return [
+            'Meta am Beitrag' => [static function (ContentMemory $s): void {
+                $s->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+            }, $post, [['table' => 'postmeta', 'key' => "1000001\0farbe"]]],
+            'auch Meta der festen Sperrliste (ein altes _wp_old_slug leitete auf den neuen Beitrag um)' => [static function (ContentMemory $s): void {
+                $s->data['postmeta']["1000001\0_wp_old_slug"] = ['values' => ['alt']];
+            }, $post, [['table' => 'postmeta', 'key' => "1000001\0_wp_old_slug"]]],
+            'Zuordnung des Beitrags' => [static function (ContentMemory $s): void {
+                $s->data['term_relationships']["1000001\0category"] = ['values' => ['5:0']];
+            }, $post, [['table' => 'term_relationships', 'key' => "1000001\0category"]]],
+            'verwaiste Zuordnung des Beitrags' => [static function (ContentMemory $s): void {
+                $s->orphans['1000001'] = ['77'];
+            }, $post, [['table' => 'term_relationships', 'key' => "1000001\0"]]],
+            'Kommentare' => [static function (ContentMemory $s): void {
+                $s->comments['1000001'] = 2;
+            }, $post, [['table' => 'comments', 'key' => '1000001']]],
+            'Kindbeitrag (Revision)' => [static function (ContentMemory $s): void {
+                $s->data['posts']['221'] = ContentFixtures::post('221', ['post_type' => 'revision', 'post_status' => 'inherit', 'post_parent' => '1000001']);
+            }, $post, [['table' => 'posts', 'key' => '221']]],
+            'Meta am Term' => [static function (ContentMemory $s): void {
+                $s->data['termmeta']["1000001\0farbe"] = ['values' => ['rot']];
+            }, $term, [['table' => 'termmeta', 'key' => "1000001\0farbe"]]],
+            'term_taxonomy-Zeile am Term' => [static function (ContentMemory $s): void {
+                $s->data['term_taxonomy']['7'] = ContentFixtures::taxonomy('7', '1000001', 'post_tag');
+            }, $term, [['table' => 'term_taxonomy', 'key' => '7']]],
+            'Zuordnung auf die term_taxonomy-Zeile' => [static function (ContentMemory $s): void {
+                $s->orphans['219'] = ['1000002'];
+            }, $term, [['table' => 'term_relationships', 'key' => "219\0"]]],
+            // NR-2: parent einer term_taxonomy-Zeile ist die term_id des Eltern-Terms. Eine Unterkategorie, die
+            // unter einer zurückgenommenen Kategorie stehen blieb, hinge am neuen Term dieser ID.
+            'Kind-Term unter dem neuen Term' => [static function (ContentMemory $s): void {
+                $s->data['terms']['8']         = ContentFixtures::term('8', 'Unterkategorie');
+                $s->data['term_taxonomy']['8'] = ['parent' => '1000001'] + ContentFixtures::taxonomy('8', '8', 'category');
+            }, $term, [['table' => 'term_taxonomy', 'key' => '8']]],
+            'Kind-Term unter einer neuen term_taxonomy-Zeile eines bestehenden Terms – nur in deren Taxonomie' => [static function (ContentMemory $s): void {
+                $s->data['terms']['8']          = ContentFixtures::term('8', 'Kind in post_tag');
+                $s->data['term_taxonomy']['8']  = ['parent' => '5'] + ContentFixtures::taxonomy('8', '8', 'post_tag');
+                $s->data['terms']['10']         = ContentFixtures::term('10', 'Kind in category');
+                $s->data['term_taxonomy']['10'] = ['parent' => '5'] + ContentFixtures::taxonomy('10', '10', 'category'); // gehört zur bestehenden Zeile 5
+            }, [ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '5', 'taxonomy' => 'post_tag', 'description' => '', 'parent' => '0'])],
+                [['table' => 'term_taxonomy', 'key' => '8']]],
+        ];
+    }
+
+    /**
+     * Security-Review P3, M2: an der ID eines neuen Objekts darf auf dem Ziel nichts hängen. Was eine
+     * Rücknahme ohne WordPress dort stehen liess (R15: Meta, Zuordnungen, Kommentare, Kinder), hinge
+     * sich sonst an das neue Objekt – fremde Meta an einer neuen Seite, alte Kommentare unter ihr.
+     *
+     * @param callable(ContentMemory): void           $hang
+     * @param list<array<string, mixed>>              $rows
+     * @param list<array{table: string, key: string}> $keys
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('leftovers')]
+    public function testAnInsertAtAnIdWhereSomethingStillHangsIsRefused(callable $hang, array $rows, array $keys): void
+    {
+        $this->check($rows)->run();
+        $hang($this->store);
+        $e = $this->refused('id_has_leftovers', $rows);
+        $this->assertSame($keys, $e->keys());
+        $this->assertSame(409, $e->status());
+        // Beim Anwenden unter Sperre gelesen – dieselbe Antwort.
+        $check = $this->check($rows);
+        try {
+            $this->store->transaction(static function () use ($check): void {
+                $check->run([], true);
+            });
+            $this->fail('accepted under the lock');
+        } catch (ContentException $locked) {
+            $this->assertSame('id_has_leftovers', $locked->reason());
+        }
+        $this->store->log = []; // begin, rollback der Transaktion eben
+        // Ohne offenes Fenster kein Orakel: der Probelauf sagt nicht, ob an einer ID etwas hängt.
+        $this->assertNull($this->partial($rows)['error']);
+    }
+
+    /**
+     * NR-3: object_id in term_relationships ist nicht nur die ID eines Beitrags. Eine Zuordnung in einer
+     * Taxonomie, die nur für Benutzer (oder Links) registriert ist, gehört einem anderen Objekt mit
+     * derselben Zahl – kein Rest eines Beitrags, sie blockiert nicht. Was sich nicht zuordnen lässt
+     * (nicht registriert, auch für Beiträge registriert), blockiert weiter.
+     */
+    public function testARelationshipOfAnotherKindOfObjectIsNoLeftoverOfAPost(): void
+    {
+        $rows   = [ContentFixtures::row('insert', 'posts', '1000001', 'absent', ContentFixtures::postRow('1000001'))];
+        $target = ContentFixtures::live($this->store);
+        $target->objectTypes = static function (string $taxonomy): ?array {
+            return ['user-group' => ['user'], 'link_category' => ['link'], 'gemischt' => ['post', 'user']][$taxonomy] ?? null;
+        };
+        $this->store->data['term_relationships']["1000001\0user-group"]    = ['values' => ['30:0']];
+        $this->store->data['term_relationships']["1000001\0link_category"] = ['values' => ['31:0']];
+        $this->check($rows, [], $target)->run();
+
+        $this->store->data['term_relationships']["1000001\0gemischt"]  = ['values' => ['32:0']];
+        $this->store->data['term_relationships']["1000001\0unbekannt"] = ['values' => ['33:0']];
+        $e = $this->refused('id_has_leftovers', $rows, [], $target);
+        $this->assertSame([['table' => 'term_relationships', 'key' => "1000001\0gemischt"], ['table' => 'term_relationships', 'key' => "1000001\0unbekannt"]], $e->keys());
+        // Ohne Auskunft der Site (kein WordPress) blockiert jede Zuordnung an der ID.
+        $this->assertCount(4, $this->refused('id_has_leftovers', $rows)->keys());
+    }
+
+    /** M2: was das Paket an der ID selbst schreibt, ist kein Rest – und an bestehenden Objekten gilt die Prüfung nicht. */
+    public function testWhatThePackageWritesItselfIsNoLeftover(): void
+    {
+        $this->store->data['postmeta']["1000001\0_wp_page_template"] = ['values' => ['verwaist']];
+        $this->store->data['posts']['221']                           = ContentFixtures::post('221', ['post_parent' => '1000001']);
+        $rows = [
+            ContentFixtures::row('insert', 'posts', '1000001', 'absent', ContentFixtures::postRow('1000001')),
+            ContentFixtures::row('update', 'postmeta', "1000001\0_wp_page_template", $this->h('postmeta', "1000001\0_wp_page_template"), ['values' => ['default']]),
+            ContentFixtures::row('update', 'posts', '221', $this->h('posts', '221'), ContentFixtures::postRow('221', ['post_parent' => '1000001'])),
+        ];
+        $this->check($rows)->run();
+        // Ein zweiter Rest daneben, den das Paket nicht nennt, bleibt einer.
+        $this->store->data['postmeta']["1000001\0farbe"] = ['values' => ['rot']];
+        $this->assertSame([['table' => 'postmeta', 'key' => "1000001\0farbe"]], $this->refused('id_has_leftovers', $rows)->keys());
+        unset($this->store->data['postmeta']["1000001\0farbe"]);
+        // NR-2: auch ein Kind-Term, den das Paket selbst unter den neuen Term hängt, ist kein Rest.
+        $this->store->data['terms']['8']         = ContentFixtures::term('8', 'Unterkategorie');
+        $this->store->data['term_taxonomy']['8'] = ['parent' => '1000001'] + ContentFixtures::taxonomy('8', '8', 'category');
+        $this->check([
+            ContentFixtures::row('insert', 'terms', '1000001', 'absent', ['name' => 'Neu', 'slug' => 'neu', 'term_group' => '0']),
+            ContentFixtures::row('insert', 'term_taxonomy', '1000002', 'absent', ['term_id' => '1000001', 'taxonomy' => 'category', 'description' => '', 'parent' => '0']),
+            ContentFixtures::row('update', 'term_taxonomy', '8', $this->h('term_taxonomy', '8'), ['term_id' => '8', 'taxonomy' => 'category', 'description' => '', 'parent' => '1000001']),
+        ])->run();
+        // Am bestehenden Beitrag 219 hängt Meta (_edit_lock, _elementor_data): ein update stört das nie.
+        $this->check([$this->updatePost()])->run();
+    }
+
     /** AC-152 */
     public function testCorridorAndTakenIds(): void
     {
@@ -1028,7 +1164,13 @@ final class ContentCheckTest extends TestCase
         $this->assertSame([['table' => 'term_relationships', 'key' => "219\0category"]], $e->keys());
         $this->assertStringContainsString('verwaist', $e->getMessage());
 
-        $this->store->orphans = ['219' => ['77'], '220' => ['1000002']]; // nicht an derselben Stelle
+        $this->store->orphans = ['219' => ['77']]; // nicht an derselben Stelle
         $this->check($rows)->run();
+
+        // Security-Review P3, M2: eine verwaiste Zuordnung eines anderen Beitrags auf die ID der neuen
+        // term_taxonomy-Zeile stünde dem Schreiben nicht im Weg – hinge den Beitrag aber an den neuen Term.
+        $this->store->orphans = ['219' => ['77'], '220' => ['1000002']];
+        $e                    = $this->refused('id_has_leftovers', $rows);
+        $this->assertSame([['table' => 'term_relationships', 'key' => "220\0"]], $e->keys());
     }
 }

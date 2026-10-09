@@ -663,12 +663,16 @@ final class ContentSqlTest extends TestCase
         ], $this->db->queries);
 
         $this->db = new FakeWpdb();
-        $this->db->answer('/FROM `wp_term_relationships` r JOIN/', [['o' => '6', 'obj' => '219', 'tax' => 'category'], ['o' => '6', 'obj' => '220', 'tax' => 'category']]);
+        $this->db->answer('/FROM `wp_term_relationships` r LEFT JOIN/', [['o' => '6', 'obj' => '219', 'tax' => 'category'], ['o' => '6', 'obj' => '220', 'tax' => 'category'], ['o' => '8', 'obj' => '221', 'tax' => null]]);
         $this->db->answer('/FROM `wp_term_taxonomy` p JOIN/', [['o' => '6', 'c' => '9']]);
-        $this->assertSame(['6' => ['meta' => [], 'relations' => ["219\0category", "220\0category"], 'comments' => 0, 'children' => ['9']]], $this->sql()->attached('term_taxonomy', ['6'], true));
+        // Zu ID 8 gibt es keine term_taxonomy-Zeile: die Zuordnung darauf ist verwaist und wird trotzdem genannt (M2).
         $this->assertSame([
-            'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM `wp_term_relationships` r JOIN `wp_term_taxonomy` x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id` IN (6) ORDER BY r.`object_id` FOR UPDATE',
-            'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM `wp_term_taxonomy` p JOIN `wp_term_taxonomy` c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id` IN (6) ORDER BY c.`term_taxonomy_id` FOR UPDATE',
+            '6' => ['meta' => [], 'relations' => ["219\0category", "220\0category"], 'comments' => 0, 'children' => ['9']],
+            '8' => ['meta' => [], 'relations' => ["221\0"], 'comments' => 0, 'children' => []],
+        ], $this->sql()->attached('term_taxonomy', ['6', '8'], true));
+        $this->assertSame([
+            'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM `wp_term_relationships` r LEFT JOIN `wp_term_taxonomy` x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id` IN (6,8) ORDER BY r.`object_id` FOR UPDATE',
+            'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM `wp_term_taxonomy` p JOIN `wp_term_taxonomy` c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id` IN (6,8) ORDER BY c.`term_taxonomy_id` FOR UPDATE',
         ], $this->db->queries, 'ohne Tabelle comments (es gibt sie auf dem Ziel nicht) keine Abfrage danach');
 
         try {
@@ -680,6 +684,19 @@ final class ContentSqlTest extends TestCase
         $this->db->fail('/FROM `wp_postmeta`/', 'crashed');
         $this->expectException(ContentException::class);
         $this->sql()->attached('posts', ['1'], true);
+    }
+
+    /** NR-2: Kind-Terme über parent allein – ohne JOIN auf eine Elternzeile, die es (noch) nicht gibt. */
+    public function testChildTermsAreFoundByTheirParentAlone(): void
+    {
+        $this->db->answer('/FROM `wp_term_taxonomy` WHERE `parent`/', [['o' => '7', 'c' => '8', 'tax' => 'category'], ['o' => '7', 'c' => '9', 'tax' => 'post_tag'], ['o' => '99', 'c' => '1', 'tax' => 'category']]);
+        $this->assertSame(
+            ['7' => [['id' => '8', 'taxonomy' => 'category'], ['id' => '9', 'taxonomy' => 'post_tag']], '12' => []],
+            $this->sql()->childTerms(['7', '12', '7'], true)
+        );
+        $this->assertSame(['SELECT `parent` AS o, `term_taxonomy_id` AS c, `taxonomy` AS tax FROM `wp_term_taxonomy` WHERE `parent` IN (7,12) ORDER BY `term_taxonomy_id` FOR UPDATE'], $this->db->queries);
+        $this->assertSame([], $this->db->writes());
+        $this->assertSame([], $this->sql()->childTerms([], false));
     }
 
     public function testReadsTheRawRelationshipsOfAnObject(): void

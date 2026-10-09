@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Ablehnung eines Inhalts-Pakets oder einer Rücknahme (Spec Content-Push §7.2, §7.6). reason()
@@ -22,6 +22,12 @@ final class ContentException extends \RuntimeException
     public const PSEUDONYM        = 'pseudonym_in_package';
     public const CORRIDOR         = 'id_outside_corridor';
     public const ID_TAKEN         = 'id_taken';
+    /**
+     * Die ID eines neuen Objekts ist frei, aber an ihr hängt auf dem Ziel noch etwas (Meta,
+     * Zuordnungen, Kommentare, Kinder) – Reste eines früheren Objekts, etwa nach einer Rücknahme
+     * ohne WordPress (P3 R15). Sie hingen sich an das neue.
+     */
+    public const LEFTOVERS        = 'id_has_leftovers';
     public const CONFLICT         = 'conflict';
     public const UNFAITHFUL       = 'row_unfaithful';
     public const DANGLING         = 'dangling_reference';

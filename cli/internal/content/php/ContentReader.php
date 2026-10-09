@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Liest die sieben Inhaltstabellen einer Site in Keyset-Schritten und liefert je Zeile bzw. je

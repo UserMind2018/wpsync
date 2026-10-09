@@ -1,7 +1,7 @@
 <?php
 namespace WpSync;
 
-defined('ABSPATH') || exit;
+defined('ABSPATH') || defined('WPSYNC_RESCUE') || exit;
 
 /**
  * Rohzustand eines Schlüssels (ContentStore) ↔ Fingerabdruck und Ablage. Der Abdruck entsteht
@@ -26,6 +26,33 @@ final class ContentState
 
     /** Reihenfolge beim Schreiben: erst die Objekte, dann was an ihnen hängt, zuletzt Optionen. */
     public const ORDER = ['posts', 'terms', 'term_taxonomy', 'postmeta', 'termmeta', 'term_relationships', 'options'];
+
+    /**
+     * Höchstens so viele Schlüssel trägt ein Abbild (before.json, after.json): das Vierfache der
+     * Zeilen eines Pakets (ContentPackage::MAX_ROWS) – eine Zeile in den Papierkorb schreibt bis
+     * zu vier Schlüssel. Die Grenze liegt hier, weil die Rücknahme ohne WordPress das Paket nicht lädt.
+     */
+    public const MAX_KEYS = 20000;
+
+    /**
+     * Alle sieben Inhaltstabellen des Ziels müssen InnoDB sein – nicht nur die, die ein Paket nennt:
+     * Papierkorb-Meta, Zuordnungen und die Rücknahme (purge) schreiben auch in andere. Auch die
+     * Rücknahme prüft das, bevor sie schreibt.
+     *
+     * @throws ContentException engine_unsupported
+     */
+    public static function innodb(ContentStore $store): void
+    {
+        $bad = [];
+        foreach ($store->engines(Canon::TABLES) as $table => $engine) {
+            if (strtolower($engine) !== 'innodb') {
+                $bad[] = (string) $table;
+            }
+        }
+        if ($bad !== []) {
+            throw new ContentException(ContentException::ENGINE, 'Nicht InnoDB: ' . implode(', ', $bad) . ' – Inhalte lassen sich nicht sicher übertragen.', [], ['tables' => $bad]);
+        }
+    }
 
     /**
      * Von einer bestehenden Zeile nur die Spalten, die ein Push schreibt: die des Abdrucks, bei

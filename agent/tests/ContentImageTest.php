@@ -28,8 +28,9 @@ final class ContentImageTest extends TestCase
 
     protected function tearDown(): void
     {
-        ContentImage::$keys    = null;
-        ContentImage::$encrypt = null;
+        ContentImage::$keys     = null;
+        ContentImage::$encrypt  = null;
+        ContentImage::$fileKeys = null;
         $root = dirname($this->dir, 2);
         exec('chmod -R u+w ' . escapeshellarg($root) . ' 2>/dev/null; rm -rf ' . escapeshellarg($root));
     }
@@ -130,14 +131,107 @@ final class ContentImageTest extends TestCase
         }
     }
 
-    /** rescue.php nimmt nie Inhalte zurück: es braucht weder das Vorher-Abbild noch einen Schlüssel. */
-    public function testRescueNeverTouchesTheImages(): void
+    /**
+     * P3 R2: der Umschlag des Pushs trägt die schon abgeleiteten Dateischlüssel. Mit ihnen – und
+     * ohne den Schlüssel der Installation – öffnet get() genau die Abbilder dieses Pushs.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith([true])]
+    #[\PHPUnit\Framework\Attributes\TestWith([false])]
+    public function testFileKeysOpenTheImagesOfTheirPushWithoutTheInstallationKey(bool $encrypt): void
+    {
+        if ($encrypt && !extension_loaded('sodium')) {
+            $this->markTestSkipped('needs ext-sodium');
+        }
+        ContentImage::$keys    = $this->keys;
+        ContentImage::$encrypt = $encrypt;
+        ContentImage::put($this->dir, ContentImage::BEFORE, ['keys' => ['vorher']]);
+        ContentImage::put($this->dir, ContentImage::AFTER, ['keys' => ['nachher']]);
+        $before = ContentImage::fileKeys('p_20261009_aaaaaaaaaaaa', ContentImage::BEFORE);
+        $after  = ContentImage::fileKeys('p_20261009_aaaaaaaaaaaa', ContentImage::AFTER);
+        $this->assertCount(2, $before);
+        $this->assertSame([32, 32], array_map('strlen', $before));
+        $this->assertNotSame($before, $after, 'je Datei eigene Schlüssel');
+        $this->assertNotContains($this->keys[0], $before, 'nie der Schlüssel der Installation selbst');
+
+        // Ab hier gibt es den Schlüssel der Installation nicht mehr – wie in rescue.php.
+        ContentImage::$keys     = [];
+        ContentImage::$fileKeys = [ContentImage::BEFORE => $before, ContentImage::AFTER => [$after[0]]];
+        $this->assertSame(['keys' => ['vorher']], ContentImage::get($this->dir, ContentImage::BEFORE));
+        $this->assertSame(['keys' => ['nachher']], ContentImage::get($this->dir, ContentImage::AFTER));
+
+        // Die Schlüssel eines anderen Pushs oder der anderen Datei öffnen nichts.
+        foreach ([
+            'anderer Push'  => ContentImage::fileKeys('p_20261009_bbbbbbbbbbbb', ContentImage::BEFORE),
+            'andere Datei'  => $after,
+            'kein Schlüssel' => [],
+        ] as $why => $keys) {
+            ContentImage::$keys     = $this->keys; // fileKeys() rechnet mit ihm; get() darf ihn nicht benutzen
+            ContentImage::$fileKeys = [ContentImage::BEFORE => $keys];
+            try {
+                ContentImage::get($this->dir, ContentImage::BEFORE);
+                $this->fail('opened with ' . $why);
+            } catch (ContentException $e) {
+                $this->assertSame(ContentException::IMAGE, $e->reason(), $why);
+            }
+        }
+    }
+
+    /** Mit Schlüsseln aus dem Umschlag gilt ein Klartext-Abbild nie – auch wenn für die Datei keiner genannt ist. */
+    public function testFileKeysNeverAcceptPlaintextAndNeverWrite(): void
+    {
+        ContentImage::$keys = [];
+        ContentImage::put($this->dir, ContentImage::BEFORE, ['keys' => []]);
+        $this->assertSame(['keys' => []], ContentImage::get($this->dir, ContentImage::BEFORE), 'ohne Schlüssel der Installation: Klartext');
+        $this->assertSame([], ContentImage::fileKeys('p_20261009_aaaaaaaaaaaa', ContentImage::BEFORE));
+
+        foreach ([[], [ContentImage::BEFORE => []], [ContentImage::AFTER => [str_repeat('k', 32)]], [ContentImage::BEFORE => [str_repeat('k', 32)]]] as $fileKeys) {
+            ContentImage::$fileKeys = $fileKeys;
+            try {
+                ContentImage::get($this->dir, ContentImage::BEFORE);
+                $this->fail('accepted plaintext');
+            } catch (ContentException $e) {
+                $this->assertSame(ContentException::IMAGE, $e->reason());
+            }
+        }
+        $this->assertNull(ContentImage::get($this->dir, ContentImage::AFTER), 'eine Datei, die es nicht gibt, bleibt null');
+        try {
+            ContentImage::put($this->dir, ContentImage::AFTER, ['keys' => []]);
+            $this->fail('wrote an image');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::FAILED, $e->reason());
+        }
+        $this->assertFileDoesNotExist($this->dir . '/after.json');
+    }
+
+    public function testTheNamesOfTheImagesBelongToContentImage(): void
+    {
+        $this->assertSame(['before.json', 'after.json'], [ContentImage::BEFORE, ContentImage::AFTER]);
+        $this->assertSame([ContentImage::BEFORE, ContentImage::AFTER], [\WpSync\ContentApply::BEFORE, \WpSync\ContentApply::AFTER]);
+    }
+
+    /**
+     * Was rescue.php vor der Schlüsselprüfung lädt, kennt weder die Abbilder noch einen Schlüssel
+     * noch die Datenbank (P3 §4.1 Nr. 2): das alles liegt hinter RescueContent, das PushRescue erst
+     * mit dem richtigen Schlüssel lädt.
+     */
+    public function testWhatRescueLoadsBeforeTheKeyCheckKnowsNeitherImagesNorKeysNorTheDatabase(): void
     {
         foreach (['rescue.php', 'src/PushRescue.php', 'src/PushSwap.php'] as $file) {
-            $source = (string) file_get_contents(__DIR__ . '/../' . $file);
-            foreach (['ContentImage', 'ContentApply', 'before.json', 'SecretKey', 'SecretBox', 'sodium_'] as $word) {
+            // Der Code ohne seine Kommentare: die dürfen sagen, was hier nie geschieht.
+            $source = '';
+            foreach (token_get_all((string) file_get_contents(__DIR__ . '/../' . $file)) as $token) {
+                if (!is_array($token)) {
+                    $source .= $token;
+                } elseif ($token[0] !== T_COMMENT && $token[0] !== T_DOC_COMMENT) {
+                    $source .= $token[1];
+                }
+            }
+            foreach (['ContentImage', 'ContentApply', 'ContentRollback', 'ContentSql', 'SecretKey', 'SecretBox', 'RescueSeal::', 'RescueDb', 'MysqliLink', 'sodium_', 'openssl_', 'mysqli', 'DB_PASSWORD', 'wp-config'] as $word) {
                 $this->assertStringNotContainsString($word, $source, $file . ': ' . $word);
             }
         }
+        $rescue = (string) file_get_contents(__DIR__ . '/../src/PushRescue.php');
+        $this->assertSame(1, substr_count($rescue, 'RescueContent::run('), 'ein Weg zur Datenbank, hinter der Schlüsselprüfung');
+        $this->assertSame(1, substr_count($rescue, "require_once __DIR__ . '/RescueContent.php';"));
     }
 }

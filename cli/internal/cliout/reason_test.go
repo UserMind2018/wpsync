@@ -131,7 +131,7 @@ func TestNothingToPushNamesTheSkippedUnits(t *testing.T) {
 func TestContentRefusalsHaveReasonKeysAndPaths(t *testing.T) {
 	keys := []agentapi.ContentKey{{Table: "posts", Key: "219"}, {Table: "postmeta", Key: "219\x00_x", Pattern: "email"}}
 	for _, reason := range []string{"package_invalid", "baseline_outdated", "origin_mismatch", "package_too_large", "engine_unsupported",
-		"blocked_row", "list_version_mismatch", "local_origin_in_package", "pseudonym_in_package", "id_outside_corridor", "id_taken",
+		"blocked_row", "list_version_mismatch", "local_origin_in_package", "pseudonym_in_package", "id_outside_corridor", "id_taken", "id_has_leftovers",
 		"conflict", "row_unfaithful", "dangling_reference", "upload_missing", "author_unknown", "changed_since_push", "unsafe_value",
 		"write_mismatch", "package_missing", "content_failed"} {
 		api := &agentapi.APIError{Status: 409, Code: "wpsync_content_" + reason, Message: "abgelehnt"}
@@ -149,5 +149,19 @@ func TestContentRefusalsHaveReasonKeysAndPaths(t *testing.T) {
 	}
 	if out, _ := json.Marshal(Classify(push.ErrConflict)); strings.Contains(string(out), "keys") || strings.Contains(string(out), "paths") {
 		t.Errorf("other failures carry no keys: %s", out)
+	}
+}
+
+// Spec Content-Push P3 §9: --require-rescue-db – Exit 1, reason rescue_db_unavailable, detail der Grund des Agents.
+func TestRequireRescueDBNamesReasonAndDetail(t *testing.T) {
+	for _, reason := range []string{"no_crypto", "driver", "no_image_key", "probe_failed", "write_failed", "agent_outdated"} {
+		f := Classify(fmt.Errorf("Push p_x nicht getauscht: %w", &push.RescueDBError{Reason: reason}))
+		if f.Exit != ExitUnknown || f.Reason != "rescue_db_unavailable" || f.Detail != reason {
+			t.Errorf("%s: failure = %+v", reason, f)
+		}
+	}
+	// No other failure carries a detail.
+	if f := Classify(push.ErrNothing); f.Detail != "" {
+		t.Errorf("detail = %q", f.Detail)
 	}
 }

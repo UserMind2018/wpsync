@@ -139,9 +139,9 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
-| `wpsync push <site> code [einheit…] [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0), mit `--content` ein Paket aus Inhaltszeilen (ab Agent 0.7.0, [Inhalte pushen](#inhalte-pushen)); `--no-code` lässt den Code weg. Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
+| `wpsync push <site> code [einheit…] [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0), mit `--content` ein Paket aus Inhaltszeilen (ab Agent 0.7.0, [Inhalte pushen](#inhalte-pushen)); `--no-code` lässt den Code weg, `--require-rescue-db` pusht Inhalte nur, wenn `rescue.php` sie auch ohne WordPress zurücknehmen kann (ab Agent 0.8.0, [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
-| `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php`. Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
+| `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php` (ab Agent 0.8.0 samt Inhalten). Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
 | `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
 | `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. Nicht im selben Browserprofil öffnen, in dem man bei Live angemeldet ist (siehe [Zugang](#staging-auf-dem-server)). |
 | `wpsync staging refresh <site> [--code] [--yes] [--no-anonymize]` | Datenbank der Kopie neu von Live, mit `--code` auch den Code. Fragt nach, weil Daten der Kopie verloren gehen. |
@@ -370,8 +370,11 @@ unbestätigter Push (getauscht, Health-Check noch nicht bestanden) lässt sich i
 Legt er WordPress lahm, geht die CLI über `rescue.php` (direkt im Plugin-Ordner oder über den
 Stub im Webroot, der bis etwa 10 Minuten nach der Bestätigung liegen bleibt): Das
 Skript lädt kein WordPress, prüft einen Schlüssel, den nur dein Mac aus dem Pairing-Secret
-ableiten kann, und rollt nur unbestätigte Pushes zurück. Ein Push lässt sich nur zurückrollen,
-solange kein späterer Push dieselbe Einheit getauscht hat.
+ableiten kann, und rollt nur unbestätigte Pushes zurück – Inhalte, Code und Uploads, in dieser
+Reihenfolge ([Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)). Ein Push lässt sich nur
+zurückrollen, solange kein späterer Push dieselbe Einheit getauscht hat. Läuft für denselben Push
+gerade eine andere Rücknahme oder sein Commit, antworten Agent und `rescue.php` mit „busy“
+(HTTP 423); die CLI wiederholt dann dreimal im Abstand von 2 Sekunden.
 Die Uploads eines Pushs nimmt die Rücknahme nach dem Code zurück – auch über `rescue.php`: Sie
 löscht genau die Dateien, die der Push angelegt hat, und die Ordner, die er dafür angelegt hat,
 wenn sie leer sind. Wurde eine Datei seither auf der Site geändert, bleibt sie liegen; die
@@ -704,6 +707,7 @@ Ablehnung endet mit Exit 1 und `error.reason`; `error.keys` nennt die betroffene
 | `pseudonym_in_package` | ein Wert trägt ein Pseudonym-Muster des Pulls; `error.keys[].pattern` nennt das Muster |
 | `write_mismatch` | der Wert ergäbe auf dem Ziel einen anderen Abdruck als in der Arbeitskopie – etwa weil die Adresse des Ziels wörtlich darin steht; nach dem Schreiben liest der Agent zurück und prüft dasselbe noch einmal |
 | `id_outside_corridor`, `id_taken` | ein neues Objekt liegt ausserhalb des ID-Korridors des Pakets, mehr als `limits.id_headroom` (2.000.000) über der höchsten ID, die das Ziel in dieser Tabelle schon vergeben hat, oder über 2^53 − 1 – bzw. seine ID ist auf dem Ziel belegt |
+| `id_has_leftovers` | die ID eines neuen Beitrags, Terms oder einer neuen `term_taxonomy`-Zeile ist frei, aber auf dem Ziel hängt noch etwas an ihr: Meta, Zuordnungen, Kommentare, Kindbeiträge (auch Revisionen), weitere Taxonomien eines Terms, Kind-Terme (Unterkategorien, deren `parent` auf die ID zeigt) – Reste eines früheren Objekts, etwa nach einer [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress). Sie hingen sich an das neue Objekt. `error.keys` nennt die Reste (Kommentare als `{"table":"comments","key":"<post-id>"}`); dort entfernen, dann erneut pushen. Was das Paket an der ID selbst schreibt, zählt nicht; ebenso wenig eine Zuordnung in einer Taxonomie, die auf der Site nur für Benutzer oder Links registriert ist (sie gehört einem anderen Objekt mit derselben Zahl). Nicht im Probelauf ohne offenes Push-Fenster |
 | `conflict` | die Zeile hat auf dem Ziel nicht mehr den Abdruck aus dem Manifest – **alle** betroffenen Schlüssel stehen in `error.keys` und im `plan`-Ereignis unter `content.conflicts`. Kein `--force` |
 | `row_unfaithful` | die Zeile lässt sich auf dem Ziel nicht normalisieren |
 | `dangling_reference` | eine Zeile hängt an einem Objekt, das es weder auf dem Ziel noch im Paket gibt (Meta ohne Beitrag, Zuordnung ohne Term, `page_on_front`, `site_icon`, `elementor_active_kit`, `theme_mods_*`) |
@@ -772,7 +776,9 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   geändert (auch Sicherheits-Plugins erneuern Salts), lassen sich die Inhalte dieses Pushs nicht
   mehr zurücknehmen; ein eigener `WPSYNC_KEY` vermeidet das. Ohne jeden Schlüssel (keine Salts,
   kein `WPSYNC_KEY`) bleiben die Abbilder Klartext ohne Schutz – die Admin-Seite warnt dann
-  ohnehin. `rescue.php` braucht die Abbilder nie.
+  ohnehin. `rescue.php` liest die Abbilder nur mit den Dateischlüsseln aus dem Umschlag des
+  Pushs und nimmt ein Klartext-Abbild nie an
+  ([Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)).
 - **Was der Agent selbst setzt:** `post_modified` (Zeit des Pushs), bei neuen Beiträgen
   `post_author` (wer das Push-Fenster geöffnet hat) und `guid`, bei neuen Optionen `autoload`.
   `post_author` und `guid` bestehender Beiträge bleiben.
@@ -785,10 +791,15 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   Seite – jeder Schritt nur, wenn das Plugin da ist. Ein Fehlschlag (`ok: false`) ist kein
   Fehler des Pushs.
 - **Health-Check:** zusätzlich die veröffentlichten Seiten, die das Paket ändert (höchstens 10).
-  Wird die Site schlechter, geht die Rücknahme **zuerst über den Agent** – nur er nimmt Inhalte
-  zurück (Inhalte → Code → Uploads). Lehnt er ab (etwa `changed_since_push`), bleibt der Satz
-  ganz. Antwortet er nicht, mit einem Serverfehler oder mit einer fremden Seite, nimmt `rescue.php` Code und Uploads
-  zurück, und das Ergebnis sagt es: Exit 43 mit `warnings: ["content_not_rolled_back"]`. Der Push
+  Wird die Site schlechter, geht die Rücknahme **zuerst über den Agent** (Inhalte → Code →
+  Uploads, mit Nacharbeiten). Lehnt er ab (etwa `changed_since_push`), bleibt der Satz
+  ganz. Antwortet er nicht, mit einem Serverfehler oder mit einer fremden Seite, nimmt `rescue.php`
+  den Satz ohne WordPress zurück – ab Agent 0.8.0 samt Inhalten: Exit 43, `via: "rescue"`, ohne
+  Warnung ([Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)). Kann `rescue.php` die Inhalte
+  nicht zurücknehmen (älterer Agent, kein Umschlag, seit dem Push geänderte Zeilen), gehen Code und
+  Uploads trotzdem zurück, und das Ergebnis sagt es: Exit 43 mit
+  `warnings: ["content_not_rolled_back"]` und, soweit `rescue.php` einen Grund nennt,
+  `content_error`. Der Push
   bleibt dann offen (weitere Pushes: Exit 42); `wpsync rollback <site> <push-id>` holt die
   Inhalte nach, sobald WordPress wieder antwortet. Geht das nicht mehr (`changed_since_push`)
   oder sollen die Inhalte bleiben, schliesst `wpsync pushes <site> --confirm <push-id>` den Push
@@ -805,8 +816,9 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   und Kindseiten (`post_parent`), weitere Taxonomien eines Terms, Kind-Terme. Sonst
   `error.reason: "changed_since_push"` mit `error.keys` – auch für das Dazugekommene (Kommentare
   als `{"table":"comments","key":"<post-id>"}`, eine Zuordnung ohne `term_taxonomy`-Zeile als
-  `"<post-id>\u0000"`): **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über
-  `rescue.php`. Nicht als Änderung zählt Meta, die WordPress, Elementor oder der Agent selbst an
+  `"<post-id>\u0000"`): **nichts** wird zurückgenommen, auch Code und Uploads nicht – solange der
+  Agent antwortet, geht die CLI nie an ihm vorbei über `rescue.php`. (Antwortet er nicht, gelten
+  im Notfallweg eigene Regeln: [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress).) Nicht als Änderung zählt Meta, die WordPress, Elementor oder der Agent selbst an
   einen neuen Beitrag hängen und die kein Paket schreiben darf – die feste Sperrliste
   (`_edit_lock`, `_edit_last`, `_wp_old_slug`, `_wp_trash_meta_*`, `_elementor_css` …) und der
   oEmbed-Cache (`_oembed_*`); sie geht mit dem Beitrag. Scheitert umgekehrt die Rücknahme des Codes, nachdem die Inhalte schon zurück
@@ -838,9 +850,120 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   Abfrage-Caches bittet er für den Request um Zurückhaltung (`DONOTCACHEDB`), und die Frage nach
   der Sitzungsmarke ist jedes Mal ein anderer Text – ein Cache kann sie nicht beantworten. Eine
   erweiterte `wpdb`-Klasse (Query Monitor u. a.) ist kein Hindernis. Benutzer, Kommentare und Plugin-Tabellen pusht der
-  Kanal nie. Eine Rücknahme der Inhalte ohne WordPress gibt es noch nicht (kommt mit 0.8.0).
+  Kanal nie.
   Steht die Adresse der Live-Site wörtlich in einem lokalen Wert, lehnt der Agent ihn ab
   (`write_mismatch`).
+
+### Rücknahme ohne WordPress
+
+Legt ein Push WordPress lahm, antwortet der Agent nicht mehr – auch dann nicht, wenn der
+**Inhalt** der Auslöser ist (eine kaputte Option, ein serialisierter Wert, ein Template). Ab
+Agent 0.8.0 nimmt `rescue.php` deshalb den ganzen Satz zurück, ohne WordPress zu laden: **Inhalte →
+Code → Uploads**, mit derselben Logik wie der Agent (Abdruckvergleich, Sperren, eine Transaktion).
+
+- **Der Umschlag.** Beim echten Begin eines Pushs mit Inhalten legt der Agent
+  `<arbeitsordner>/<push-id>/rescue.sealed` ab: die Verbindung zur Datenbank, so wie WordPress sie
+  gerade aufgebaut hat (Host, Port, Socket, Benutzer, Passwort, Zeichensatz, `sql_mode` der
+  Sitzung), Präfix und Adressen des Ziels und die Dateischlüssel der beiden Abbilder dieses Pushs.
+  `rescue.php` liest **nie** `wp-config.php` – Bedrock, `.env`, `getenv()` und `WP_HOME` als
+  Konstante brauchen deshalb keine Sonderbehandlung. Der Umschlag ist verschlüsselt und
+  authentisiert (XSalsa20-Poly1305 mit `sodium`, sonst AES-256-GCM mit `openssl`) mit einem
+  Schlüssel, der aus dem Rollback-Schlüssel des Pushs abgeleitet ist; auf dem Server liegt nur
+  dessen Hash. Öffnen kann ihn also nur, wer pushen darf. Er verschwindet nach gelungener
+  Rücknahme, bei `confirm`, mit dem Arbeitsordner und spätestens nach 24 Stunden (tägliche
+  Wartung des Agents). Unabhängig davon gilt eine harte Altersgrenze: ein Umschlag, der älter ist
+  als **7 Tage**, wird nie mehr angewandt – auch wenn er noch liegt, weil die Wartung nicht lief
+  (WordPress war unten). Das Alter steht authentisiert im Umschlag, nicht in der Uhr der Datei.
+- **Vor dem Push geprüft.** Der Agent probiert die Verbindung des Umschlags beim Begin aus (zweite
+  Verbindung, Datenbank, Sitzung, die sieben Tabellen) und antwortet mit `rescue.db: {ok, reason?}`.
+  Gibt es keinen Umschlag, wird **trotzdem gepusht** – die CLI sagt „Notfall-Rücknahme der Inhalte
+  nicht möglich (<grund>) – bei einem Ausfall gehen nur Code und Uploads zurück“ und das Ergebnis
+  trägt `warnings: ["rescue_db_unavailable"]`. Mit `--require-rescue-db` wird dann nicht gepusht:
+  Exit 1, `error.reason: "rescue_db_unavailable"`, `error.detail: <grund>`.
+
+  | Grund | Bedeutung |
+  |---|---|
+  | `no_crypto` | PHP hat weder `sodium` noch `openssl` mit `aes-256-gcm` |
+  | `driver` | WordPress spricht die Datenbank nicht direkt über `mysqli` an (Drop-in `db.php`, anderer Treiber) |
+  | `no_image_key` | Die Installation hat keinen Schlüssel (`WPSYNC_KEY` bzw. Salts): die Abbilder lägen als Klartext da |
+  | `probe_failed` | Die Probe scheiterte – oder der Arbeitsordner lässt sich nicht sperren (`flock`) |
+  | `write_failed` | Der Umschlag liess sich nicht schreiben |
+  | `agent_outdated` | (nur CLI, mit `--require-rescue-db`) der Agent ist älter als 0.8.0 |
+
+- **Reihenfolge und Wiederholung.** `rescue.php` prüft zuerst den Schlüssel; bis dahin lädt es
+  nichts ausser zwei Klassen, liest keinen Umschlag und öffnet keine Datenbankverbindung. Ein
+  bestätigter oder von einem späteren Push überholter Push wird abgelehnt, bevor die Datenbank
+  berührt wird. Dann die Inhalte, ihr Ausgang steht in `rescue.json`, dann Code, dann Uploads.
+  Jeder Aufruf mit richtigem Schlüssel ist wiederholbar: scheitert der Code nach gelungener
+  Rücknahme der Inhalte, überspringt der nächste Aufruf die Datenbank.
+- **Wenn die Inhalte nicht zurückgehen**, gehen Code und Uploads trotzdem zurück – der Rückweg ist
+  nie schlechter als ohne Inhalte. Das Ergebnis trägt `warnings: ["content_not_rolled_back"]` und
+  `content_error: {code, keys?, total?}`; der Push bleibt offen wie oben beschrieben.
+
+  | `content_error.code` | Bedeutung |
+  |---|---|
+  | `changed_since_push` | Eine Zeile, die der Push geschrieben hat, wurde seither geändert (`keys`). In der Datenbank wurde nichts angefasst. Es gibt kein `--force` |
+  | `before_image_invalid` | Das Vorher-Abbild fehlt nicht, lässt sich aber nicht öffnen oder wurde verändert |
+  | `engine_unsupported` | Eine der sieben Tabellen ist nicht (mehr) InnoDB |
+  | `content_failed` | Die Datenbank hat versagt (Sperre, Verbindung verloren) – nichts ist geschrieben |
+  | `rescue_db_unavailable` | Kein Umschlag, er passt nicht zu Push, Schlüssel oder Ordner – oder er ist älter als 7 Tage |
+  | `db_unreachable` | Die Datenbank war mit den Daten des Umschlags nicht erreichbar |
+
+- **Was an neuen Objekten hängt.** Über den Agent lehnt die Rücknahme ab, sobald an einem vom
+  Push eingefügten Beitrag oder Term etwas hängt, das nicht vom Push stammt. Im Notfallweg –
+  die Site ist unten – blockiert das nicht: `rescue.php` nimmt zurück, was der Push geschrieben
+  hat, und **lässt das Fremde stehen** (verwaiste Meta, Zuordnungen, Kommentare, Kindseiten). Das
+  Ergebnis nennt es: `warnings: ["content_left_extra"]`, `content_left: [{table, key}]`
+  (höchstens 200, `content_left_total`). `rescue.php` löscht oder überschreibt nur, was der Push
+  selbst geschrieben hat – auch Meta, die WordPress an den neuen Beitrag gehängt hat
+  (`_edit_lock`, `_wp_old_slug` …), bleibt dann zunächst verwaist liegen und wird nicht eigens
+  genannt.
+
+  Harmlos ist das nicht von selbst: WordPress sieht verwaiste Zeilen zwar nicht, solange das Objekt
+  fehlt – legt aber später jemand ein Objekt **mit derselben ID** an (derselbe Satz, noch einmal
+  gepusht), hängen sie an ihm: fremde Meta an der neuen Seite, alte Kommentare darunter, fremde
+  Beiträge im neuen Term. Deshalb zweierlei:
+  - **Der Agent räumt nach.** Sobald WordPress wieder lädt, entfernt er an jedem eingefügten
+    Objekt, das weiterhin fehlt, die Meta (auch die der festen Sperrliste) und die Zuordnungen.
+    An einem Beitrag nur Zuordnungen in Taxonomien, die für Beiträge gelten: in
+    `term_relationships` steht für eine Benutzer- oder Link-Taxonomie die ID eines Benutzers bzw.
+    Links – dieselbe Zahl, ein anderes Objekt. Zuordnungen in einer nicht registrierten Taxonomie
+    oder ohne `term_taxonomy`-Zeile bleiben deshalb stehen (und blockieren die ID, siehe unten). Im Protokoll steht es als Nacharbeit
+    `left_cleanup` (`ok: false`, wenn es nicht gelang; der Schritt fehlt, wenn nichts hing).
+    Kommentare und Kinder (Revisionen, Kindseiten, weitere Taxonomien eines Terms) löscht der
+    Agent **nicht** – das sind eigene Inhalte.
+  - **Ein neues Objekt an einer ID mit Resten wird abgelehnt** (`id_has_leftovers`,
+    siehe [Was der Agent prüft](#was-der-agent-prüft)), bis sie auf der Site entfernt sind.
+- **Persistenter Object-Cache.** Mit Redis oder Memcached hält `alloptions` den gepushten Wert,
+  auch wenn die Datenbank schon zurück ist. Sagt `rescue.php` deshalb `cache: "stale"` (Live, es
+  wurden Zeilen zurückgeschrieben, `wp-content/object-cache.php` liegt da), ruft die CLI einen
+  zweiten, getrennten Schritt (`action=cache`): er lädt WordPress mit `SHORTINIT` – ohne Plugins,
+  Themes und mu-plugins – und ruft `wp_cache_flush()`. Geleert wird der ganze Cache der Site;
+  teilen sich mehrere Sites eine Redis-Instanz ohne eigenes Präfix, trifft es auch sie. Scheitert
+  der Schritt (Drop-in defekt, Cache-Server weg, Wartungsmodus), bleibt die Rücknahme gültig, und
+  die CLI meldet `warnings: ["object_cache_stale"]`: „Der Object-Cache der Site trägt noch den
+  gepushten Stand – beim Hoster leeren, falls die Site nicht antwortet.“
+- **Nacharbeiten.** Elementor-CSS, Indexables, Cache-Plugins, Rewrite-Regeln, Term-Zähler und
+  Revisionen brauchen WordPress. Der Agent holt sie nach, sobald WordPress wieder lädt (beim
+  nächsten Seitenaufruf, für eine Staging-Kopie beim nächsten wpsync-Aufruf oder im täglichen
+  Cron); bis dahin kann ein Seiten-Cache alte Seiten zeigen und Elementor-CSS den gepushten Stand
+  tragen. Danach steht der Push als zurückgerollt im Protokoll, `pushes --json` nennt an der
+  Einheit `content` `via: "rescue"` und `post_actions`, und Arbeitsordner, Abbilder und Umschlag
+  sind weg.
+- **`wpsync rollback`** geht denselben Weg: Agent zuerst, ohne Antwort `rescue.php`. Sind die
+  Inhalte zurück, setzt die CLI Manifest, Baseline und Journal zurück wie bei der Rücknahme über
+  den Agent.
+- **Grenzen.** Kein Überschreiben geänderter Zeilen: ist der Inhalt die Ursache des Ausfalls
+  **und** wurde eine seiner Zeilen seit dem Push geändert, bleibt die Site unten, bis jemand die
+  Zeile von Hand richtet. Bestätigte Pushes nimmt `rescue.php` nie zurück. Der Umschlag gilt
+  24 Stunden, nie länger als 7 Tage – ein Push, der länger unbestätigt liegt, hat danach nur noch
+  den Rückweg für Code und Uploads (`content_error.code: "rescue_db_unavailable"`). Multisite, HyperDB/LudicrousDB und andere Treiber als `mysqli`: wie beim Push
+  nicht unterstützt. Der Cache-Schritt setzt das Standardlayout voraus (`wp-load.php` im Webroot).
+
+| CLI | Agent | Verhalten |
+|---|---|---|
+| ≥ 0.8.0 | 0.7.x | kein `rescue.db`; `rescue.php` nimmt nur Code und Uploads zurück (`content_not_rolled_back`) |
+| 0.7.x | ≥ 0.8.0 | die CLI bittet nicht um die Inhalte: wie oben; der Umschlag liegt ungenutzt und verfällt |
 
 ## Staging auf dem Server
 
@@ -1078,11 +1201,38 @@ abbilden lässt, sofern das Profil sie kopiert.
   folgen, und prüft die Werte aus `env.json`, bevor sie an Docker oder WP-CLI gehen. Die
   Baseline enthält die Inhalte der lokalen Datenbank im Klartext (nach der Pseudonymisierung
   des Pulls) – sie gehört wie der Dump nicht in ein Repo.
-- **`rescue.php`:** kennt nur „ping" und „rollback", lädt weder WordPress noch die Datenbank,
-  rollt nur unbestätigte Pushes zurück und sperrt einen Push nach 5 falschen Schlüsseln für
-  10 Minuten. Der Schlüssel ist pro Push
+- **`rescue.php`:** kennt „ping", „rollback" und „cache", lädt für die Rücknahme kein WordPress,
+  rollt nur unbestätigte Pushes zurück und sperrt nach 5 falschen Schlüsseln für 10 Minuten –
+  falsche Schlüssel; der richtige gilt weiter, damit niemand den Notfallweg genau dann sperren
+  kann, wenn er gebraucht wird. Fehlversuche stehen in einer eigenen Datei, nie im Datensatz der
+  Rücknahme. Der Schlüssel ist pro Push
   aus dem Pairing-Secret abgeleitet und geht als POST-Formularfeld an das Skript, nie in der
   URL; auf dem Server liegt nur sein Hash.
+- **`rescue.php` und die Datenbank (ab Agent 0.8.0):** Mit einem gültigen Schlüssel lässt sich
+  genau eines erreichen – den einen unbestätigten Push ungeschehen machen. Geschrieben wird nur in
+  Zeilen, deren Schlüssel im authentisierten Vorher-Abbild stehen, nur ihr Stand vor dem Push und
+  nur, solange jede von ihnen noch den Abdruck des Pushs trägt; kein Parameter des Requests wählt
+  Tabellen, Schlüssel oder Werte, und es gibt kein „force“. Vor der Schlüsselprüfung wird keine
+  weitere Klasse geladen, kein Umschlag gelesen und keine Datenbankverbindung geöffnet.
+  Zugangsdaten liest das Skript nie aus `wp-config.php`, sondern aus dem versiegelten Umschlag
+  des Pushs (`rescue.sealed`, 0600), den nur der Rollback-Schlüssel öffnet: wer den Arbeitsordner
+  lesen kann, findet Chiffrat und einen Hash – nicht mehr, als `wp-config.php` daneben ohnehin
+  im Klartext zeigt. Der Umschlag eines Pushs nach Staging gilt nur im Ordner seiner Kopie und
+  nur für Tabellen mit ihrem Präfix. Antworten und Fehlerprotokoll nennen nie Host, Benutzer,
+  Passwort, Datenbankname, einen Wert oder Text des Datenbankservers – nur Codes, Tabellen und
+  Schlüssel. `rescue.php`, die Rücknahme über den Agent, der laufende Commit und die Bestätigung
+  (`confirm`) schliessen sich über eine Sperrdatei je Push aus: ein Commit, den eine Rücknahme
+  überholt hat, schreibt nichts mehr fest, und ein Push wird nie bestätigt, während er
+  zurückgenommen wird – wer zuerst kommt, gilt (HTTP 423 `wpsync_push_busy` bzw. `busy` für den
+  anderen, wenn es länger dauert). Einen bestätigten Push lehnt die Rücknahme von `rescue.php`
+  unter dieser Sperre noch einmal ab; auch der Vermerk, dass ein späterer Push einen älteren
+  überholt hat, wird nur unter der Sperre des älteren geschrieben. Der Cache-Schritt lädt WordPress erst, wenn der Push ganz zurück ist (der Code ist
+  dann wieder der alte), ohne Plugins, Themes und mu-plugins – Drop-ins in `wp-content`
+  (`object-cache.php`, `db.php`, `advanced-cache.php`) lädt WordPress dabei wie in jedem Request.
+  Den Schlüssel finden sie nicht mehr in `$_POST`/`$_REQUEST`, und eine Umleitung, die sie
+  setzen (`Location`), geht nicht mit der Antwort hinaus. Grenze: den rohen Rumpf des Requests
+  (`php://input`) kann PHP nicht zurücknehmen – ein Drop-in, das ihn gezielt liest, sähe den
+  Schlüssel dieses einen, dann schon zurückgenommenen Pushs.
 - **Rescue-Stub:** `wpsync-rescue-<32 hex>.php` im Webroot enthält nur ein `require` auf
   `rescue.php` mit relativem Pfad. Er entsteht nur, wenn die CLI pushen will, liegt solange ein
   Push läuft oder unbestätigt ist und höchstens etwa 10 Minuten darüber hinaus; Deaktivieren des
@@ -1090,9 +1240,10 @@ abbilden lässt, sofern das Profil sie kopiert.
 - **Snapshots:** liegen in `wp-content/wpsync-push-<zufall>/` mit `.htaccess`-Sperre. Auf
   Servern ohne `.htaccess`-Auswertung schützt nur der zufällige Name.
 - **Arbeitsordner auf nginx:** In diesem Ordner liegen bei einem Inhalts-Push auch das abgelegte
-  Paket (`packages/<kopplung>/<sha256>.jsonl`, `<push-id>/content/package.jsonl`) und die
-  Abbilder `before.json`/`after.json`. nginx wertet keine `.htaccess` aus: dort hält sie nur der
-  zufällige Ordnername (und bei den Abbildern die Verschlüsselung) vom Netz fern. Wer es fest
+  Paket (`packages/<kopplung>/<sha256>.jsonl`, `<push-id>/content/package.jsonl`), die
+  Abbilder `before.json`/`after.json` und der Umschlag `rescue.sealed`. nginx wertet keine
+  `.htaccess` aus: dort hält sie nur der zufällige Ordnername (und bei den Abbildern und dem
+  Umschlag die Verschlüsselung) vom Netz fern. Wer es fest
   haben will, sperrt den Ordner in der Server-Konfiguration:
   `location ~ ^/wp-content/wpsync-push-[^/]+/ { deny all; }` – `rescue.php` liegt im
   Plugin-Ordner und bleibt davon unberührt.
@@ -1268,6 +1419,10 @@ Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per
 | „die Site hat sich seit dem letzten Pull geändert“ | `wpsync pull <site>`, lokal zusammenführen, erneut pushen – oder bewusst `--force` |
 | „rescue.php ist nicht erreichbar“ | Agent auf 0.5.1 bringen (Stub im Webroot). Hilft das nicht: Webroot für den Webserver nicht beschreibbar und PHP unter `wp-content/plugins/` gesperrt → Ausnahme für `wpsync-agent/rescue.php` einrichten; die Meldung nennt erkannte Sicherheits-Plugins und ihre Einstellung |
 | „der Notfallweg über rescue.php besteht nur bis kurz nach der Bestätigung …“ | Der Push ist bestätigt und der Stub aufgeräumt → im WP-Admin unter Werkzeuge → wpsync zurückrollen |
+| „Notfall-Rücknahme der Inhalte nicht möglich (<grund>)“ | Der Push geht trotzdem; fällt die Site aus, gehen nur Code und Uploads zurück. Gründe und Abhilfe: [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress) – meist fehlt `sodium`/`openssl` oder ein Schlüssel (`WPSYNC_KEY` bzw. Salts in `wp-config.php`). `--require-rescue-db` macht daraus einen Abbruch vor dem Tausch |
+| „Nur Code und Uploads sind zurück – die Inhalte des Pushs stehen noch auf der Site (<code>)“ | `rescue.php` konnte die Inhalte nicht zurücknehmen. Sobald WordPress antwortet: `wpsync rollback <site> <id>`; bei `changed_since_push` die genannten Zeilen richten oder mit `wpsync pushes <site> --confirm <id>` abschliessen |
+| „Der Object-Cache der Site trägt noch den gepushten Stand“ | Die Datenbank ist zurück, Redis/Memcached nicht geleert → im Panel des Hosters leeren (oder `wp cache flush`), falls die Site nicht antwortet; der Agent leert ihn beim nächsten Laden von WordPress ohnehin |
+| „An eingefügten Objekten hing etwas, das nicht vom Push stammt – es blieb stehen“ | Der Push ist zurück; die genannten Zeilen (Meta, Zuordnungen, Kommentare, Kindseiten) gehören zu Objekten, die es nicht mehr gibt, und können auf der Site gelöscht werden |
 | „Push … ist getauscht, aber nicht bestätigt“ | Site ansehen, dann `wpsync pushes <site> --confirm <id>` oder `wpsync rollback <site> <id>` |
 | „der Webserver darf das Verzeichnis nicht ersetzen“ | Das Verzeichnis gehört einem anderen Benutzer als PHP (typisch nach FTP-Upload) → Besitzer oder Rechte auf dem Server anpassen |
 | Push wurde automatisch zurückgerollt | Die Meldung nennt die Seite, die schlechter wurde. Lokal reparieren und erneut pushen; auf der Site ist der alte Stand live |
@@ -1367,6 +1522,15 @@ verschlechterter Seite `health: [{"url", "before", "after"}]` (z. B. `"HTTP 200"
 `rollback` melden in `warnings` zusätzlich `upload_changed_since_push`. Bei
 `error.reason: "nothing_to_push"` nennt `error.skipped_new` die lokal neuen, nicht genannten
 Einheiten (fehlt, wenn es keine gibt).
+Ab CLI 0.8.0 zusätzlich (alles fehlt, wenn es nicht zutrifft): im `plan` eines Pushs mit
+`--content` `rescue_db: {"ok", "reason"?}` (nur von Agent ≥ 0.8.0); im Ergebnis von `rollback`
+und eines zurückgerollten `push` `via` (`"agent"` oder `"rescue"`), `content_error`
+(`{"code", "keys"?, "total"?}`, neben `content_not_rolled_back`) und `content_left`
+(`[{"table","key"}]`, höchstens 200) mit `content_left_total`; in `warnings`
+`rescue_db_unavailable`, `object_cache_stale` und `content_left_extra`; in `pushes` an der
+Einheit `content` `via: "rescue"`, `post_actions` (darin nach einer Rücknahme mit Resten der Schritt
+`left_cleanup`) und `left`/`left_total`. Bedeutung:
+[Rücknahme ohne WordPress](#rücknahme-ohne-wordpress).
 
 **Site-Lock.** Pro Site läuft nur ein `pull`, `push`, `rollback` oder `content export` gleichzeitig (`flock` auf
 `<slug>/.wpsync/lock`, auf dem Mac `~/wpsync-sites/.wpsync-git/<site>.lock`). Ein zweiter endet
@@ -1420,6 +1584,7 @@ gegen einen Agent unter 0.6.0 und `pull --content` gegen einen Agent unter 0.7.0
 | `nothing_to_push` | `push`: lokal ist nichts geändert, oder nur neue Einheiten, die nicht genannt wurden, oder ohne Code liegen alle Dateien aus `--uploads` schon auf der Site |
 | `not_writable` | `push`: der Webserver darf ein Verzeichnis nicht ersetzen |
 | `rescue_unreachable` | `push`: `rescue.php` antwortet nicht – ohne Rückweg kein Push |
+| `rescue_db_unavailable` | `push --content --require-rescue-db`: `rescue.php` könnte die Inhalte nicht ohne WordPress zurücknehmen; `error.detail` nennt den Grund (`no_crypto`, `driver`, `no_image_key`, `probe_failed`, `write_failed`, `agent_outdated`). Nichts wurde getauscht |
 | `local_changed` | `push`: eine lokale Datei oder ein Verzeichnis änderte sich während des Pushs oder ist ein Symlink |
 | `target_mismatch` | `push`/`rollback`: der Agent antwortet für ein anderes Ziel, oder der Push ging an das andere Ziel |
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |

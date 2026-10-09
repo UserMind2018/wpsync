@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# E2E Inhalts-Push (Spec Content-Push P2b, §7; AC-147 Staging, AC-149–AC-155, AC-157): ein Satz aus
-# Code, Uploads und Inhalten gegen eine eigene Apache-Quelle – Probelauf ohne Fenster, Staging,
-# Live, Rücknahme über den Agent, über rescue.php und nachgeholt, dazu die Ablehnungen.
+# E2E Inhalts-Push (Spec Content-Push P2b, §7; AC-147 Staging, AC-149–AC-155, AC-157; P3 AC-158): ein
+# Satz aus Code, Uploads und Inhalten gegen eine eigene Apache-Quelle – Probelauf ohne Fenster,
+# Staging, Live, Rücknahme über den Agent und über rescue.php, dazu die Ablehnungen.
+# Seit Agent 0.8.0 (P3) nimmt rescue.php auch die Inhalte zurück: der Fall „WordPress antwortet
+# nicht“ endet hier ganz zurückgerollt. Der Fall von davor – rescue.php lässt die Inhalte stehen
+# (content_not_rolled_back, der Push bleibt offen und blockiert mit Exit 42, wpsync rollback holt
+# sie über den Agent nach) – gibt es weiter, wenn der Umschlag fehlt oder nicht gilt; ihn prüft
+# e2e-rescue-db.sh (no_image_key, db_unreachable, changed_since_push, verfallener und zu alter Umschlag).
 # Eigene Projekte wpsync-e2e-cdb (Quelle, apache-fpm wegen der Staging-Kopie) und
 # wpsync-e2e-cdb-target (lokal) unter ~/wpsync-e2e/cdb; die geteilten E2E-Projekte bleiben
 # unberührt. Die Pakete baut das Skript selbst mit jq aus `content export` ↔ baseline.jsonl –
@@ -837,7 +842,7 @@ eq "Health: die Seite Byte für Byte wie vor dem Push" "$(rowsum "$PAGE_B")" "$S
 eq "Health: kein offener Push" "$(pending)" "null"
 tgt wp post update "$PAGE_B" --post_content='<a href="'"$LOCAL_URL"'/kontakt">Kontakt</a>' --skip-plugins --skip-themes >/dev/null
 
-echo "== AC-157: WordPress antwortet nicht – rescue.php nimmt Code zurück, die Inhalte holt wpsync rollback nach"
+echo "== AC-157/AC-158: WordPress antwortet nicht – rescue.php nimmt Code und Inhalte zurück (ab Agent 0.8.0)"
 HEALTH="$LWPC/plugins/e2e-health/e2e-health.php"
 cp -p "$HEALTH" "$E2E/e2e-health.good"
 printf '\nthis is not php(\n' >>"$HEALTH"
@@ -848,22 +853,30 @@ jrun broken "$WPSYNC" push "$TARGET" code plugins/e2e-health --content "$PKG/bro
 eq "Stumm: Exit 43" "$RC" 43
 cat "$JSON/broken.err"
 PUSH_BROKEN="$(last broken '.data.push_id')"
-eq "Stumm: Status und Warnung" "$(last broken '.data.status + " " + (.data.warnings | join(","))')" "rolled_back content_not_rolled_back"
-ok "Stumm: Weg über rescue.php" hasF "$JSON/broken.err" "rescue.php"
-ok "Stumm: Hinweis auf wpsync rollback (mit --json in error.message)" contains "$(last broken '.error.message')" "wpsync rollback $TARGET $PUSH_BROKEN"
+eq "Stumm: Status und Weg" "$(last broken '.data.status + " " + .data.via')" "rolled_back rescue"
+eq "Stumm: ohne Warnung – auch kein content_not_rolled_back" "$(last broken '.data | has("warnings")')" false
+ok "Stumm: Weg über rescue.php" hasF "$JSON/broken.err" "der Agent antwortet nicht – nehme den Weg über rescue.php"
+ok "Stumm: die CLI sagt, dass die Inhalte eingeschlossen sind" hasF "$JSON/broken.err" "über rescue.php zurückgenommen, Inhalte eingeschlossen"
+ok "Stumm: Meldung in error.message (mit --json)" contains "$(last broken '.error.message')" "zurückgerollt (über rescue.php, Inhalte eingeschlossen)"
+no "Stumm: kein Hinweis mehr auf ein nachzuholendes wpsync rollback" contains "$(last broken '.error.message')" "wpsync rollback $TARGET $PUSH_BROKEN"
 no "Stumm: kaputter Code auf Live" grep -q "this is not php" "$WPC/plugins/e2e-health/e2e-health.php"
 eq "Stumm: Live antwortet wieder" "$(code "$SOURCE_URL/")" 200
-eq "Stumm: der Messwert bleibt – die Inhalte stehen noch" "$(last broken '.data.content.rows')" 1
-eq "Stumm: die Inhalte stehen noch" "$(post src "$PAGE_FULL" post_title)" "E2E VOLL mit kaputtem Code"
+eq "Stumm: kein Messwert mehr – die Inhalte stehen nicht auf der Site" "$(last broken '.data | has("content")')" false
+eq "Stumm: die Inhalte sind zurück" "$(post src "$PAGE_FULL" post_title)" "E2E VOLL"
+eq "Stumm: die Seite Byte für Byte wie vor dem Push" "$(rowsum "$PAGE_FULL")" "$SUM_FULL_BEFORE"
+eq "Stumm: kein offener Push – der Agent hat die Rücknahme übernommen, sobald WordPress wieder lud" "$(pending)" "null"
+eq "Stumm: das Protokoll nennt den Push als zurückgerollt, die Inhalte über rescue.php" "$("$WPSYNC" pushes "$TARGET" --json | jq -r ".data.pushes[] | select(.push_id == \"$PUSH_BROKEN\") | .status + \" \" + (.units[] | select(.path == \"content\") | .via)")" "rolled_back rescue"
 cp -p "$E2E/e2e-health.good" "$HEALTH"
 jrun pending "$WPSYNC" push "$TARGET" code --no-code --content "$PKG/broken.jsonl" --dry-run --json
-eq "Stumm: der Push bleibt offen und blockiert weitere (Exit 42)" "$RC" 42
+eq "Stumm: der Push blockiert nichts – der nächste ist möglich (Probelauf, Exit 0)" "$RC" 0
+# Ein wpsync rollback danach hat nichts mehr nachzuholen (vor P3 nahm es hier die Inhalte zurück): es
+# antwortet gleich und ändert nichts.
 jrun rollback-broken "$WPSYNC" rollback "$TARGET" "$PUSH_BROKEN" --json
-eq "Nachholen: Exit 0" "$RC" 0
-eq "Nachholen: ohne Warnung" "$(last rollback-broken '.data | has("warnings")')" false
-eq "Nachholen: die Inhalte sind zurück" "$(post src "$PAGE_FULL" post_title)" "E2E VOLL"
-eq "Nachholen: die Seite Byte für Byte wie vor dem Push" "$(rowsum "$PAGE_FULL")" "$SUM_FULL_BEFORE"
-eq "Nachholen: kein offener Push mehr" "$(pending)" "null"
+eq "Wiederholung: Exit 0" "$RC" 0
+eq "Wiederholung: ohne Warnung" "$(last rollback-broken '.data | has("warnings")')" false
+eq "Wiederholung: die Inhalte bleiben zurück" "$(post src "$PAGE_FULL" post_title)" "E2E VOLL"
+eq "Wiederholung: die Seite Byte für Byte wie vor dem Push" "$(rowsum "$PAGE_FULL")" "$SUM_FULL_BEFORE"
+eq "Wiederholung: kein offener Push" "$(pending)" "null"
 tgt wp post update "$PAGE_FULL" --post_title="E2E VOLL" --skip-plugins --skip-themes >/dev/null
 
 echo "== Ein Satz aus Code, Uploads und Inhalten – und ganz zurück"

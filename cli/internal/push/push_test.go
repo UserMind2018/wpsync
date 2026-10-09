@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -114,6 +115,15 @@ type fakeSite struct {
 	noApply        bool                           // /push/commit answers without content
 	actions        []agentapi.PostAction          // post actions of the commit
 	tamper         func(*agentapi.ContentApplied) // changes what the commit answers about the content
+
+	// The content rollback of rescue.php (agent 0.8.0, rescuedb_test.go).
+	rescueDB     *agentapi.RescueDBState // rescue.db of /push/begin for a push with content; nil: an agent 0.7.x
+	rescueDBReal *agentapi.RescueDBState // rescue.db of the real begin only (the probe failed)
+	rescueForms  []url.Values            // the form of every rollback request to rescue.php
+	rescueBusy   int                     // so many rollback requests rescue.php answers with 423 busy first
+	rbBusy       int                     // so many /push/rollback requests the agent answers with 423 wpsync_push_busy first
+	cacheStatus  int                     // HTTP status of action=cache; 0: 200
+	cacheBody    string                  // answer of action=cache; empty: {"ok":true,"cache":"flushed"}
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -166,8 +176,29 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"ok":true}`))
 			return
 		}
+		if r.PostForm.Get("action") == "cache" {
+			f.routes = append(f.routes, "cache")
+			f.rescueKey = r.PostForm.Get("key")
+			status, body := f.cacheStatus, f.cacheBody
+			if status == 0 {
+				status = 200
+			}
+			if body == "" {
+				body = `{"ok":true,"cache":"flushed"}`
+			}
+			w.WriteHeader(status)
+			w.Write([]byte(body))
+			return
+		}
 		f.routes = append(f.routes, "rescue")
 		f.rescueKey = r.PostForm.Get("key")
+		f.rescueForms = append(f.rescueForms, r.PostForm)
+		if f.rescueBusy > 0 {
+			f.rescueBusy--
+			w.WriteHeader(http.StatusLocked)
+			w.Write([]byte(`{"ok":false,"error":"busy"}`))
+			return
+		}
 		if f.rescue != 200 {
 			w.WriteHeader(f.rescue)
 			why := f.rescueErr
@@ -282,6 +313,10 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 			res.Units = append(res.Units, plan)
 		}
 		if req.Content != nil && !f.noContent {
+			res.Rescue.DB = f.rescueDB
+			if !req.Dry && f.rescueDBReal != nil {
+				res.Rescue.DB = f.rescueDBReal
+			}
 			res.Content = f.contentPlan(req)
 			if !req.Dry && f.contentFail != nil {
 				w.WriteHeader(http.StatusConflict)
@@ -377,6 +412,12 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewDecoder(r.Body).Decode(&rb)
 		f.rbID = rb.PushID
+		if f.rbBusy > 0 {
+			f.rbBusy--
+			w.WriteHeader(http.StatusLocked)
+			w.Write([]byte(`{"code":"wpsync_push_busy","message":"Für diesen Push läuft gerade eine Rücknahme","data":{"status":423}}`))
+			return
+		}
 		if f.rollback == 200 {
 			f.rolledBack = true
 			f.restoreCopy()

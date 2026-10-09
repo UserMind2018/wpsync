@@ -32,6 +32,18 @@ final class Push
     public const MAX_UPLOAD = 4194304;
     /** Ziele eines Pushs (Spec 2b 5.8). Das Ziel steht im Datensatz des Pushs und wechselt nie. */
     public const TARGETS    = ['live', 'staging'];
+    /** So lange wartet der Commit vor COMMIT höchstens auf die Sperre des Pushs (Spec Content-Push P3 §7.1). */
+    public const GATE_SECONDS = 15.0;
+    /**
+     * Schritt der Nacharbeiten nach einer Rücknahme durch rescue.php: was an den eingefügten Objekten
+     * stehen blieb (R15), ist weggeräumt (ok) oder liess sich nicht wegräumen. Fehlt der Schritt, hing nichts.
+     */
+    public const LEFT_CLEANUP = 'left_cleanup';
+    /** Der Umschlag für rescue.php (rescue.sealed) verfällt nach 24 Stunden (P3 R14). */
+    public const RESCUE_DB_TTL = 86400;
+
+    /** @var float|null für Tests: Wartezeit an der Naht anstelle von GATE_SECONDS */
+    public static $gateWait = null;
 
     /** @var string */
     private static $pluginDir = '';
@@ -40,6 +52,8 @@ final class Push
     {
         self::$pluginDir = $pluginDir;
         add_action(self::CRON, [self::class, 'maintain']);
+        // Früh: hat rescue.php einen Push zurückgenommen, holt der Agent nach, was WordPress braucht (P3 §8.1).
+        add_action('init', [self::class, 'catchUp'], 1);
         add_action('init', static function (): void {
             if (!wp_next_scheduled(self::CRON)) {
                 wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CRON);
@@ -55,8 +69,10 @@ final class Push
     /** Deaktivieren entfernt Arbeitsordner, Snapshots und Rescue-Stubs; bestätigte Stände bleiben live. */
     public static function uninstall(): void
     {
-        foreach ((array) glob(self::content() . '/wpsync-push-*', GLOB_ONLYDIR) as $dir) {
-            PushSwap::remove((string) $dir);
+        foreach (self::content() === '' ? [] : PushSwap::entries(self::content(), PushRescue::WORK_DIR) as $dir) {
+            if (is_dir($dir)) {
+                PushSwap::remove($dir); // einen Symlink an der Stelle entfernt es, ohne ihm zu folgen
+            }
         }
         if (self::content() !== '') {
             PushRescueStub::remove(dirname(self::content()));
@@ -68,6 +84,58 @@ final class Push
         Store::install();
         self::sync();
         self::prune(time());
+        self::expireEnvelopes(time());
+    }
+
+    /**
+     * Auf init, ohne Datenbankabfrage (Spec Content-Push P3 §8.1): liegt im Arbeitsordner von Live der
+     * Marker rescue.pending, hat rescue.php einen Push an WordPress vorbei zurückgenommen – dann, und
+     * nur dann, läuft sync(). Der Marker verschwindet vorher: ein Fehler in einer Nacharbeit
+     * wiederholt sich so nicht in jedem Request. Für Pushes nach Staging liegt der Marker in der
+     * Kopie; sie holt sync() beim nächsten REST-Aufruf oder im täglichen Cron nach.
+     */
+    public static function catchUp(): void
+    {
+        $live = self::content();
+        if ($live === '') {
+            return;
+        }
+        $found = false;
+        foreach (PushRescue::workDirs($live) as $work) {
+            $marker = PushRescue::pendingFile($work);
+            if (is_file($marker) && !is_link($marker) && @unlink($marker)) {
+                $found = true;
+            }
+        }
+        if (!$found) {
+            return;
+        }
+        try {
+            self::sync();
+        } catch (\Throwable $e) {
+            // der tägliche Cron und der nächste REST-Aufruf holen es nach
+        }
+    }
+
+    /** Löscht Umschläge, die älter als RESCUE_DB_TTL sind (R14) – auf beiden Zielen. Läuft der Cron, läuft WordPress, und der Agent kann zurücknehmen. */
+    private static function expireEnvelopes(int $now): void
+    {
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            $work    = $content . '/' . Store::pushDirName();
+            if ($content === '' || is_link($work)) {
+                continue;
+            }
+            foreach ((array) @scandir($work) as $name) {
+                if (!is_string($name) || preg_match(PushRescue::ID, $name) !== 1 || is_link($work . '/' . $name)) {
+                    continue;
+                }
+                $file = RescueSeal::file($work, $name);
+                if (is_file($file) && !is_link($file) && $now - (int) @filemtime($file) > self::RESCUE_DB_TTL) {
+                    RescueSeal::forget($work, $name);
+                }
+            }
+        }
     }
 
     /**
@@ -229,6 +297,10 @@ final class Push
             $answer['content'] = $contentPlan;
         }
         if (!empty($params['dry'])) {
+            if ($contentSha !== null) {
+                // Was ein echter Begin ergäbe – ohne Probe und ohne Datei (Spec Content-Push P3 §5.3).
+                $answer['rescue']['db'] = PushContent::rescueDb($target, $content, '', null, '');
+            }
             return new \WP_REST_Response($answer);
         }
 
@@ -297,10 +369,13 @@ final class Push
             ];
         }
         wp_mkdir_p($work . '/' . $pushId . '/stage');
-        $plan = [
+        // Der Rescue-Key entsteht nur hier: der Server behält seinen Hash – und, für einen Push mit
+        // Inhalten, den Umschlag, den nur dieser Schlüssel öffnet (P3 R1, R2).
+        $rescueKey = PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt);
+        $plan      = [
             'push_id'  => $pushId,
             'key_id'   => $keyId,
-            'key_hash' => hash('sha256', PushRescue::key((string) Store::secretFor($keyId), $pushId, $salt)),
+            'key_hash' => hash('sha256', $rescueKey),
             'units'    => $planned,
         ];
         // Das geprüfte Paket kommt in den Arbeitsordner des Pushs (bei Staging: in die Kopie) – der
@@ -313,7 +388,10 @@ final class Push
             $plan['content'] = ['sha256' => $contentSha, 'rows' => $rows] + $extensions;
             $summary[]       = ['path' => PushContent::UNIT, 'exists' => true, 'old_version' => '', 'new_version' => '', 'files' => $rows, 'uploaded' => $rows] + $extensions;
             $taken           = $staged !== null && PushContent::take($staged, $work . '/' . $pushId, $contentSha);
+            // Ohne Umschlag wird trotzdem gepusht (R12): die CLI warnt oder bricht mit --require-rescue-db ab.
+            $answer['rescue']['db'] = $taken ? PushContent::rescueDb($target, $content, $work, $pushId, $rescueKey) : ['ok' => false, 'reason' => RescueContent::WRITE_FAILED];
         }
+        unset($rescueKey);
         $stored = $taken && false !== file_put_contents($work . '/' . $pushId . '/plan.json', (string) wp_json_encode($plan))
             && Store::addPush([
                 'push_id' => $pushId,
@@ -590,17 +668,34 @@ final class Push
         Store::updatePush($pushId, ['status' => PushRescue::COMMITTED, 'committed' => time(), 'units' => (string) wp_json_encode($summary)]);
         $answer = ['next' => null, 'stamps' => (object) $stamps];
         if ($package !== null) {
+            // Die Naht vor COMMIT (P3 R10): die Sperre des Pushs nehmen, rescue.json neu lesen. Hat
+            // rescue.php den Push inzwischen zurückgenommen, wird nichts festgeschrieben. Die Sperre
+            // hält bis nach „applied“ – rescue.php sieht den DB-Anteil nie halb.
+            $lock = false;
+            $wait = self::$gateWait ?? self::GATE_SECONDS;
+            $gate = static function () use ($work, $pushId, $wait, &$lock): bool {
+                $lock = PushRescue::lock($work, $pushId, $wait);
+                if ($lock === null) {
+                    return false; // eine Rücknahme läuft: sie hat Vorrang
+                }
+                // Lässt sich hier gar nicht sperren (false), nimmt rescue.php auch keine Inhalte zurück –
+                // dann entscheidet der Datensatz allein, wie vor P3.
+                $record = PushRescue::read($work, $pushId);
+                return $record !== null && $record['status'] === PushRescue::COMMITTED
+                    && is_array($record['content'] ?? null) && ($record['content']['state'] ?? '') === PushRescue::CONTENT_PENDING;
+            };
             try {
                 $push    = Store::getPush($pushId);
-                $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by']);
+                $applied = PushContent::apply($package, $target, $content, $base, $push === null ? null : $push['opened_by'], $gate);
             } catch (ContentException $e) {
-                return self::contentFailed($e, $content, $work, $pushId);
+                return self::contentFailed($e, $content, $work, $pushId, $lock);
             } catch (\Throwable $e) {
                 // Kein vorgesehener Grund, dieselbe Folge: was die Transaktion angefangen hat, hat sie
                 // zurückgenommen (ContentStore::transaction). Was der Fehler war, bleibt hier.
-                return self::contentFailed(new ContentException(ContentException::FAILED, 'Die Inhalte liessen sich nicht anwenden – nichts wurde übernommen.'), $content, $work, $pushId);
+                return self::contentFailed(new ContentException(ContentException::FAILED, 'Die Inhalte liessen sich nicht anwenden – nichts wurde übernommen.'), $content, $work, $pushId, $lock);
             }
             PushRescue::setContent($work, $pushId, PushRescue::CONTENT_APPLIED);
+            PushRescue::unlock($lock);
             $answer['content'] = [
                 'rows'         => $applied['rows'],
                 'after'        => $applied['after'],
@@ -621,29 +716,55 @@ final class Push
      * bleibt ganz (§7.3 Nr. 6): Code und Uploads werden zurückgetauscht, der Push ist gescheitert.
      * Ausnahme unrestored: eine einzelne Zeile steht nicht mehr auf ihrem Stand davor – dann bleibt
      * der Arbeitsordner samt Vorher-Abbild liegen.
+     *
+     * @param resource|null|false $lock die Sperre des Pushs, wenn die Naht des Commits sie schon hält
      */
-    private static function contentFailed(ContentException $e, string $content, string $work, string $pushId): \WP_Error
+    private static function contentFailed(ContentException $e, string $content, string $work, string $pushId, $lock = false): \WP_Error
     {
-        PushRescue::setContent($work, $pushId, PushRescue::CONTENT_DONE);
-        list($status) = PushRescue::rollback($content, $work, $pushId);
-        if ($status !== 200) {
-            // Der Push bleibt getauscht und unbestätigt: die CLI nennt den Ausweg (Exit 42).
-            return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen, und der Code liess sich nicht zurücktauschen – wpsync rollback ' . $pushId . '.', 409);
+        // Mit der Sperre des Pushs: kam die Naht nicht mehr dazu (oder lief gerade rescue.php), tauschen
+        // sonst zwei Läufe dieselben Paare zurück. Wo sich gar nicht sperren lässt (false), wie vor P3.
+        if (!is_resource($lock)) {
+            $lock = PushRescue::lock($work, $pushId, self::$gateWait ?? self::GATE_SECONDS);
         }
-        if (!empty($e->toArray()['unrestored'])) {
-            // Eine Zeile liess sich nicht zurücksetzen: das Vorher-Abbild ist der einzige Beleg für ihren
-            // Stand davor. Der Push ist gescheitert, sein Arbeitsordner bleibt liegen – prune() und
-            // pruneOrphans() fassen ihn nicht an, solange seine Zeile nicht als aufgeräumt gilt.
-            Store::updatePush($pushId, ['status' => self::FAILED, 'finished' => time()]);
-            self::release($pushId);
+        if ($lock === null) {
+            // Die Sperre bleibt belegt: eine Rücknahme dieses Pushs (rescue.php, der Agent) läuft noch. Sie
+            // nimmt Code und Uploads zurück und schliesst den DB-Anteil ab – festgeschrieben wurde hier
+            // nichts. Ohne Sperre daneben den Datensatz zu schreiben, die Paare zu tauschen und den Ordner
+            // zu löschen, wäre genau der Wettlauf, den sie verhindert. Der Push bleibt, wie er ist; schliesst
+            // ihn jene Rücknahme nicht ab, tut es wpsync rollback (Exit 42).
+            return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen; eine Rücknahme dieses Pushs läuft gerade. Bleibt er danach offen: wpsync rollback ' . $pushId . '.', 409);
+        }
+        try {
+            PushRescue::setContent($work, $pushId, PushRescue::CONTENT_DONE);
+            list($status) = PushRescue::rollback($content, $work, $pushId);
+            if ($status !== 200) {
+                // Der Push bleibt getauscht und unbestätigt: die CLI nennt den Ausweg (Exit 42).
+                return self::error('wpsync_push_pending', 'Push ' . $pushId . ': die Inhalte wurden nicht übernommen, und der Code liess sich nicht zurücktauschen – wpsync rollback ' . $pushId . '.', 409);
+            }
+            if (!empty($e->toArray()['unrestored'])) {
+                // Eine Zeile liess sich nicht zurücksetzen: das Vorher-Abbild ist der einzige Beleg für ihren
+                // Stand davor. Der Push ist gescheitert, sein Arbeitsordner bleibt liegen – prune() und
+                // pruneOrphans() fassen ihn nicht an, solange seine Zeile nicht als aufgeräumt gilt.
+                // Der Umschlag für rescue.php hat ausgedient (P3 R14).
+                RescueSeal::forget($work, $pushId);
+                Store::updatePush($pushId, ['status' => self::FAILED, 'finished' => time()]);
+                self::release($pushId);
+                return $e->toError();
+            }
+            self::discard($pushId, self::FAILED);
             return $e->toError();
+        } finally {
+            PushRescue::unlock($lock);
         }
-        self::discard($pushId, self::FAILED);
-        return $e->toError();
     }
 
     /**
      * Nach bestandenem Health-Check. Braucht kein offenes Fenster.
+     *
+     * Unter der Sperre des Pushs (P3 R10): rescue.php und die Rücknahme über den Agent halten
+     * dieselbe. Ohne sie könnte rescue.php den Push zurücknehmen, während er hier bestätigt wird –
+     * „bestätigt“ in der Datenbank, zurückgetauscht auf der Platte. Wer zuerst kommt, gilt; der
+     * andere sieht dessen Stand.
      *
      * @param array<string, mixed> $params
      * @return \WP_REST_Response|\WP_Error
@@ -655,6 +776,56 @@ final class Push
         if ($push instanceof \WP_Error) {
             return $push;
         }
+        $lock = false;
+        $dirs = null;
+        if ($push['status'] === PushRescue::COMMITTED && !$push['pruned']) {
+            $dirs = self::dirs($push['target']);
+            if (!($dirs instanceof \WP_Error)) {
+                // Eine Rücknahme, die gerade läuft, ist gleich fertig: darauf warten. Wo sich nicht sperren
+                // lässt (false), bleibt es wie vor P3 – rescue.php fasst die Datenbank dann nicht an.
+                $lock = PushRescue::lock($dirs[1], $push['push_id'], self::$gateWait ?? self::GATE_SECONDS);
+                if ($lock === null) {
+                    return self::error('wpsync_push_busy', 'Für Push ' . $push['push_id'] . ' läuft gerade eine Rücknahme – gleich noch einmal versuchen.', 423);
+                }
+            }
+        }
+        try {
+            if ($dirs !== null) {
+                // Die Zeile im Protokoll noch einmal – unter der Sperre und auch, wenn es keine mehr zu
+                // nehmen gab: eine Rücknahme über den Agent, die inzwischen fertig wurde, hat den Ordner des
+                // Pushs samt Datensatz und Sperrdatei gelöscht und die Zeile abgeschlossen (discard()
+                // schreibt sie, bevor der Ordner verschwindet). Mit der Zeile von vorhin würde sonst
+                // „bestätigt“, was auf der Platte zurückgetauscht ist.
+                $fresh = Store::getPush($push['push_id']);
+                if ($fresh === null) {
+                    return self::error('wpsync_push_state', 'Der Stand von Push ' . $push['push_id'] . ' liess sich nicht lesen – noch einmal versuchen.', 409);
+                }
+                $push = $fresh;
+            }
+            if (is_array($dirs) && $push['status'] === PushRescue::COMMITTED && !$push['pruned']) {
+                // Und der Datensatz: zwischen sync() oben und der Sperre kann rescue.php den Push ganz
+                // zurückgenommen haben. Dann gibt es nichts mehr zu bestätigen – übernehmen wie sync().
+                $record = PushRescue::read($dirs[1], $push['push_id']);
+                if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
+                    self::afterRescue($push, $dirs[0], $dirs[1], $record);
+                    self::finishRollback($push['push_id']);
+                    return self::error('wpsync_push_state', 'Push ist im Status ' . PushRescue::ROLLED_BACK . '.', 409);
+                }
+            }
+            return self::confirmLocked($push, $keyId);
+        } finally {
+            PushRescue::unlock($lock);
+        }
+    }
+
+    /**
+     * confirm, unter der Sperre des Pushs.
+     *
+     * @param array<string, mixed> $push
+     * @return \WP_REST_Response|\WP_Error
+     */
+    private static function confirmLocked(array $push, string $keyId)
+    {
         $kept = ['ok' => true, 'status' => PushRescue::ROLLED_BACK, 'warnings' => [PushRescue::CONTENT_KEPT]];
         if (self::contentKept($push)) {
             return new \WP_REST_Response($kept); // schon so abgeschlossen: eine verlorene Antwort lässt sich wiederholen
@@ -686,7 +857,16 @@ final class Push
             if ($dirs instanceof \WP_Error) {
                 return $dirs;
             }
-            PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED);
+            // Ohne Datensatz gibt es hier nur noch den Push, dessen Ordner verloren ging (von Hand gelöscht):
+            // eine Rücknahme hätte seine Zeile abgeschlossen, bevor der Ordner verschwand, und confirm()
+            // hat die Zeile eben neu gelesen. Der gepushte Code steht dann unverändert – bestätigen ist
+            // richtig und der einzige Ausweg, sonst sperrte der Push jeden weiteren. Gibt es den Datensatz,
+            // muss er den Status auch tragen.
+            if (PushRescue::read($dirs[1], $push['push_id']) !== null && !PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED)) {
+                return self::error('wpsync_push_state', 'Push ' . $push['push_id'] . ' liess sich nicht bestätigen – noch einmal versuchen.', 409);
+            }
+            // Einen bestätigten Push nimmt rescue.php nie zurück: der Umschlag mit den Zugangsdaten hat ausgedient (P3 R14).
+            RescueSeal::forget($dirs[1], $push['push_id']);
             Store::updatePush($push['push_id'], ['status' => PushRescue::CONFIRMED, 'finished' => time()]);
             // Das Paket ist auf Live: die Ablage braucht niemand mehr. Nach Staging bleibt sie für den Push nach Live.
             $record = PushRescue::read($dirs[1], $push['push_id']);
@@ -750,50 +930,83 @@ final class Push
             if ($dirs instanceof \WP_Error) {
                 return $dirs;
             }
-            // DB → Code → Uploads (§7.6). Hat sich eine Zeile seit dem Push geändert, wird nichts
-            // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
-            $actions = [];
-            $record  = PushRescue::read($dirs[1], $pushId);
-            if ($record !== null && PushRescue::contentOpen($record)) {
-                // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
-                // und der Code bliebe stehen.
-                if ($record['status'] !== PushRescue::ROLLED_BACK && $record['superseded_by'] !== null) {
-                    return self::error('wpsync_push_rollback', self::superseded((string) $record['superseded_by']), 409);
-                }
-                try {
-                    $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
-                } catch (ContentException $e) {
-                    return $e->toError();
-                }
-                // Ab hier steht in rescue.json, dass die Inhalte zurück sind: scheitert danach der Code,
-                // überspringt ein zweiter Lauf die Datenbank und holt nur Code und Uploads nach.
-                PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
-                $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
+            // Nie zugleich mit rescue.php oder dem Commit dieses Pushs (P3 R10). Wo sich nicht sperren
+            // lässt (false), bleibt es wie vor P3 – rescue.php fasst die Datenbank dann nicht an.
+            $lock = PushRescue::lock($dirs[1], $pushId);
+            if ($lock === null) {
+                return self::error('wpsync_push_busy', 'Für Push ' . $pushId . ' läuft gerade eine Rücknahme oder sein Commit – gleich noch einmal versuchen.', 423);
             }
-            list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId);
-            if ($status !== 200) {
-                $why = ($body['error'] ?? '') === 'superseded'
-                    ? self::superseded((string) ($body['by'] ?? ''))
-                    : 'Rollback fehlgeschlagen: ' . ($body['error'] ?? 'unbekannt');
-                if ($record !== null && is_array($record['content'] ?? null)) {
-                    $why .= ' – Die Inhalte sind zurückgenommen, Code und Uploads noch nicht: die Rücknahme wiederholen.';
-                }
-                return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
+            try {
+                return self::rollbackLocked($push, $dirs[0], $dirs[1]);
+            } finally {
+                PushRescue::unlock($lock);
             }
-            self::finishRollback($pushId);
-            self::touchStub(time()); // wie bei confirm (R5)
-            self::scheduleTidy();
-            $answer = ['ok' => true, 'status' => PushRescue::ROLLED_BACK];
-            // Seit dem Push geänderte Uploads bleiben liegen und werden genannt (Spec Content-Push §8.4).
-            if (isset($body['warnings'])) {
-                $answer += ['warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []];
-            }
-            if ($actions !== []) {
-                $answer['post_actions'] = $actions; // Nacharbeiten der Rücknahme (§7.7)
-            }
-            return new \WP_REST_Response($answer);
         }
         return new \WP_REST_Response(['ok' => true, 'status' => PushRescue::ROLLED_BACK]);
+    }
+
+    /**
+     * Die Rücknahme selbst, unter der Sperre des Pushs.
+     *
+     * @param array<string, mixed> $push
+     * @param string               $content wp-content des Ziels
+     * @param string               $work    Arbeitsordner darin
+     * @return \WP_REST_Response|\WP_Error
+     */
+    private static function rollbackLocked(array $push, string $content, string $work)
+    {
+        $pushId = (string) $push['push_id'];
+        $dirs   = [$content, $work];
+        // DB → Code → Uploads (§7.6). Hat sich eine Zeile seit dem Push geändert, wird nichts
+        // zurückgenommen – auch Code und Uploads nicht: der Satz bleibt ganz.
+        $actions = [];
+        $record  = PushRescue::read($dirs[1], $pushId);
+        // Unter der Sperre noch einmal: wurde der Push bestätigt, seit der Aufrufer ihn las, gilt für ihn
+        // das Push-Fenster (U18), das für einen unbestätigten niemand geprüft hat. Vor der Datenbank –
+        // sonst gingen die Inhalte zurück und der Code bliebe.
+        $confirmed = $push['status'] === PushRescue::CONFIRMED;
+        if ($record !== null && $record['status'] === PushRescue::CONFIRMED && !$confirmed) {
+            return self::error('wpsync_push_state', 'Push ' . $pushId . ' wurde inzwischen bestätigt – die Rücknahme noch einmal aufrufen.', 409);
+        }
+        if ($record !== null && PushRescue::contentOpen($record)) {
+            // Was die Rücknahme des Codes ablehnen würde, zuerst: sonst gingen die Inhalte zurück
+            // und der Code bliebe stehen.
+            $by = $record['status'] === PushRescue::ROLLED_BACK ? null : PushRescue::supersededBy($dirs[1], $record);
+            if ($by !== null) {
+                return self::error('wpsync_push_rollback', self::superseded($by), 409);
+            }
+            try {
+                $back = PushContent::rollback($push['target'], $dirs[0], $dirs[1] . '/' . $pushId);
+            } catch (ContentException $e) {
+                return $e->toError();
+            }
+            // Ab hier steht in rescue.json, dass die Inhalte zurück sind: scheitert danach der Code,
+            // überspringt ein zweiter Lauf die Datenbank und holt nur Code und Uploads nach.
+            PushRescue::setContent($dirs[1], $pushId, PushRescue::CONTENT_DONE);
+            $actions = PushContent::postActions($push['target'], $dirs[0], $back['changes']);
+        }
+        list($status, $body) = PushRescue::rollback($dirs[0], $dirs[1], $pushId, null, $confirmed);
+        if ($status !== 200) {
+            $why = ($body['error'] ?? '') === 'superseded'
+                ? self::superseded((string) ($body['by'] ?? ''))
+                : 'Rollback fehlgeschlagen: ' . ($body['error'] ?? 'unbekannt');
+            if ($record !== null && is_array($record['content'] ?? null)) {
+                $why .= ' – Die Inhalte sind zurückgenommen, Code und Uploads noch nicht: die Rücknahme wiederholen.';
+            }
+            return self::error('wpsync_push_rollback', $why, $status === 500 ? 500 : 409);
+        }
+        self::finishRollback($pushId);
+        self::touchStub(time()); // wie bei confirm (R5)
+        self::scheduleTidy();
+        $answer = ['ok' => true, 'status' => PushRescue::ROLLED_BACK];
+        // Seit dem Push geänderte Uploads bleiben liegen und werden genannt (Spec Content-Push §8.4).
+        if (isset($body['warnings'])) {
+            $answer += ['warnings' => $body['warnings'], 'kept' => $body['kept'] ?? []];
+        }
+        if ($actions !== []) {
+            $answer['post_actions'] = $actions; // Nacharbeiten der Rücknahme (§7.7)
+        }
+        return new \WP_REST_Response($answer);
     }
 
     /**
@@ -832,10 +1045,16 @@ final class Push
         return new \WP_REST_Response(['pushes' => $pushes]);
     }
 
-    /** Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. */
+    /**
+     * Übernimmt Rollbacks, die rescue.php an WordPress vorbei ausgeführt hat – auf beiden Zielen. Hat
+     * rescue.php dabei auch die Inhalte zurückgenommen, laufen hier die Nacharbeiten, die ohne
+     * WordPress nicht gingen (Spec Content-Push P3 §8.2). Jeder Push unter seiner Sperre: was sync()
+     * in rescue.json schreibt (post = done), schreibt es nie neben einem anderen Lauf.
+     */
     public static function sync(): void
     {
         $name = Store::pushDirName();
+        $busy = []; // Ziel → true: ein Push dort war gerade gesperrt
         foreach (Store::pushes(50) as $push) {
             if ($push['pruned'] || !in_array($push['status'], [PushRescue::COMMITTED, PushRescue::CONFIRMED], true)) {
                 continue;
@@ -849,13 +1068,113 @@ final class Push
                 }
                 continue;
             }
-            $record = PushRescue::read($content . '/' . $name, $push['push_id']);
+            $work   = $content . '/' . $name;
+            $record = PushRescue::read($work, $push['push_id']);
             // Hat rescue.php nur Code und Uploads zurückgenommen, stehen die Inhalte noch (§7.6): der
             // Push bleibt offen, sein Vorher-Abbild liegen – wpsync rollback holt sie über den Agent nach.
-            if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
-                self::finishRollback($push['push_id']);
+            if ($record === null || $record['status'] !== PushRescue::ROLLED_BACK || PushRescue::contentOpen($record)) {
+                continue;
+            }
+            // Übernommen wird nur unter der Sperre des Pushs: rescue.php und sein Cache-Schritt schreiben
+            // denselben Datensatz. Hält sie ein anderer Lauf, bleibt der Push für diesmal, wie er ist.
+            // Wo sich nicht sperren lässt (false), nimmt rescue.php keine Inhalte zurück – wie vor P3.
+            $lock = PushRescue::lock($work, $push['push_id']);
+            if ($lock === null) {
+                $busy[$push['target']] = true;
+                continue;
+            }
+            try {
+                $record = PushRescue::read($work, $push['push_id']); // unter der Sperre noch einmal
+                if ($record !== null && $record['status'] === PushRescue::ROLLED_BACK && !PushRescue::contentOpen($record)) {
+                    self::afterRescue($push, $content, $work, $record);
+                    self::finishRollback($push['push_id']);
+                }
+            } finally {
+                PushRescue::unlock($lock);
             }
         }
+        // Die Marker beider Ziele haben ausgedient – nur wenn die Liste oben wirklich gelesen wurde.
+        if (!Store::dbOk()) {
+            return;
+        }
+        foreach (self::TARGETS as $target) {
+            $content = self::content($target);
+            $marker  = PushRescue::pendingFile($content . '/' . $name);
+            if ($content === '' || is_link($marker)) {
+                continue;
+            }
+            if (isset($busy[$target])) {
+                // Ein Push dieses Ziels war gesperrt: der Marker bleibt (oder liegt wieder – catchUp() nimmt
+                // ihn vorher weg), damit der nächste Seitenaufruf es noch einmal versucht.
+                if (is_dir($content . '/' . $name)) {
+                    @touch($marker);
+                }
+            } elseif (is_file($marker)) {
+                @unlink($marker);
+            }
+        }
+    }
+
+    /**
+     * Was nach einer Rücknahme der Inhalte durch rescue.php nachzuholen ist (P3 §8.2): das
+     * Aufräumen dessen, was an eingefügten Objekten stehen blieb (R15), und die Nacharbeiten (§7.7) –
+     * beides höchstens einmal, ein Fehlschlag hält den Abschluss nie auf – und der Vermerk im
+     * Protokoll der Pushes (via, post_actions, was stehen blieb).
+     *
+     * @param array<string, mixed> $push
+     * @param array<string, mixed> $record rescue.json
+     */
+    private static function afterRescue(array $push, string $content, string $work, array $record): void
+    {
+        $stored = $record['content'] ?? null;
+        if (!is_array($stored) || ($stored['via'] ?? '') !== PushRescue::VIA_RESCUE) {
+            return;
+        }
+        $pushId = (string) $push['push_id'];
+        $note   = ['via' => PushRescue::VIA_RESCUE];
+        if (is_array($stored['left'] ?? null) && $stored['left'] !== []) {
+            $note['left']       = array_slice(array_values($stored['left']), 0, ContentException::MAX_KEYS);
+            $note['left_total'] = (int) ($stored['left_total'] ?? count($stored['left']));
+        }
+        if (($stored['post'] ?? '') === PushRescue::POST_PENDING) {
+            // Erst merken, dann ausführen: legt eine Nacharbeit WordPress lahm, läuft sie kein zweites Mal.
+            PushRescue::setContentFields($work, $pushId, ['post' => PushRescue::POST_DONE]);
+            // Zuerst, was rescue.php an den eingefügten Objekten stehen liess (R15): Meta und Zuordnungen
+            // an IDs, die es nicht mehr gibt. Sie hingen sich an das nächste Objekt mit dieser ID.
+            $swept = null;
+            try {
+                $swept = PushContent::sweep((string) $push['target'], $content, $work . '/' . $pushId) > 0 ? true : null;
+            } catch (\Throwable $e) {
+                $swept = false;
+            }
+            $actions = [['step' => 'post_actions', 'ok' => false]];
+            $changes = null;
+            try {
+                // Hier wieder mit dem Schlüssel der Installation – der Umschlag ist längst weg.
+                $image   = ContentImage::get($work . '/' . $pushId . '/' . PushContent::UNIT, ContentImage::AFTER);
+                $changes = is_array($image) && is_array($image['changes'] ?? null) ? $image['changes'] : null;
+            } catch (\Throwable $e) {
+                $changes = null;
+            }
+            try {
+                if ($changes !== null) {
+                    $actions = PushContent::postActions((string) $push['target'], $content, $changes);
+                } elseif ($push['target'] === 'live' && function_exists('wp_cache_flush')) {
+                    wp_cache_flush(); // ohne after.json wenigstens kein Object-Cache mit dem gepushten Stand
+                }
+            } catch (\Throwable $e) {
+                $actions = [['step' => 'post_actions', 'ok' => false]];
+            }
+            if ($swept !== null) {
+                $actions[] = ['step' => self::LEFT_CLEANUP, 'ok' => $swept];
+            }
+            $note['post_actions'] = $actions;
+        }
+        $units = [];
+        foreach ((array) $push['units'] as $unit) {
+            $units[] = is_array($unit) && ($unit['path'] ?? '') === PushContent::UNIT ? array_merge($unit, $note) : $unit;
+        }
+        Store::updatePush($pushId, ['units' => (string) wp_json_encode($units)]);
     }
 
     /**
@@ -1233,14 +1552,18 @@ final class Push
     {
         $push    = Store::getPush($pushId);
         $content = self::content($push === null ? 'live' : $push['target']);
-        if ($content !== '') {
-            PushSwap::remove($content . '/' . Store::pushDirName() . '/' . $pushId);
-        }
-        $fields = ['status' => $status, 'pruned' => 1];
+        $fields  = ['status' => $status, 'pruned' => 1];
         if ($push !== null && $push['finished'] === null) {
             $fields['finished'] = time();
         }
+        // Erst das Protokoll, dann der Ordner: wer den Ordner (und mit ihm Datensatz und Sperrdatei) nicht
+        // mehr findet, liest in der Zeile nie mehr den Stand von davor (confirm()). Stirbt PHP dazwischen,
+        // bleibt der Ordner einer abgeschlossenen Zeile liegen; pruneOrphans() räumt ihn später weg, soweit
+        // sein Datensatz zurückgerollt oder bestätigt sagt.
         Store::updatePush($pushId, $fields);
+        if ($content !== '') {
+            PushSwap::remove($content . '/' . Store::pushDirName() . '/' . $pushId);
+        }
         self::release($pushId);
     }
 

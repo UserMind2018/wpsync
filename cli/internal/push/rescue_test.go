@@ -72,7 +72,7 @@ foreach (["wrong", getenv("KEY")] as $k) {
 	if err != nil {
 		t.Fatalf("php: %v\n%s", err, out)
 	}
-	want := "same\n403 {\"ok\":false,\"error\":\"wrong key\"}\n200 {\"ok\":true,\"status\":\"rolled_back\"}\n"
+	want := "same\n403 {\"ok\":false,\"error\":\"wrong key\"}\n200 {\"ok\":true,\"status\":\"rolled_back\",\"push_id\":\"" + pushID + "\"}\n"
 	if string(out) != want {
 		t.Errorf("php output:\n%s\nwant:\n%s", out, want)
 	}
@@ -150,6 +150,50 @@ func TestRescueRollback(t *testing.T) {
 		srv.Close()
 		if err == nil {
 			t.Errorf("HTTP %d %s: want an error", c.status, c.body)
+		}
+	}
+
+	// Security-Review P3, N7: HTTP 200 mit "ok" allein ist keine Rücknahme – nur status
+	// "rolled_back" ist eine. Sonst gälte jede fremde JSON-Antwort (eine Firewall-Seite, die
+	// Antwort auf ping) als „Push zurückgerollt“, und Manifest und Baseline gingen zurück.
+	for _, body := range []string{
+		`{"ok":true}`,
+		`{"ok":true,"status":"committed"}`,
+		`{"ok":true,"status":"confirmed","content":{"state":"rolled_back"}}`,
+		`{"ok":true,"status":null}`,
+		`{"ok":true,"status":["rolled_back"]}`,
+		`{"ok":true,"status":"rolled_back\n"}`,
+		`{"ok":true,"cache":"flushed"}`,
+	} {
+		srv := rescueServer(t, 200, body, nil)
+		notes, err := RescueRollbackNotes(srv.Client(), srv.URL+"/rescue.php", "p_20261005_0123456789ab", "k3y", true)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "rolled_back") {
+			t.Errorf("%s: err = %v, want an error that names the missing status", body, err)
+		}
+		if notes.Content != nil || len(notes.Warnings) != 0 {
+			t.Errorf("%s: notes = %+v, want none", body, notes)
+		}
+	}
+
+	// Security-Review P3 Runde 2: nennt die Antwort einen Push (Agent ab 0.8.0), muss es der gefragte
+	// sein. Fehlt das Feld (ältere Agents), gilt die Antwort wie bisher.
+	for body, want := range map[string]bool{
+		`{"ok":true,"status":"rolled_back","push_id":"p_20261005_0123456789ab"}`:   true,
+		`{"ok":true,"status":"rolled_back"}`:                                       true,
+		`{"ok":true,"status":"rolled_back","push_id":"p_20261005_ffffffffffff"}`:   false,
+		`{"ok":true,"status":"rolled_back","push_id":null}`:                        false,
+		`{"ok":true,"status":"rolled_back","push_id":["p_20261005_0123456789ab"]}`: false,
+		`{"ok":true,"status":"rolled_back","push_id":""}`:                          false,
+	} {
+		srv := rescueServer(t, 200, body, nil)
+		_, err := RescueRollbackNotes(srv.Client(), srv.URL+"/rescue.php", "p_20261005_0123456789ab", "k3y", true)
+		srv.Close()
+		if (err == nil) != want {
+			t.Errorf("%s: err = %v, want accepted = %v", body, err, want)
+		}
+		if err != nil && !strings.Contains(err.Error(), "anderen Push") {
+			t.Errorf("%s: err = %v, want it to say that the answer is about another push", body, err)
 		}
 	}
 

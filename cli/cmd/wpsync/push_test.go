@@ -59,6 +59,18 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"content_image", fmt.Errorf("ROLLBACK NICHT MÖGLICH: %w", &push.ContentError{Reason: "before_image_invalid", Message: "Das Vorher-Abbild lässt sich nicht öffnen"}), cliout.ExitUnknown, "WPSYNC_KEY oder die Salts"},
 		{"content_stage", &agentapi.APIError{Status: 409, Code: "wpsync_content_offset", Message: "Stück passt nicht an das Paket."}, cliout.ExitUnknown, "Stück passt nicht"},
 		{"content_left", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Warnings: []string{push.WarningContentNotRolledBack}}, cliout.ExitPushRolledBack, "wpsync rollback kunde p_20261005_0123456789ab"},
+		// Spec Content-Push P3 §9: die Rücknahme über rescue.php, mit und ohne Inhalte.
+		{"rescue_whole_set", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Via: "rescue", Content: "rolled_back"}, cliout.ExitPushRolledBack, "zurückgerollt (über rescue.php, Inhalte eingeschlossen)"},
+		{"rescue_kept_reason", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Via: "rescue", Content: "kept", Warnings: []string{push.WarningContentNotRolledBack},
+			ContentError: &push.ContentErrorReport{Code: "changed_since_push"}}, cliout.ExitPushRolledBack, "(changed_since_push)"},
+		{"rescue_kept_next", &push.RolledBackError{PushID: "p_20261005_0123456789ab", Reasons: []string{"HTTP 500"}, Via: "rescue", Content: "kept", Warnings: []string{push.WarningContentNotRolledBack},
+			ContentError: &push.ContentErrorReport{Code: "changed_since_push"}}, cliout.ExitPushRolledBack, "wpsync rollback kunde p_20261005_0123456789ab"},
+		{"rescue_code_only", &push.RolledBackError{PushID: "p_x", Reasons: []string{"HTTP 500"}, Via: "rescue"}, cliout.ExitPushRolledBack, "wieder auf dem alten Stand"},
+		{"agent_with_content", &push.RolledBackError{PushID: "p_x", Reasons: []string{"HTTP 500"}, Via: "agent", Content: "rolled_back"}, cliout.ExitPushRolledBack, "wieder auf dem alten Stand"},
+		{"require_rescue_db", &push.RescueDBError{Reason: "no_image_key"}, cliout.ExitUnknown, "WPSYNC_KEY"},
+		{"require_rescue_db_old", &push.RescueDBError{Reason: "agent_outdated"}, cliout.ExitUnknown, "Agent 0.8.0"},
+		{"require_rescue_db_expires", fmt.Errorf("Push p_x nicht getauscht – er verfällt auf dem Server: %w", &push.RescueDBError{Reason: "probe_failed"}), cliout.ExitUnknown, "verfällt auf dem Server"},
+		{"rollback_busy", &agentapi.APIError{Status: 423, Code: "wpsync_push_busy", Message: "Für Push p_x läuft gerade eine Rücknahme oder sein Commit – gleich noch einmal versuchen."}, cliout.ExitBusy, "gleich noch einmal versuchen"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -67,5 +79,22 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 				t.Fatalf("exit = %d, message = %q, want %d with %q", got, err, c.exit, c.text)
 			}
 		})
+	}
+}
+
+// Spec Content-Push P3 §9: --require-rescue-db bricht mit Exit 1 ab – error.reason und error.detail nennen warum.
+func TestRequireRescueDBHasReasonAndDetail(t *testing.T) {
+	site := &sites.Site{Name: "kunde", URL: "https://kunde.example"}
+	f := cliout.Classify(pushError(&push.RescueDBError{Reason: "no_crypto"}, site))
+	if f.Exit != cliout.ExitUnknown || f.Reason != "rescue_db_unavailable" || f.Detail != "no_crypto" {
+		t.Errorf("failure = %+v", f)
+	}
+	if !strings.Contains(f.Message, "sodium") {
+		t.Errorf("message = %q", f.Message)
+	}
+	// The rollback through rescue.php that left the content is still exit 43 without a reason of its own.
+	f = cliout.Classify(pushError(&push.RolledBackError{PushID: "p_x", Via: "rescue", Content: "kept", Warnings: []string{push.WarningContentNotRolledBack}}, site))
+	if f.Exit != cliout.ExitPushRolledBack || f.Detail != "" {
+		t.Errorf("failure = %+v", f)
 	}
 }

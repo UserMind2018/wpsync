@@ -209,7 +209,14 @@ final class ContentMemory implements ContentStore
                         $have['children'][] = (string) $tt;
                     }
                 }
-            } elseif ($table === 'term_taxonomy' && isset($this->data['term_taxonomy'][$id])) {
+            } elseif ($table === 'term_taxonomy' && !isset($this->data['term_taxonomy'][$id])) {
+                // Zuordnungen auf eine ID ohne term_taxonomy-Zeile: verwaist, ohne Taxonomie.
+                foreach ($this->orphans as $object => $ids) {
+                    if (in_array($id, array_map('strval', $ids), true)) {
+                        $have['relations'][] = $object . "\0";
+                    }
+                }
+            } elseif ($table === 'term_taxonomy') {
                 $self = $this->data['term_taxonomy'][$id];
                 foreach ($this->data['term_relationships'] ?? [] as $pair => $state) {
                     foreach ($state['values'] as $entry) {
@@ -229,6 +236,23 @@ final class ContentMemory implements ContentStore
         return $out;
     }
 
+    public function childTerms(array $termIds, bool $lock): array
+    {
+        if ($lock && !$this->open) {
+            throw new \LogicException('locked read outside a transaction');
+        }
+        $out = [];
+        foreach ($termIds as $id) {
+            $out[(string) $id] = [];
+            foreach ($this->data['term_taxonomy'] ?? [] as $tt => $row) {
+                if ((string) ($row['parent'] ?? '0') === (string) $id) {
+                    $out[(string) $id][] = ['id' => (string) $tt, 'taxonomy' => (string) $row['taxonomy']];
+                }
+            }
+        }
+        return $out;
+    }
+
     public function purge(string $table, string $key): void
     {
         $this->log[] = 'purge ' . $table . ':' . $key;
@@ -240,8 +264,20 @@ final class ContentMemory implements ContentStore
                 }
             }
         }
+        // Wie DELETE … WHERE object_id bzw. term_taxonomy_id: auch die Zeilen ohne term_taxonomy-Zeile.
+        if ($table === 'posts') {
+            unset($this->orphans[$key]);
+        }
         if ($table !== 'term_taxonomy') {
             return;
+        }
+        foreach ($this->orphans as $object => $ids) {
+            $this->orphans[$object] = array_values(array_filter(array_map('strval', $ids), static function (string $id) use ($key): bool {
+                return $id !== $key;
+            }));
+            if ($this->orphans[$object] === []) {
+                unset($this->orphans[$object]);
+            }
         }
         foreach ($this->data['term_relationships'] ?? [] as $pair => $state) {
             $left = array_values(array_filter($state['values'], static function ($entry) use ($key): bool {

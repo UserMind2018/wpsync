@@ -658,7 +658,8 @@ func TestRollbackJSONAndTarget(t *testing.T) {
 	res := runKC(t, context.Background(), kc, "", "rollback", "kunde", testPushID, "--json")
 	m := lastResult(t, res, "rollback", 0)
 	d := m["data"].(map[string]any)
-	if keys(d) != "push_id status target units" || d["push_id"] != testPushID || d["target"] != "staging" || d["status"] != "rolled_back" || fmt.Sprint(d["units"]) != "[plugins/x]" {
+	// via: how it went back – through the agent here (Spec Content-Push P3 §9).
+	if keys(d) != "push_id status target units via" || d["push_id"] != testPushID || d["target"] != "staging" || d["status"] != "rolled_back" || fmt.Sprint(d["units"]) != "[plugins/x]" || d["via"] != "agent" {
 		t.Errorf("data = %v", d)
 	}
 	if len(jsonLines(t, res.stdout)) != 1 || !strings.Contains(res.stderr, "zurückgerollt") {

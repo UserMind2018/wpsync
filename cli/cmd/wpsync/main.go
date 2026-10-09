@@ -850,7 +850,7 @@ func (a *app) pushOptions(name string, mode *pushMode) (push.Options, *sites.Sit
 }
 
 func (a *app) cmdPush(args []string) error {
-	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
+	const call = "wpsync push <site> code [plugins/<slug> | themes/<slug> | mu-plugins]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--json] [--driver container --docroot d --secret-stdin]"
 	fs := a.flags("push")
 	force := fs.Bool("force", false, "überschreiben, obwohl sich die Site seit dem letzten Pull geändert hat (alter Stand bleibt als Snapshot)")
 	yes := fs.Bool("yes", false, "ohne Rückfrage pushen")
@@ -860,6 +860,7 @@ func (a *app) cmdPush(args []string) error {
 	uploads := fs.String("uploads", "", "Datei mit neuen Uploads: ein Pfad je Zeile relativ zu wp-content/uploads/ (# Kommentar)")
 	contentFile := fs.String("content", "", "Inhalts-Paket (package.jsonl), gebaut gegen den letzten Pull mit --content")
 	noCode := fs.Bool("no-code", false, "keinen Code pushen: nur --uploads und --content")
+	requireRescueDB := fs.Bool("require-rescue-db", false, "mit --content: nur pushen, wenn rescue.php die Inhalte auch ohne WordPress zurücknehmen kann (Agent 0.8.0); sonst wird mit einer Warnung gepusht")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	mode := addPushMode(fs)
 	positional, err := a.parse(fs, args, func(n int) bool { return n >= 2 }, call)
@@ -892,6 +893,7 @@ func (a *app) cmdPush(args []string) error {
 	opts.Ctx = a.ctx // SIGTERM stops the push before the swap (C12)
 	opts.Units = positional[2:]
 	opts.Content, opts.NoCode = *contentFile, *noCode
+	opts.RequireRescueDB = *requireRescueDB
 	if *uploads != "" {
 		list, err := push.ReadUploadList(*uploads)
 		if err != nil {
@@ -999,6 +1001,9 @@ func contentNext(reason string, site *sites.Site) string {
 	switch reason {
 	case "conflict", "id_taken", "baseline_outdated", "row_unfaithful":
 		return fmt.Sprintf(" – die Site hat sich seit dem Pull geändert oder das Paket ist älter als der Inhaltsstand: wpsync pull %s --content, Änderungen neu anlegen, Paket neu bauen; nichts wurde übertragen", site.Name)
+	case "id_has_leftovers":
+		return " – an der ID eines neuen Objekts hängen auf der Site noch Reste eines früheren (Meta, Zuordnungen, Kommentare, Kindbeiträge; siehe keys), sie hingen sich an das neue. " +
+			"Die genannten Zeilen auf der Site entfernen, dann erneut pushen; nichts wurde übertragen"
 	case "author_unknown":
 		return fmt.Sprintf(" – das Push-Fenster im WP-Admin öffnen (%s/wp-admin/tools.php?page=wpsync), nicht per WP-CLI: der Benutzer, der es öffnet, wird Autor neuer Beiträge", site.URL)
 	case "changed_since_push":
@@ -1011,6 +1016,43 @@ func contentNext(reason string, site *sites.Site) string {
 		return " – die Dateien mit --uploads im selben Push mitschicken"
 	}
 	return " – nichts wurde übertragen"
+}
+
+// rescueDBNext is what helps when rescue.php cannot take the content of a push back without
+// WordPress (--require-rescue-db), by the reason the agent names.
+func rescueDBNext(reason string, site *sites.Site) string {
+	switch reason {
+	case "agent_outdated":
+		return fmt.Sprintf(" – der wpsync-Agent auf %s kann das noch nicht: Agent %s installieren", site.URL, agentapi.MinAgentRescueDB)
+	case "no_crypto":
+		return " – PHP auf dem Server braucht die Erweiterung sodium oder openssl (aes-256-gcm)"
+	case "driver":
+		return " – die Site spricht ihre Datenbank nicht direkt über mysqli an (Drop-in db.php, anderer Treiber)"
+	case "no_image_key":
+		return " – die Installation hat keinen Schlüssel für die Abbilder: WPSYNC_KEY oder die Salts (AUTH_KEY, SECURE_AUTH_KEY) in wp-config.php setzen"
+	case "probe_failed":
+		return " – die Probe des Agents über eine zweite Datenbankverbindung ist gescheitert (Zugangsdaten, Rechte, Dateisperren im Arbeitsordner)"
+	case "write_failed":
+		return " – der Agent konnte den Umschlag nicht in seinen Arbeitsordner schreiben"
+	}
+	return ""
+}
+
+// rescueKeptWhy says in words why rescue.php left the content of a push on the site.
+func rescueKeptWhy(code string) string {
+	switch code {
+	case "changed_since_push":
+		return "Zeilen wurden seit dem Push geändert"
+	case "before_image_invalid":
+		return "das Vorher-Abbild liess sich nicht öffnen"
+	case "engine_unsupported":
+		return "eine Inhaltstabelle ist nicht InnoDB"
+	case "rescue_db_unavailable":
+		return "für diesen Push gibt es keinen (lesbaren) Umschlag mit den Verbindungsdaten"
+	case "db_unreachable":
+		return "die Datenbank war nicht erreichbar"
+	}
+	return "die Rücknahme in der Datenbank ist gescheitert"
 }
 
 // adminURL is the wpsync page in the WP admin, where an administrator opens the push window.
@@ -1038,9 +1080,12 @@ func pushHint(err error, site *sites.Site) error {
 	var apiErr *agentapi.APIError
 	var blocked *push.RescueBlockedError
 	var refused *push.ContentError
+	var needDB *push.RescueDBError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &needDB):
+		return cliout.Hint(err, fmt.Sprintf("%v%s; nichts wurde getauscht", err, rescueDBNext(needDB.Reason, site)))
 	case errors.Is(err, push.ErrAgentNoContent):
 		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentContentPush, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch keine Inhalte pushen – Agent %s installieren", site.URL, agentapi.MinAgentContentPush))
@@ -1094,11 +1139,21 @@ func pushHint(err error, site *sites.Site) error {
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Site prüfen, dann entweder  wpsync pushes %s --confirm %s\n  oder                        wpsync rollback %s %s", err, site.Name, push.ShowID(pending.PushID), site.Name, push.ShowID(pending.PushID)))
 	case errors.As(err, &rolled):
 		if slices.Contains(rolled.Warnings, push.WarningContentNotRolledBack) {
-			return cliout.Hint(err, fmt.Sprintf("%v.\n  Code und Uploads sind zurück, die Inhalte des Pushs stehen noch auf der Site (der Agent hat nicht geantwortet).\n"+
-				"  Sobald WordPress wieder antwortet: wpsync rollback %s %s", err, site.Name, push.ShowID(rolled.PushID)))
+			// Why the content stands: rescue.php names it (agent 0.8.0) – or it knew no database at all.
+			why := "der Agent hat nicht geantwortet"
+			if rolled.ContentError != nil {
+				why += ", rescue.php liess die Inhalte stehen: " + rescueKeptWhy(rolled.ContentError.Code) + " (" + rolled.ContentError.Code + ")"
+			}
+			return cliout.Hint(err, fmt.Sprintf("%v.\n  Code und Uploads sind zurück, die Inhalte des Pushs stehen noch auf der Site (%s).\n"+
+				"  Sobald WordPress wieder antwortet: wpsync rollback %s %s", err, why, site.Name, push.ShowID(rolled.PushID)))
 		}
 		if len(rolled.StillWorse) > 0 {
 			return cliout.Hint(err, fmt.Sprintf("%v.\n  Nach dem Rollback noch auffällig: %s", err, strings.Join(rolled.StillWorse, "; ")))
+		}
+		if rolled.Via == "rescue" && rolled.Content != "" {
+			// The whole set went back without WordPress (Spec Content-Push P3 §9).
+			return cliout.Hint(err, fmt.Sprintf("Push %s zurückgerollt (über rescue.php, Inhalte eingeschlossen): %s.\n"+
+				"  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", push.ShowID(rolled.PushID), strings.Join(rolled.Reasons, "; ")))
 		}
 		return cliout.Hint(err, fmt.Sprintf("%v.\n  Die Site ist wieder auf dem alten Stand; lokal ist nichts verändert", err))
 	case errors.Is(err, push.ErrNeedsYes):

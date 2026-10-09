@@ -5,6 +5,132 @@ Agent-Version steht pro Release dabei.
 
 ## [0.7.0] – 2026-10-09 · Agent 0.7.0
 
+### Agent 0.8.0 – Inhalte zurücknehmen ohne WordPress (Content-Push P3)
+
+**Agent und CLI ändern sich.** Keine neue Mindestversion: die CLI erkennt die Fähigkeit am Feld
+`rescue.db` des Begin. CLI ≥ 0.8.0 gegen Agent 0.7.x und CLI 0.7.x gegen Agent ≥ 0.8.0 verhalten
+sich wie bisher (`content_not_rolled_back`).
+
+**Neu**
+- `rescue.php` nimmt einen unbestätigten Push vollständig zurück, auch wenn WordPress nicht mehr
+  lädt: **Inhalte → Code → Uploads**, mit derselben Logik wie der Agent (`ContentRollback` über
+  `ContentSql`, jetzt auch auf einer eigenen `mysqli`-Verbindung). Die Rücknahme nach dem
+  Health-Check endet dann mit Exit 43 **ohne** `content_not_rolled_back`, `wpsync rollback` mit
+  Exit 0; Manifest, Baseline und Journal gehen zurück wie bei der Rücknahme über den Agent
+- Versiegelter Umschlag `rescue.sealed` je Push mit Inhalten: Verbindungsdaten und Sitzung aus dem
+  laufenden WordPress (kein Lesen von `wp-config.php`), verschlüsselt mit einem Schlüssel, der
+  aus dem Rollback-Schlüssel des Pushs abgeleitet ist. Der Begin prüft die Verbindung mit einer
+  Probe und nennt `rescue.db: {ok, reason?}` (`no_crypto`, `driver`, `no_image_key`,
+  `probe_failed`, `write_failed`). Lebensdauer: bis zur Rücknahme, bis `confirm`, höchstens 24 h
+- `wpsync push … --require-rescue-db`: ein Push mit Inhalten geht nur raus, wenn `rescue.php` sie
+  zurücknehmen könnte – sonst Exit 1, `error.reason: "rescue_db_unavailable"`,
+  `error.detail: <grund>`. Ohne das Flag wird gepusht und gewarnt
+  (`warnings: ["rescue_db_unavailable"]`); das `plan`-Ereignis nennt `rescue_db`
+- `rescue.php`, `action=cache`: leert nach einer Rücknahme der Inhalte einen persistenten
+  Object-Cache (lädt WordPress mit `SHORTINIT`, ohne Plugins und Themes). Die CLI ruft ihn, wenn
+  die Antwort `cache: "stale"` sagt; scheitert er, bleibt die Rücknahme gültig:
+  `warnings: ["object_cache_stale"]`
+- Nach dem Wiederanlauf von WordPress holt der Agent die Nacharbeiten nach (Marker
+  `rescue.pending`, `init`), schliesst den Push ab und vermerkt es im Protokoll: Einheit `content`
+  mit `via: "rescue"`, `post_actions`, `left`
+- Ergebnis von `push` und `rollback`: `via` (`agent`/`rescue`), `content_error`
+  (`{code, keys, total}` – warum `rescue.php` die Inhalte stehen liess), `content_left`,
+  `content_left_total`; Warnung `content_left_extra`
+
+**Geändert**
+- Im Notfallweg blockiert „gewachsen“ nicht: hängt an einem vom Push eingefügten Objekt etwas,
+  das nicht vom Push stammt, nimmt `rescue.php` die Zeilen des Pushs zurück und lässt das Fremde
+  stehen (`content.left`, `content_left_extra`). Über den Agent bleibt es bei
+  `changed_since_push`. Eine vom Push geschriebene Zeile, die sich geändert hat, lehnt auch
+  `rescue.php` ab – dann gehen nur Code und Uploads zurück; es gibt kein `force`
+- Fünf falsche Schlüssel sperren `rescue.php` nur noch für falsche Schlüssel (429); der richtige
+  gilt weiter. Fehlversuche stehen in `rescue.tries`, nicht mehr in `rescue.json`
+- `rescue.php`, `/push/rollback` und der Commit eines Pushs schliessen sich über eine Sperrdatei
+  aus (`rescue.lock`): wer zu spät kommt, bekommt HTTP 423 (`busy` bzw. `wpsync_push_busy`); die CLI
+  wiederholt dreimal im Abstand von 2 s. Ein Commit, den eine Rücknahme überholt hat, macht
+  `ROLLBACK`
+- Was `rescue.php` an eingefügten Objekten stehen lässt, bleibt nicht folgenlos liegen – es hinge
+  sich an ein neues Objekt mit derselben ID. Neu deshalb: **(a)** der Agent lehnt ein `insert`
+  ab, an dessen ID auf dem Ziel noch etwas hängt (Meta, Zuordnungen, Kommentare, Kinder – auch
+  Kind-Terme, deren `parent` auf die ID eines neuen Terms zeigt) –
+  `error.reason: "id_has_leftovers"` (HTTP 409 `wpsync_content_id_has_leftovers`, Exit 1) mit den
+  Resten in `error.keys`; nicht im Probelauf ohne offenes Push-Fenster. **(b)** Beim Wiederanlauf
+  entfernt der Agent an jedem eingefügten Objekt, das weiterhin fehlt, die Meta und die
+  Zuordnungen – an einem Beitrag nur die in Taxonomien, die für Beiträge gelten (`object_id` ist
+  auch die ID von Benutzern und Links);
+  das Protokoll nennt es als Nacharbeit `left_cleanup`. Kommentare und Kinder (Revisionen,
+  Kindseiten) löscht er nicht – solange sie liegen, greift (a)
+- `rescue.php` schickt die CLI ab jetzt `content=1`, wenn der Push Inhalte trug; ohne das Feld
+  bleibt es bei Code und Uploads
+- `wpsync rollback --json` und ein zurückgerollter `push --json` nennen `via`
+
+**Behoben**
+- `rescue.php`-Sperre als Blockade: wer die Push-ID kannte, konnte den Notfallweg mit fünf falschen
+  Schlüsseln für 10 Minuten sperren – auch für den richtigen
+- Ein aufgeräumter Rescue-Stub, an dessen Stelle der Server umleitet (3xx statt 404), ist jetzt
+  „Notfallweg vorbei“ (`ErrRescueGone`) statt eines rohen HTTP-Fehlers
+- Antworten von `rescue.php` über 4.000 Bytes (viele Schlüssel) liest die CLI jetzt vollständig
+- Wettlauf `confirm` ↔ `rescue.php`: `/push/confirm` nimmt jetzt die Sperre des Pushs
+  (`rescue.lock`) und prüft seinen Stand darunter neu. Ein Push kann nicht mehr „bestätigt“ in der
+  Datenbank stehen, während `rescue.php` ihn zurücktauscht: läuft eine Rücknahme, wartet `confirm`
+  bis zu 15 s und antwortet sonst mit HTTP 423 `wpsync_push_busy`; hat `rescue.php` den Push
+  inzwischen zurückgenommen, antwortet es mit 409 `wpsync_push_state`. Die Rücknahme lehnt einen
+  bestätigten Push unter der Sperre selbst ab (`rescue.php`: 409 `confirmed`; `/push/rollback`
+  für einen eben erst bestätigten: 409 `wpsync_push_state`, danach gilt das Push-Fenster)
+- Wettlauf `confirm` ↔ Rücknahme über den Agent: `/push/confirm` liest die Zeile des Pushs nach dem
+  Warten auf die Sperre neu (auch wenn es keine Sperre mehr zu nehmen gab, weil der Ordner des
+  Pushs schon weg ist) und bestätigt nur noch einen Push, der dann weiter unbestätigt ist – sonst
+  409 `wpsync_push_state`. Beim Aufräumen eines Pushs schreibt der Agent erst das Protokoll, dann
+  löscht er den Ordner
+- Scheitern die Inhalte eines Commits, während eine Rücknahme desselben Pushs die Sperre länger als
+  15 s hält, räumt der Commit nicht mehr ungesperrt daneben auf: er antwortet 409
+  `wpsync_push_pending` (Exit 42), die laufende Rücknahme schliesst den Push ab
+- Der Vermerk „von einem späteren Push überholt“ (`superseded_by`) wird nur noch unter der Sperre
+  des betroffenen Pushs geschrieben und gelöst – nie neben dessen Rücknahme. Ein Vermerk, dessen
+  späterer Push zurückgerollt ist oder nicht mehr existiert, sperrt den älteren nicht mehr
+- Die CLI wertet eine Antwort von `rescue.php` nur noch als Rücknahme, wenn sie
+  `status: "rolled_back"` trägt (das tut `rescue.php` seit Agent 0.4.0) – HTTP 200 mit `ok` allein
+  genügt nicht mehr. Sonst: „ROLLBACK FEHLGESCHLAGEN“ (Health-Rücknahme) bzw. „Rollback über
+  rescue.php fehlgeschlagen“ (`wpsync rollback`, Exit 1); Manifest, Baseline und Journal bleiben.
+  `rescue.php` nennt in der Antwort einer Rücknahme ausserdem `push_id`; nennt sie einen anderen
+  Push als den gefragten, gilt sie der CLI ebenfalls nicht (fehlt das Feld – Agent < 0.8.0 –, wie
+  bisher)
+- Ein Webroot, dessen Pfad `[`, `]`, `*` oder `?` enthält: `rescue.php` fand den Push nicht (404
+  `unknown push`), der Agent weder den Marker `rescue.pending` noch – beim Deaktivieren – seine
+  Arbeitsordner, und Plugin-Versionen blieben leer. Der Agent listet Ordner jetzt ohne `glob()`
+
+**Sicherheit**
+- Vor bestandener Schlüsselprüfung lädt `rescue.php` nichts ausser `PushSwap` und `PushRescue`,
+  liest keinen Umschlag und öffnet keine Datenbankverbindung
+- Geschrieben wird nur aus dem authentisierten Vorher-Abbild, nur in die sieben Tabellen mit dem
+  Präfix aus dem Umschlag; der Umschlag einer Staging-Kopie gilt nur in ihrem Ordner und für ihr
+  Präfix. Klartext-Abbilder nimmt `rescue.php` nie an
+- Keine Antwort und keine Zeile im Fehlerprotokoll nennt Host, Benutzer, Passwort,
+  Datenbankname, einen Wert oder Text des Datenbankservers
+- Falsche Schlüssel schreiben nicht mehr in `rescue.json`
+- Der Schlüssel des Umschlags entsteht aus den 32 Byte des Rollback-Schlüssels
+  (`HMAC-SHA256(hex2bin(K), "wpsync-rescue-envelope-v1\0" + push_id)`), nicht aus seiner
+  Hex-Schreibweise; als Rollback-Schlüssel gilt dem Umschlag nur, was genau 64 kleine Hex-Zeichen
+  hat
+- Harte Altersgrenze des Umschlags: älter als 7 Tage wird er nie mehr angewandt
+  (`content_error.code: "rescue_db_unavailable"`) – unabhängig vom Verfall nach 24 h, den die
+  tägliche Wartung des Agents besorgt und der ausbleibt, solange WordPress unten ist. Das Alter
+  steht authentisiert im Umschlag; einer, der mehr als fünf Minuten in der Zukunft liegt, gilt
+  ebenfalls nicht
+- Lässt sich ein Push nicht sperren (kein `flock`), schliesst `rescue.php` seinen DB-Anteil nie
+  ab – auch nicht, wenn noch kein Vorher-Abbild liegt: `content_error.code:
+  "rescue_db_unavailable"`, Code und Uploads gehen wie bisher zurück
+- Der Cache-Schritt von `rescue.php` (`cache: "flushed"`) und der Agent beim Wiederanlauf
+  (`post_actions`) schreiben ihren Vermerk nur noch unter der Sperre des Pushs in `rescue.json`;
+  ist der Push gerade gesperrt, holt der Agent die Nacharbeiten beim nächsten Seitenaufruf nach
+- Cache-Schritt von `rescue.php`: bevor WordPress geladen wird, verschwindet der Schlüssel aus
+  `$_POST` und `$_REQUEST`; ein `Location`-Header, den `wp-config.php` oder ein Drop-in setzt,
+  verlässt den Server nicht
+- Die Datenbankverbindung von `rescue.php` verbietet `LOAD DATA LOCAL INFILE`
+  (`MYSQLI_OPT_LOCAL_INFILE = 0`), bevor sie aufgebaut wird
+
+### Agent 0.7.0 – Inhalte pushen
+
 **Agent und CLI ändern sich** (Agent 0.7.0). `pull --content` und `push --content` brauchen
 Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt escapten URLs unter
 „Geändert“.
