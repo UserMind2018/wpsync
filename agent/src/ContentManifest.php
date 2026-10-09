@@ -81,6 +81,9 @@ final class ContentManifest
     }
 
     /**
+     * Engine und Zählerstand nennt der Kopf nur für die Tabellen, deren Zeilen das Manifest auch
+     * liefert – was das Pull-Profil auslässt, verrät auch hier nichts.
+     *
      * @return array<string, mixed>
      * @throws \RuntimeException wenn sich Engine oder Zählerstand einer Tabelle nicht lesen lassen
      */
@@ -90,9 +93,10 @@ final class ContentManifest
         $home    = rtrim((string) get_option('home'), '/');
         $siteurl = rtrim((string) get_option('siteurl'), '/');
         $prefix  = (string) $wpdb->prefix;
+        $tables  = self::tables($scope);
         $engines = [];
         $idMax   = [];
-        foreach (Canon::TABLES as $name) {
+        foreach ($tables as $name) {
             $status = (array) $wpdb->get_results($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($prefix . $name)), ARRAY_A);
             self::check();
             $engines[$name] = (string) ($status[0]['Engine'] ?? '');
@@ -109,7 +113,7 @@ final class ContentManifest
             'origins'       => ['home' => $home, 'siteurl' => $siteurl],
             'id_max'        => $idMax,
             'engines'       => $engines,
-            'tables'        => self::tables($scope),
+            'tables'        => $tables,
             'pseudonym'     => Anonymizer::patterns(),
             'prefix'        => $prefix,
             'charset'       => (string) $wpdb->charset,
@@ -146,7 +150,11 @@ final class ContentManifest
         return $scheme . '://' . $host . ':' . $port;
     }
 
-    /** @return list<string> Inhaltstabellen ohne Präfix, die der Scope mit Daten überträgt */
+    /**
+     * @return list<string> Inhaltstabellen ohne Präfix, die der Scope mit Daten überträgt.
+     *                      term_relationships nur zusammen mit term_taxonomy: der Leser nimmt die
+     *                      Taxonomie jeder Zuordnung von dort.
+     */
     private static function tables(Scope $scope): array
     {
         global $wpdb;
@@ -155,6 +163,9 @@ final class ContentManifest
             if ($scope->tableMode((string) $wpdb->prefix . $name) === Scope::FULL) {
                 $out[] = $name;
             }
+        }
+        if (!in_array('term_taxonomy', $out, true)) {
+            $out = array_values(array_diff($out, ['term_relationships']));
         }
         return $out;
     }

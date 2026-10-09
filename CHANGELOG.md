@@ -28,7 +28,8 @@ des Inhalts-Pushs: Einen `push` für Inhalte gibt es noch nicht.
   als letzte Zeile. Braucht einen aktuellen Inhaltsstand (sonst Exit 2)
 - Agent: Endpunkt `/content/manifest` (JSON-Lines, seitenweise mit Zeitbudget und höchstens rund
   20 000 Datensätzen je Seite, im Umfang des
-  Pull-Profils, ohne Transients und `wpsync_*`-Optionen); im Kopf `id_max`, `engines`, die Listen
+  Pull-Profils, ohne Transients und `wpsync_*`-Optionen); im Kopf `id_max` und `engines` (nur
+  für Tabellen im Umfang des Profils), die Listen
   des Agents und die Pseudonym-Muster, dazu `pushable: false` mit `why` bei Multisite oder
   abweichender WordPress-/Website-Adresse
 - `error.reason` bei Exit 1: `manifest_incomplete`, `content_export_failed`, `canon_version`

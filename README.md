@@ -456,6 +456,9 @@ höchster ID und `AUTO_INCREMENT − 1`), `engines`, `tables`, `prefix`, `charse
 Inhalts-Push, als Daten) und `pushable`. `pushable: false` mit `why: "multisite"` oder
 `why: "origin_mismatch"` (Schema, Host oder Port von `home` und `siteurl` weichen ab) heisst:
 Das Manifest kommt trotzdem, einen Inhalts-Push wird diese Site nicht annehmen.
+`tables` nennt die Inhaltstabellen, die das Pull-Profil mit Daten überträgt; nur für sie stehen
+`engines` und `id_max` im Kopf und Zeilen im Manifest. `term_relationships` gehört nur dazu,
+wenn auch `term_taxonomy` dabei ist.
 
 Gründe in `unfaithful.jsonl`:
 

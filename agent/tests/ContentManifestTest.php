@@ -175,6 +175,37 @@ final class ContentManifestTest extends TestCase
         $this->assertSame(0, ContentManifest::PAGE_RECORDS % 500, 'die Grenze liegt auf einer Schrittgrenze der einfachen Tabellen');
     }
 
+    /** Security-Review N2: der Kopf nennt Engine und Zählerstand nur für Tabellen im Umfang des Profils */
+    public function testHeadNamesOnlyTablesInScope(): void
+    {
+        $scope = Scope::fromArray(['tables' => ['wp_posts' => 'skip', 'wp_terms' => 'structure', 'wp_options' => 'skip']]);
+        $head  = $this->page(null, $scope)[0]['head'];
+        $this->assertSame(['postmeta', 'term_taxonomy', 'term_relationships', 'termmeta'], $head['tables']);
+        $this->assertSame($head['tables'], array_keys($head['engines']));
+        $this->assertSame(['term_taxonomy' => 50], $head['id_max']);
+        $sql = implode("\n", $this->db->queries);
+        foreach (['posts', 'terms', 'options'] as $table) {
+            $this->assertStringNotContainsString("LIKE 'wp\\\\_" . $table . "'", $sql, $table);
+            $this->assertStringNotContainsString('FROM `wp_' . $table . '`', $sql, $table);
+        }
+        $this->assertStringContainsString("LIKE 'wp\\\\_postmeta'", $sql);
+    }
+
+    /** N2: die Zuordnungen lesen taxonomy aus term_taxonomy – ohne diese Tabelle im Umfang bleiben auch sie */
+    public function testRelationshipsNeedTheTaxonomyTableInScope(): void
+    {
+        foreach (['skip', 'structure'] as $mode) {
+            $this->db->queries = [];
+            $head = $this->page(null, Scope::fromArray(['tables' => ['wp_term_taxonomy' => $mode]]))[0]['head'];
+            $this->assertSame(['posts', 'postmeta', 'terms', 'termmeta', 'options'], $head['tables'], $mode);
+            $this->assertArrayNotHasKey('term_relationships', $head['engines']);
+            $sql = implode("\n", $this->db->queries);
+            $this->assertStringNotContainsString('wp_term_relationships', $sql);
+            $this->assertStringNotContainsString('term\\\\_relationships', $sql);
+            $this->assertStringNotContainsString('wp_term_taxonomy', $sql);
+        }
+    }
+
     public function testMultisiteIsNotPushable(): void
     {
         $GLOBALS['wpsync_test_multisite'] = true;
