@@ -40,6 +40,11 @@ final class ContentLists
         '_wp_old_slug', '_wp_old_date', '_encloseme', '_pingme',
     ];
     public const BLOCKED_META_PREFIXES = ['_elementor_screenshot', '_wp_trash_meta_', '_yoast_indexnow_'];
+    /**
+     * Cache-Meta, die WordPress beim Anzeigen eines Beitrags selbst anlegt (oEmbed). Nicht gesperrt –
+     * aber an einem vom Push eingefügten Beitrag keine Änderung seit dem Push (systemMeta()).
+     */
+    public const SITE_META_PREFIXES = ['_oembed_'];
     /** Teilstrings, gross/klein egal; nur hiervon kann ein Projekt einzelne Schlüssel ausnehmen (W11). */
     public const BLOCKED_META_WORDS = ['license', 'api_key', 'token', 'secret', 'password', 'passwd', 'credential', 'apikey', 'api-key', 'webhook', 'oauth'];
     /**
@@ -119,6 +124,26 @@ final class ContentLists
             return true;
         }
         return !self::hasWord($key, self::BLOCKED_META_WORDS) && !self::hasSegment($key);
+    }
+
+    /**
+     * Meta, die WordPress, Elementor oder der Agent selbst an einem Beitrag anlegen und die kein
+     * Paket schreiben darf: die feste Sperrliste und ihre Präfixe (ohne die Wortlisten), dazu die
+     * Cache-Meta aus SITE_META_PREFIXES. An einem vom Push eingefügten Beitrag ist sie keine
+     * Änderung – die Rücknahme löscht sie mit.
+     */
+    public static function systemMeta(string $key): bool
+    {
+        $lower = strtolower($key);
+        if (in_array($lower, array_map('strtolower', self::BLOCKED_META), true)) {
+            return true;
+        }
+        foreach (array_merge(self::BLOCKED_META_PREFIXES, self::SITE_META_PREFIXES) as $prefix) {
+            if (strpos($lower, $prefix) === 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

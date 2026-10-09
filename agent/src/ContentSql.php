@@ -37,16 +37,23 @@ final class ContentSql implements ContentStore
     private $db;
     /** @var array<string, string> Tabelle ohne Präfix → voller Name */
     private $tables;
+    /** @var string voller Name der Tabelle comments des Ziels – nur zum Lesen (attached()); '' wenn es sie nicht gibt */
+    private $comments;
     /** @var string|null Marke der laufenden Transaktion; null ausserhalb */
     private $mark = null;
 
     /**
      * @param object                $db     $wpdb der Site
      * @param array<string, string> $tables alle sieben Inhaltstabellen: Name ohne Präfix → voller Name
+     * @param string                $comments voller Name der Tabelle comments des Ziels; gelesen, nie geschrieben
      * @throws \InvalidArgumentException wenn eine Tabelle fehlt oder ein Name kein Bezeichner ist
      */
-    public function __construct($db, array $tables)
+    public function __construct($db, array $tables, string $comments = '')
     {
+        if ($comments !== '' && preg_match(self::NAME, $comments) !== 1) {
+            throw new \InvalidArgumentException('invalid content table comments');
+        }
+        $this->comments = $comments;
         foreach (Canon::TABLES as $name) {
             if (!is_string($tables[$name] ?? null) || preg_match(self::NAME, $tables[$name]) !== 1) {
                 throw new \InvalidArgumentException('invalid content table ' . $name);
@@ -279,6 +286,70 @@ final class ContentSql implements ContentStore
                 . ' WHERE `object_id` IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ')' . ($lock ? ' FOR UPDATE' : '');
             foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
                 $out[(string) $row['o']][] = (string) $row['tt'];
+            }
+        }
+        return $out;
+    }
+
+    public function attached(string $table, array $ids, bool $lock): array
+    {
+        if (!isset(ContentState::PK[$table])) {
+            throw new \InvalidArgumentException('nothing hangs on ' . $table);
+        }
+        $ids  = array_values(array_unique(array_map('strval', $ids)));
+        $out  = array_fill_keys($ids, ['meta' => [], 'relations' => [], 'comments' => 0, 'children' => []]);
+        $tail = $lock ? ' FOR UPDATE' : '';
+        // Trägt eine Zeile in Spalte o eine der gefragten IDs, kommt $value einmal in ihre Liste $field.
+        $add = static function (array $row, string $field, string $value) use (&$out): void {
+            $id = (string) $row['o'];
+            if (isset($out[$id]) && !in_array($value, $out[$id][$field], true)) {
+                $out[$id][$field][] = $value;
+            }
+        };
+        foreach (array_chunk($ids, self::CHUNK) as $chunk) {
+            $in = ' IN (' . implode(',', array_fill(0, count($chunk), '%d')) . ')';
+            $meta = ['posts' => 'postmeta', 'terms' => 'termmeta'][$table] ?? null;
+            if ($meta !== null) {
+                $column = self::META[$meta];
+                $sql    = 'SELECT `' . $column . '` AS o, `meta_key` AS k FROM ' . $this->quoted($meta) . ' WHERE `' . $column . '`' . $in . ' ORDER BY `meta_id`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'meta', (string) $row['k']);
+                }
+            }
+            if ($table === 'posts') {
+                $sql = 'SELECT r.`object_id` AS o, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r LEFT JOIN ' . $this->quoted('term_taxonomy')
+                    . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`object_id`' . $in . ' ORDER BY r.`object_id`, r.`term_taxonomy_id`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'relations', Canon::pairKey((string) $row['o'], (string) ($row['tax'] ?? '')));
+                }
+                $sql = 'SELECT `post_parent` AS o, `ID` AS c FROM ' . $this->quoted('posts') . ' WHERE `post_parent`' . $in . ' ORDER BY `ID`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'children', (string) $row['c']);
+                }
+                if ($this->comments !== '') {
+                    $sql = 'SELECT `comment_post_ID` AS o FROM `' . $this->comments . '` WHERE `comment_post_ID`' . $in . $tail;
+                    foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                        if (isset($out[(string) $row['o']])) {
+                            $out[(string) $row['o']]['comments']++;
+                        }
+                    }
+                }
+            } elseif ($table === 'terms') {
+                $sql = 'SELECT `term_id` AS o, `term_taxonomy_id` AS c FROM ' . $this->quoted('term_taxonomy') . ' WHERE `term_id`' . $in . ' ORDER BY `term_taxonomy_id`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'children', (string) $row['c']);
+                }
+            } else {
+                $sql = 'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM ' . $this->quoted('term_relationships') . ' r JOIN ' . $this->quoted('term_taxonomy')
+                    . ' x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id`' . $in . ' ORDER BY r.`object_id`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'relations', Canon::pairKey((string) $row['obj'], (string) $row['tax']));
+                }
+                $sql = 'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM ' . $this->quoted('term_taxonomy') . ' p JOIN ' . $this->quoted('term_taxonomy')
+                    . ' c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id`' . $in . ' ORDER BY c.`term_taxonomy_id`' . $tail;
+                foreach ($this->results($this->db->prepare($sql, ...$chunk)) as $row) {
+                    $add($row, 'children', (string) $row['c']);
+                }
             }
         }
         return $out;

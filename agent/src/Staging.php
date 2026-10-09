@@ -168,12 +168,12 @@ final class Staging
 
     /**
      * Was ein Inhalts-Push in die Kopie braucht (Spec Content-Push §7.8): ihr Präfix, ihre sieben
-     * Inhaltstabellen und die Tabelle der Yoast-Indexables – jeder Name von StagingGuard::table()
+     * Inhaltstabellen, die Tabelle der Yoast-Indexables und die der Kommentare – jeder Name von StagingGuard::table()
      * geprüft –, der Ersetzer, mit dem sie angelegt wurde, und ihre Adresse. null, wenn es keine
      * Kopie gibt oder ihr Datensatz den Guard nicht besteht. Ob die Kopie gerade benutzbar ist,
      * entscheidet pushContent().
      *
-     * @return array{prefix: string, tables: array<string, string>, indexables: string, replace: StagingReplace, url: string}|null
+     * @return array{prefix: string, tables: array<string, string>, indexables: string, comments: string, replace: StagingReplace, url: string}|null
      */
     public static function contentTarget(): ?array
     {
@@ -192,6 +192,7 @@ final class Staging
                 'prefix'     => $prefix,
                 'tables'     => $tables,
                 'indexables' => $guard->table($prefix . 'yoast_indexable'),
+                'comments'   => $guard->table($prefix . 'comments'), // nur gelesen: Kommentare an eingefügten Beiträgen (Rücknahme)
                 'replace'    => new StagingReplace(home_url(), '/' . (string) $record['dir']),
                 'url'        => self::url($record),
             ];

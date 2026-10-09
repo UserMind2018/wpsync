@@ -5,7 +5,8 @@ defined('ABSPATH') || exit;
 
 /**
  * Nimmt den DB-Anteil eines Pushs zurück (Spec Content-Push §7.6): in einer Transaktion, nur wenn
- * jede betroffene Zeile noch genau den Abdruck trägt, den der Push hinterlassen hat. Sonst
+ * jede betroffene Zeile noch genau den Abdruck trägt, den der Push hinterlassen hat, und an den
+ * eingefügten Objekten nichts hängt, was nicht vom Push stammt (grown()). Sonst
  * changed_since_push – dann wird nichts zurückgenommen, und der Aufrufer lässt auch Code und
  * Uploads stehen. Stehen alle Zeilen noch im Vorher-Zustand, kam die Transaktion des Pushs nie
  * an, und es ist nichts zu tun.
@@ -68,7 +69,17 @@ final class ContentRollback
                 if ($changed !== []) {
                     throw new ContentException(ContentException::CHANGED, 'Seit dem Push auf dem Ziel geändert: ' . count($changed) . ' Zeile(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $changed);
                 }
-                // Zuerst geht, was an den eingefügten Objekten hängt – auch was erst nach dem Push dazukam.
+                // Was nach dem Push an einem eingefügten Objekt entstand und nicht vom Push stammt, löschte
+                // purge() gleich mit – Inhalte, die niemand zurücknehmen wollte (M3).
+                $grown = self::grown($store, $before, $now);
+                if (!$store->alive()) {
+                    throw ContentRepair::lost();
+                }
+                if ($grown !== []) {
+                    throw new ContentException(ContentException::CHANGED, 'Seit dem Push kam an eingefügten Objekten etwas dazu (Meta, Zuordnungen, Kommentare, Kinder): ' . count($grown) . ' Stelle(n) – nichts wird zurückgenommen, auch Code und Uploads nicht.', $grown);
+                }
+                // Zuerst geht, was an den eingefügten Objekten hängt: was der Push dort geschrieben hat und
+                // die Meta der festen Sperrliste, die WordPress selbst anlegt (_edit_lock …).
                 // Lag an derselben ID schon vor dem Push etwas (verwaiste Meta oder Zuordnungen eines
                 // früher gelöschten Objekts), bringt es das Vorher-Abbild danach zurück.
                 foreach (array_reverse($before) as $entry) {
@@ -132,6 +143,58 @@ final class ContentRollback
             }
             throw new ContentException(ContentException::FAILED, 'Die Verbindung zur Datenbank ging beim Abschluss der Transaktion verloren – nichts wurde zurückgenommen.');
         }
+    }
+
+    /**
+     * Was an den vom Push eingefügten Beiträgen, Termen und term_taxonomy-Zeilen hängt, ohne dass
+     * der Push es geschrieben hat (M3): Meta-Schlüssel, Zuordnungen – an einer eingefügten
+     * term_taxonomy die fremder Objekte –, Kommentare, Revisionen und Kindbeiträge, weitere
+     * Taxonomien eines Terms, Kind-Terme. Meta der festen Sperrliste (ContentLists::systemMeta())
+     * zählt nicht. Kommentare stehen als {table: "comments", key: "<post-id>"}.
+     *
+     * @param list<array<string, mixed>>                              $before Schlüssel des Pushs mit dem Rohzustand davor
+     * @param array<string, array<string, array<string, mixed>|null>> $now    Rohzustand jetzt
+     * @return list<array{table: string, key: string}>
+     * @throws ContentException
+     */
+    private static function grown(ContentStore $store, array $before, array $now): array
+    {
+        $written  = [];
+        $inserted = [];
+        foreach ($before as $entry) {
+            $written[$entry['t']][$entry['k']] = true;
+            if ($entry['state'] === null && isset(ContentState::PK[$entry['t']]) && ($now[$entry['t']][$entry['k']] ?? null) !== null) {
+                $inserted[$entry['t']][] = $entry['k'];
+            }
+        }
+        $out = [];
+        foreach ($inserted as $table => $ids) {
+            $meta  = $table === 'posts' ? 'postmeta' : 'termmeta';
+            $child = $table === 'posts' ? 'posts' : 'term_taxonomy';
+            foreach ($store->attached($table, $ids, true) as $id => $have) {
+                $id = (string) $id;
+                foreach ($have['meta'] as $name) {
+                    $pair = Canon::pairKey($id, (string) $name);
+                    if (!isset($written[$meta][$pair]) && !ContentLists::systemMeta((string) $name)) {
+                        $out[$meta . "\0\0" . $pair] = ContentException::key($meta, $pair);
+                    }
+                }
+                foreach ($have['relations'] as $pair) {
+                    if (!isset($written['term_relationships'][$pair])) {
+                        $out["term_relationships\0\0" . $pair] = ContentException::key('term_relationships', (string) $pair);
+                    }
+                }
+                if ($have['comments'] > 0) {
+                    $out["comments\0\0" . $id] = ContentException::key('comments', $id);
+                }
+                foreach ($have['children'] as $other) {
+                    if (!isset($written[$child][$other])) {
+                        $out[$child . "\0\0" . $other] = ContentException::key($child, (string) $other);
+                    }
+                }
+            }
+        }
+        return array_values($out);
     }
 
     /**

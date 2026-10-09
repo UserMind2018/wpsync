@@ -57,6 +57,127 @@ final class ContentRollbackTest extends ContentApplyCase
         $this->assertSame(ContentRollback::NOTHING, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
     }
 
+    /** @return array<string, array{0: callable(ContentMemory): void, 1: list<array{table: string, key: string}>}> */
+    public static function grownObjects(): array
+    {
+        return [
+            'neue Meta am Beitrag' => [
+                static function (ContentMemory $s): void {
+                    $s->data['postmeta']["1000001\0_elementor_data"] = ['values' => ['[{"neu":1}]']];
+                    $s->data['postmeta']["1000001\0farbe"]           = ['values' => ['rot']];
+                },
+                [['table' => 'postmeta', 'key' => "1000001\0_elementor_data"], ['table' => 'postmeta', 'key' => "1000001\0farbe"]],
+            ],
+            'Zuordnung in einer anderen Taxonomie' => [
+                static function (ContentMemory $s): void {
+                    $s->data['terms']['8']                               = ContentFixtures::term('8', 'Tag');
+                    $s->data['term_taxonomy']['8']                       = ContentFixtures::taxonomy('8', '8', 'post_tag');
+                    $s->data['term_relationships']["1000001\0post_tag"] = ['values' => ['8:0']];
+                },
+                [['table' => 'term_relationships', 'key' => "1000001\0post_tag"]],
+            ],
+            'verwaiste Zuordnung am Beitrag' => [
+                static function (ContentMemory $s): void {
+                    $s->orphans['1000001'] = ['77'];
+                },
+                [['table' => 'term_relationships', 'key' => "1000001\0"]],
+            ],
+            'Kommentar am Beitrag' => [
+                static function (ContentMemory $s): void {
+                    $s->comments['1000001'] = 2;
+                },
+                [['table' => 'comments', 'key' => '1000001']],
+            ],
+            'Revision und Kindseite' => [
+                static function (ContentMemory $s): void {
+                    $s->data['posts']['1000050'] = ContentFixtures::post('1000050', ['post_type' => 'revision', 'post_status' => 'inherit', 'post_parent' => '1000001']);
+                    $s->data['posts']['1000051'] = ContentFixtures::post('1000051', ['post_parent' => '1000001']);
+                },
+                [['table' => 'posts', 'key' => '1000050'], ['table' => 'posts', 'key' => '1000051']],
+            ],
+            'Meta am Term' => [
+                static function (ContentMemory $s): void {
+                    $s->data['termmeta']["1000001\0farbe"] = ['values' => ['rot']];
+                },
+                [['table' => 'termmeta', 'key' => "1000001\0farbe"]],
+            ],
+            'der Term in einer weiteren Taxonomie' => [
+                static function (ContentMemory $s): void {
+                    $s->data['term_taxonomy']['1000060'] = ContentFixtures::taxonomy('1000060', '1000001', 'post_tag');
+                },
+                [['table' => 'term_taxonomy', 'key' => '1000060']],
+            ],
+            'Kind-Term' => [
+                static function (ContentMemory $s): void {
+                    $s->data['terms']['1000070']         = ContentFixtures::term('1000070', 'Kind');
+                    $s->data['term_taxonomy']['1000070'] = ['parent' => '1000001'] + ContentFixtures::taxonomy('1000070', '1000070', 'category');
+                },
+                [['table' => 'term_taxonomy', 'key' => '1000070']],
+            ],
+            'fremder Beitrag an der eingefügten term_taxonomy' => [
+                static function (ContentMemory $s): void {
+                    $s->data['term_relationships']["220\0category"] = ['values' => ['1000002:0']];
+                },
+                [['table' => 'term_relationships', 'key' => "220\0category"]],
+            ],
+        ];
+    }
+
+    /**
+     * M3: was nach dem Push an einem eingefügten Objekt entstand und nicht vom Push stammt, löscht
+     * die Rücknahme nicht mit – sie lehnt ab und nennt die Stellen. Nichts wird zurückgenommen.
+     *
+     * @param callable(ContentMemory): void           $grow
+     * @param list<array{table: string, key: string}> $keys
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('grownObjects')]
+    public function testRollbackRefusesWhenAnInsertedObjectHasGrown(callable $grow, array $keys): void
+    {
+        $this->apply($this->rows());
+        $grow($this->store);
+        $pushed           = $this->store->data;
+        $this->store->log = [];
+        try {
+            ContentRollback::run(ContentFixtures::live($this->store), $this->dir);
+            $this->fail('no exception');
+        } catch (ContentException $e) {
+            $this->assertSame(ContentException::CHANGED, $e->reason());
+            $this->assertSame($keys, $e->keys());
+        }
+        $this->assertSame($pushed, $this->store->data, 'nichts wird zurückgenommen');
+        $this->assertSame([], preg_grep('/^(write|delete|purge|commit)/', $this->store->log));
+    }
+
+    /**
+     * M3: Meta, die WordPress oder der Agent selbst an einem neuen Beitrag anlegt und die auf der
+     * festen Sperrliste steht, ist keine Änderung – sonst gäbe es nach einem Blick in den Editor
+     * keine Rücknahme mehr. Sie geht mit dem Beitrag.
+     */
+    public function testSystemMetaOnAnInsertedObjectDoesNotBlockTheRollback(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        foreach (['_edit_lock', '_edit_last', '_wp_old_slug', '_wp_trash_meta_status', '_wp_trash_meta_time', '_elementor_css', '_Elementor_CSS', '_elementor_screenshot_x', '_yoast_indexnow_last_ping'] as $name) {
+            $this->store->data['postmeta']["1000001\0" . $name] = ['values' => ['x']];
+        }
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
+
+    /** M3: was das Paket selbst an das neue Objekt gehängt hat, ist vom Push – und an bestehenden Objekten ändert sich nichts. */
+    public function testWhatHangsOnExistingObjectsIsNotTheBusinessOfTheRollback(): void
+    {
+        $old = $this->store->data;
+        $this->apply($this->rows());
+        $this->store->comments['219']                      = 4;
+        $this->store->data['postmeta']["219\0_neu"]        = ['values' => ['nach dem Push']];
+        $this->store->data['posts']['1000090']             = ContentFixtures::post('1000090', ['post_parent' => '219']);
+        $this->assertSame(ContentRollback::DONE, ContentRollback::run(ContentFixtures::live($this->store), $this->dir)['state']);
+        $this->assertSame(['nach dem Push'], $this->store->data['postmeta']["219\0_neu"]['values']);
+        unset($this->store->data['postmeta']["219\0_neu"], $this->store->data['posts']['1000090']);
+        $this->assertSame(self::sorted($old), self::sorted($this->store->data));
+    }
+
     /** AC-153: nach einer Änderung seit dem Push wird nichts zurückgenommen – alle geänderten Schlüssel genannt. */
     public function testChangedSincePush(): void
     {

@@ -198,7 +198,7 @@ final class PushContent
                 }
                 $target = new ContentTarget(
                     'staging',
-                    new ContentSql($wpdb, $copy['tables']),
+                    new ContentSql($wpdb, $copy['tables'], self::existing((string) ($copy['comments'] ?? ''))),
                     new ContentOrigin($home, $copy['replace']),
                     $home,
                     $siteurl,
@@ -217,7 +217,7 @@ final class PushContent
             }
             $target = new ContentTarget(
                 'live',
-                new ContentSql($wpdb, $tables),
+                new ContentSql($wpdb, $tables, self::existing((string) $wpdb->prefix . 'comments')),
                 new ContentOrigin($home),
                 $home,
                 $siteurl,
@@ -388,6 +388,9 @@ final class PushContent
     private static function existing(string $table): string
     {
         global $wpdb;
+        if ($table === '') {
+            return '';
+        }
         return (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table))) === $table ? $table : '';
     }
 }

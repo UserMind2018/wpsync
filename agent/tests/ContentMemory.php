@@ -26,6 +26,8 @@ final class ContentMemory implements ContentStore
     public $orphans = [];
     /** @var array<string, int> Zähler-Tabelle → AUTO_INCREMENT − 1; fehlt sie, zählt nur die höchste ID */
     public $counters = [];
+    /** @var array<string, int> post_id → Zahl seiner Kommentare */
+    public $comments = [];
     /** @var int|null der wievielte write() scheitert (1 = der erste) */
     public $failWrite = null;
     /** @var bool jedes read() scheitert */
@@ -166,6 +168,63 @@ final class ContentMemory implements ContentStore
             foreach ($this->orphans[$id] ?? [] as $tt) {
                 $out[$id][] = (string) $tt;
             }
+        }
+        return $out;
+    }
+
+    public function attached(string $table, array $ids, bool $lock): array
+    {
+        if ($lock && !$this->open) {
+            throw new \LogicException('locked read outside a transaction');
+        }
+        $out = [];
+        foreach ($ids as $id) {
+            $id   = (string) $id;
+            $have = ['meta' => [], 'relations' => [], 'comments' => 0, 'children' => []];
+            $meta = ['posts' => 'postmeta', 'terms' => 'termmeta'][$table] ?? null;
+            foreach ($meta === null ? [] : array_keys($this->data[$meta] ?? []) as $pair) {
+                list($object, $name) = ContentState::split((string) $pair);
+                if ($object === $id) {
+                    $have['meta'][] = $name;
+                }
+            }
+            if ($table === 'posts') {
+                foreach (array_keys($this->data['term_relationships'] ?? []) as $pair) {
+                    if (ContentState::split((string) $pair)[0] === $id) {
+                        $have['relations'][] = (string) $pair;
+                    }
+                }
+                if (($this->orphans[$id] ?? []) !== []) {
+                    $have['relations'][] = $id . "\0";
+                }
+                $have['comments'] = $this->comments[$id] ?? 0;
+                foreach ($this->data['posts'] ?? [] as $child => $row) {
+                    if ((string) ($row['post_parent'] ?? '0') === $id) {
+                        $have['children'][] = (string) $child;
+                    }
+                }
+            } elseif ($table === 'terms') {
+                foreach ($this->data['term_taxonomy'] ?? [] as $tt => $row) {
+                    if ((string) $row['term_id'] === $id) {
+                        $have['children'][] = (string) $tt;
+                    }
+                }
+            } elseif ($table === 'term_taxonomy' && isset($this->data['term_taxonomy'][$id])) {
+                $self = $this->data['term_taxonomy'][$id];
+                foreach ($this->data['term_relationships'] ?? [] as $pair => $state) {
+                    foreach ($state['values'] as $entry) {
+                        if (explode(':', (string) $entry)[0] === $id) {
+                            $have['relations'][] = (string) $pair;
+                        }
+                    }
+                }
+                foreach ($this->data['term_taxonomy'] as $tt => $row) {
+                    if ((string) $row['parent'] === (string) $self['term_id'] && $row['taxonomy'] === $self['taxonomy']) {
+                        $have['children'][] = (string) $tt;
+                    }
+                }
+            }
+            $out[$id] = $have;
         }
         return $out;
     }

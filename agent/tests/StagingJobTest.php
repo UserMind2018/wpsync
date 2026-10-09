@@ -838,6 +838,7 @@ final class StagingJobTest extends TestCase
             $this->assertSame($record['prefix'] . $name, $table);
         }
         $this->assertSame($record['prefix'] . 'yoast_indexable', $target['indexables']);
+        $this->assertSame($record['prefix'] . 'comments', $target['comments'], 'M3: Kommentare der Kopie, nur zum Lesen');
         $this->assertSame('https://example.test/' . $record['dir'], $target['url']);
         $this->assertSame('https://example.test/' . $record['dir'] . '/x', $target['replace']->text('https://example.test/x'));
 

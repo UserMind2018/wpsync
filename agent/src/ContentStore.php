@@ -79,6 +79,23 @@ interface ContentStore
     public function relations(array $objectIds, bool $lock): array;
 
     /**
+     * Was an Objekten hängt – für die Rücknahme, bevor sie ein eingefügtes Objekt samt Anhang
+     * löscht (purge()): sie vergleicht es mit dem, was der Push selbst geschrieben hat. Je ID:
+     *   posts          meta: Meta-Schlüssel; relations: Schlüssel <ID>\0<Taxonomie> seiner Zuordnungen
+     *                  (<ID>\0 für verwaiste, ohne term_taxonomy-Zeile); comments: Zahl seiner
+     *                  Kommentare; children: IDs der Beiträge mit diesem post_parent (auch Revisionen)
+     *   terms          meta: Meta-Schlüssel; children: term_taxonomy_ids des Terms
+     *   term_taxonomy  relations: Schlüssel <object_id>\0<Taxonomie> jeder Zuordnung auf diese Zeile;
+     *                  children: term_taxonomy_ids der Kind-Terme (parent = term_id, dieselbe Taxonomie)
+     *
+     * @param list<string> $ids
+     * @param bool         $lock wie bei read()
+     * @return array<string, array{meta: list<string>, relations: list<string>, comments: int, children: list<string>}>
+     * @throws ContentException
+     */
+    public function attached(string $table, array $ids, bool $lock): array;
+
+    /**
      * Was an einem eingefügten Objekt hängt, wenn es wieder verschwindet: posts → alle Meta und
      * Zuordnungen des Beitrags, terms → alle Meta des Terms, term_taxonomy → alle Zuordnungen.
      *

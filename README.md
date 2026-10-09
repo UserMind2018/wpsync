@@ -722,9 +722,17 @@ nie auf Treu und Glauben: er rechnet den aktuellen Abdruck jeder Zeile selbst.
   Push geschrieben hat (Kommentarzahl, Autor, `guid`, `autoload` bleiben, wie sie inzwischen
   sind) –, löscht eingefügte Objekte samt Meta und
   Zuordnungen und holt Beiträge aus dem Papierkorb – aber nur, wenn jede betroffene Zeile noch
-  den Abdruck trägt, den der Push hinterlassen hat. Sonst `error.reason: "changed_since_push"`
-  mit `error.keys`: **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über
-  `rescue.php`. Scheitert umgekehrt die Rücknahme des Codes, nachdem die Inhalte schon zurück
+  den Abdruck trägt, den der Push hinterlassen hat, **und** an den eingefügten Beiträgen, Termen
+  und `term_taxonomy`-Zeilen nichts hängt, was nicht vom Push stammt: weitere Meta-Schlüssel,
+  Zuordnungen (an einer eingefügten `term_taxonomy` die anderer Beiträge), Kommentare, Revisionen
+  und Kindseiten (`post_parent`), weitere Taxonomien eines Terms, Kind-Terme. Sonst
+  `error.reason: "changed_since_push"` mit `error.keys` – auch für das Dazugekommene (Kommentare
+  als `{"table":"comments","key":"<post-id>"}`, eine Zuordnung ohne `term_taxonomy`-Zeile als
+  `"<post-id>\u0000"`): **nichts** wird zurückgenommen, auch Code und Uploads nicht, und nie über
+  `rescue.php`. Nicht als Änderung zählt Meta, die WordPress, Elementor oder der Agent selbst an
+  einen neuen Beitrag hängen und die kein Paket schreiben darf – die feste Sperrliste
+  (`_edit_lock`, `_edit_last`, `_wp_old_slug`, `_wp_trash_meta_*`, `_elementor_css` …) und der
+  oEmbed-Cache (`_oembed_*`); sie geht mit dem Beitrag. Scheitert umgekehrt die Rücknahme des Codes, nachdem die Inhalte schon zurück
   sind, sagt die Meldung das; ein zweiter `rollback` fasst die Datenbank nicht mehr an und holt
   nur Code und Uploads nach.
 - **Manifest und Baseline:** Nach einem bestätigten Push nach Live schreibt die CLI die neuen

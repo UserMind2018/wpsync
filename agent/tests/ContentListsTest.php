@@ -37,6 +37,18 @@ final class ContentListsTest extends TestCase
         $this->assertFalse(ContentLists::metaKey('_edit_lock', ['post_types' => [], 'taxonomies' => [], 'meta_exceptions' => ['_edit_lock']]), 'feste Schlüssel lassen sich nicht ausnehmen');
     }
 
+    /** M3: was WordPress selbst an einen neuen Beitrag hängt, hindert dessen Rücknahme nicht – Wortlisten zählen dabei nicht. */
+    public function testSystemMeta(): void
+    {
+        foreach (array_merge(ContentLists::BLOCKED_META, ['_EDIT_LOCK', '_Elementor_CSS', '_wp_trash_meta_status', '_wp_trash_meta_time', '_elementor_screenshot_failed', '_yoast_indexnow_last_ping', '_oembed_0a1b2c', '_oembed_time_0a1b2c']) as $key) {
+            $this->assertTrue(ContentLists::systemMeta($key), $key);
+        }
+        foreach (['_elementor_data', '_thumbnail_id', 'mailchimp_api_key', 'client_secret', '_billing_email', 'farbe', '', '_wp_desired_post_slug', 'oembed_x'] as $key) {
+            $this->assertFalse(ContentLists::systemMeta($key), $key);
+        }
+        $this->assertTrue(ContentLists::metaKey('_oembed_0a1b2c'), 'oEmbed-Cache bleibt pushbar wie bisher');
+    }
+
     public function testOptions(): void
     {
         foreach (['page_on_front', 'page_for_posts', 'show_on_front', 'blogname', 'blogdescription', 'sticky_posts', 'site_icon', 'elementor_active_kit', 'elementor_pro_theme_builder_conditions', 'elementor_cpt_support', 'elementor_disable_color_schemes', 'elementor_disable_typography_schemes', 'elementor_experiment-container', 'options_footer_text', '_options_footer_text', 'wpseo_titles', 'wpseo_social', 'rank-math-options-titles', 'theme_mods_hello-child'] as $name) {

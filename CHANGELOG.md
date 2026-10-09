@@ -118,6 +118,14 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   Rücknahme, Reparatur und die Nacharbeiten laufen jetzt mit `suppress_errors(true)` und
   stellen danach die Einstellung der Site wieder her; im Protokoll steht nur noch die
   Fehlernummer der Datenbank
+- Agent: `rollback` löscht nicht mehr mit, was nach dem Push an einem **eingefügten** Beitrag,
+  Term oder einer eingefügten `term_taxonomy`-Zeile entstanden ist. Hängt dort etwas, das der
+  Push nicht geschrieben hat – Meta-Schlüssel, Zuordnungen (auch fremder Beiträge an der neuen
+  `term_taxonomy`), Kommentare, Revisionen/Kindseiten, weitere Taxonomien, Kind-Terme –, endet
+  die Rücknahme mit `changed_since_push` und nennt die Stellen in `error.keys` (Kommentare als
+  `{table: "comments", key: "<post-id>"}`); nichts wird zurückgenommen. Meta der festen
+  Sperrliste (`_edit_lock`, `_edit_last`, `_wp_old_slug`, `_wp_trash_meta_*`, `_elementor_css` …)
+  und der oEmbed-Cache (`_oembed_*`) zählen nicht und gehen mit dem Beitrag
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

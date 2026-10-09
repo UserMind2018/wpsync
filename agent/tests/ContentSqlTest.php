@@ -536,6 +536,55 @@ final class ContentSqlTest extends TestCase
         $this->sql()->idMax('posts');
     }
 
+    /** M3: was an eingefügten Objekten hängt – nur gelesen, jede ID über prepare(), in der Transaktion mit Sperre. */
+    public function testAttachedNamesWhatHangsOnObjects(): void
+    {
+        $this->db->answer('/FROM `stg_postmeta`/', [['o' => '7', 'k' => '_a'], ['o' => '7', 'k' => '_a'], ['o' => '7', 'k' => '_b'], ['o' => '99', 'k' => 'fremd']]);
+        $this->db->answer('/FROM `stg_term_relationships` r LEFT JOIN/', [['o' => '7', 'tax' => 'category'], ['o' => '7', 'tax' => 'category'], ['o' => '7', 'tax' => null]]);
+        $this->db->answer('/FROM `stg_posts` WHERE `post_parent`/', [['o' => '7', 'c' => '70'], ['o' => '8', 'c' => '80']]);
+        $this->db->answer('/FROM `stg_comments`/', [['o' => '8'], ['o' => '8']]);
+        $sql = new ContentSql($this->db, $this->tables('stg_'), 'stg_comments');
+        $this->assertSame([
+            '7' => ['meta' => ['_a', '_b'], 'relations' => ["7\0category", "7\0"], 'comments' => 0, 'children' => ['70']],
+            '8' => ['meta' => [], 'relations' => [], 'comments' => 2, 'children' => ['80']],
+        ], $sql->attached('posts', ['7', '8', '7'], true));
+        $this->assertSame([
+            'SELECT `post_id` AS o, `meta_key` AS k FROM `stg_postmeta` WHERE `post_id` IN (7,8) ORDER BY `meta_id` FOR UPDATE',
+            'SELECT r.`object_id` AS o, x.`taxonomy` AS tax FROM `stg_term_relationships` r LEFT JOIN `stg_term_taxonomy` x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`object_id` IN (7,8) ORDER BY r.`object_id`, r.`term_taxonomy_id` FOR UPDATE',
+            'SELECT `post_parent` AS o, `ID` AS c FROM `stg_posts` WHERE `post_parent` IN (7,8) ORDER BY `ID` FOR UPDATE',
+            'SELECT `comment_post_ID` AS o FROM `stg_comments` WHERE `comment_post_ID` IN (7,8) FOR UPDATE',
+        ], $this->db->queries);
+        $this->assertSame([], $this->db->writes());
+
+        $this->db = new FakeWpdb();
+        $this->db->answer('/FROM `wp_termmeta`/', [['o' => '5', 'k' => 'farbe']]);
+        $this->db->answer('/FROM `wp_term_taxonomy` WHERE `term_id`/', [['o' => '5', 'c' => '5'], ['o' => '5', 'c' => '6']]);
+        $this->assertSame(['5' => ['meta' => ['farbe'], 'relations' => [], 'comments' => 0, 'children' => ['5', '6']]], $this->sql()->attached('terms', ['5'], false));
+        $this->assertSame([
+            'SELECT `term_id` AS o, `meta_key` AS k FROM `wp_termmeta` WHERE `term_id` IN (5) ORDER BY `meta_id`',
+            'SELECT `term_id` AS o, `term_taxonomy_id` AS c FROM `wp_term_taxonomy` WHERE `term_id` IN (5) ORDER BY `term_taxonomy_id`',
+        ], $this->db->queries);
+
+        $this->db = new FakeWpdb();
+        $this->db->answer('/FROM `wp_term_relationships` r JOIN/', [['o' => '6', 'obj' => '219', 'tax' => 'category'], ['o' => '6', 'obj' => '220', 'tax' => 'category']]);
+        $this->db->answer('/FROM `wp_term_taxonomy` p JOIN/', [['o' => '6', 'c' => '9']]);
+        $this->assertSame(['6' => ['meta' => [], 'relations' => ["219\0category", "220\0category"], 'comments' => 0, 'children' => ['9']]], $this->sql()->attached('term_taxonomy', ['6'], true));
+        $this->assertSame([
+            'SELECT r.`term_taxonomy_id` AS o, r.`object_id` AS obj, x.`taxonomy` AS tax FROM `wp_term_relationships` r JOIN `wp_term_taxonomy` x ON x.`term_taxonomy_id` = r.`term_taxonomy_id` WHERE r.`term_taxonomy_id` IN (6) ORDER BY r.`object_id` FOR UPDATE',
+            'SELECT p.`term_taxonomy_id` AS o, c.`term_taxonomy_id` AS c FROM `wp_term_taxonomy` p JOIN `wp_term_taxonomy` c ON c.`parent` = p.`term_id` AND BINARY c.`taxonomy` = BINARY p.`taxonomy` WHERE p.`term_taxonomy_id` IN (6) ORDER BY c.`term_taxonomy_id` FOR UPDATE',
+        ], $this->db->queries, 'ohne Tabelle comments (es gibt sie auf dem Ziel nicht) keine Abfrage danach');
+
+        try {
+            new ContentSql($this->db, $this->tables(), 'wp_comments` WHERE 1; --');
+            $this->fail('accepted');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('comments', $e->getMessage());
+        }
+        $this->db->fail('/FROM `wp_postmeta`/', 'crashed');
+        $this->expectException(ContentException::class);
+        $this->sql()->attached('posts', ['1'], true);
+    }
+
     public function testReadsTheRawRelationshipsOfAnObject(): void
     {
         $this->db->answer('/FROM `wp_term_relationships`/', [['o' => '219', 'tt' => '3'], ['o' => '219', 'tt' => '77'], ['o' => '220', 'tt' => '3']]);
