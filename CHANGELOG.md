@@ -179,6 +179,11 @@ Agent ≥ 0.7.0; ohne `--content` gilt alles wie bisher – bis auf die doppelt 
   aus einem Abfrage-Cache beantworten: sie trägt jedes Mal einen anderen Kommentar
   (`SELECT @wpsync_tx /* … */`), und der Inhaltskanal setzt `DONOTCACHEDB` für den Request.
   Erweiterte `wpdb`-Klassen (Query Monitor u. a.) bleiben erlaubt
+- CLI: Was der Commit über die Inhalte antwortet, prüft die CLI gegen das Paket. Abdrücke
+  (`content.after`) gelten nur für Schlüssel des Pakets und für die Papierkorb-Meta eines
+  Beitrags mit `op: trash`; ein fremder Schlüssel lässt `manifest.jsonl` und `baseline.jsonl`
+  unangetastet (`warnings: ["content_state_failed"]`). Weicht `content.rows` von der Zeilenzahl
+  des Pakets ab, wird der Satz nicht bestätigt, sondern zurückgenommen
 
 ## [0.6.0] – 2026-10-09 · Agent 0.6.0
 

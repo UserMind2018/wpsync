@@ -222,6 +222,90 @@ func TestRunPushesContentAlone(t *testing.T) {
 	}
 }
 
+// N7: what the commit answers about the content is the site's word. Fingerprints for keys the
+// package does not hold never reach manifest and baseline – the push stays confirmed, with the
+// warning content_state_failed.
+func TestRunTakesAfterOnlyForKeysOfThePackage(t *testing.T) {
+	h := fakeHash("x", "y")
+	foreign := []agentapi.ContentAfter{
+		{T: "posts", K: "999", H: &h},                             // a row the package never named
+		{T: "postmeta", K: "219\x00_wp_trash_meta_status", H: &h}, // trash meta of a post that is not trashed
+		{T: "postmeta", K: "220\x00_fremd", H: &h},                // other meta of the trashed post
+		{T: "options", K: "220\x00_wp_trash_meta_time", H: &h},    // the right name in the wrong table
+	}
+	for _, entry := range foreign {
+		f := newFakeSite(t)
+		f.tamper = func(a *agentapi.ContentApplied) { a.After = append(a.After, entry) }
+		o, siteDir, out := contentSite(t, f)
+		o.NoCode = true
+		var report Result
+		o.Report = &report
+		if err := Run(o); err != nil {
+			t.Fatalf("%s %q: %v\n%s", entry.T, entry.K, err, out)
+		}
+		if report.Status != "confirmed" || !reflect.DeepEqual(report.Warnings, []string{WarningContentState}) {
+			t.Errorf("%s %q: report = %+v", entry.T, entry.K, report)
+		}
+		if contentFile(t, siteDir, "manifest.jsonl") != manifestBefore || contentFile(t, siteDir, "baseline.jsonl") != baselineBefore {
+			t.Errorf("%s %q: manifest and baseline must stay untouched", entry.T, entry.K)
+		}
+		if j, err := LoadJournal(siteDir, testID); err != nil || j.Content == nil || j.Content.Applied {
+			t.Errorf("%s %q: journal = %+v, %v", entry.T, entry.K, j, err)
+		}
+		if !strings.Contains(out.String(), "wpsync pull kunde --content") {
+			t.Errorf("output:\n%s", out)
+		}
+	}
+
+	// What the agent writes itself for a trash is welcome: the three meta keys of the trashed post.
+	f := newFakeSite(t)
+	f.tamper = func(a *agentapi.ContentApplied) {
+		for _, name := range []string{"_wp_trash_meta_status", "_wp_trash_meta_time", "_wp_desired_post_slug"} {
+			a.After = append(a.After, agentapi.ContentAfter{T: "postmeta", K: "220\x00" + name, H: &h})
+		}
+	}
+	o, siteDir, out := contentSite(t, f)
+	o.NoCode = true
+	var report Result
+	o.Report = &report
+	if err := Run(o); err != nil || report.Status != "confirmed" || len(report.Warnings) != 0 {
+		t.Fatalf("report = %+v, %v\n%s", report, err, out)
+	}
+	if manifest := contentFile(t, siteDir, "manifest.jsonl"); strings.Count(manifest, `_wp_trash_meta_`) != 2 || !strings.Contains(manifest, `220\u0000_wp_desired_post_slug`) {
+		t.Errorf("manifest:\n%s", manifest)
+	}
+}
+
+// N7: a commit that names another number of rows than the package holds did not apply this
+// package – the set is taken back like one whose content the agent did not apply at all.
+func TestRunRollsBackWhenTheAgentAppliedAnotherNumberOfRows(t *testing.T) {
+	for _, rows := range []int{0, 3, 5} {
+		f := newFakeSite(t)
+		f.tamper = func(a *agentapi.ContentApplied) { a.Rows = rows }
+		o, siteDir, out := contentSite(t, f) // the package holds four rows
+		o.NoCode = true
+		var report Result
+		o.Report = &report
+		err := Run(o)
+		var rolled *RolledBackError
+		if !errors.As(err, &rolled) {
+			t.Fatalf("rows %d: err = %v\n%s", rows, err, out)
+		}
+		if got := strings.Join(f.routes, " "); !strings.HasSuffix(got, "commit rollback") || strings.Contains(got, "confirm") {
+			t.Errorf("rows %d: routes = %s", rows, got)
+		}
+		if report.Status != "rolled_back" || report.Content != nil {
+			t.Errorf("rows %d: report = %+v", rows, report)
+		}
+		if contentFile(t, siteDir, "manifest.jsonl") != manifestBefore || contentFile(t, siteDir, "baseline.jsonl") != baselineBefore {
+			t.Errorf("rows %d: manifest and baseline must stay untouched", rows)
+		}
+		if !strings.Contains(out.String(), "das Paket hat 4") {
+			t.Errorf("rows %d: output:\n%s", rows, out)
+		}
+	}
+}
+
 // Der Probelauf prüft das Paket ohne Push-Fenster und nennt Zeilen, Konflikte und Grenzen im plan.
 func TestRunDryRunWithContentNeedsNoWindow(t *testing.T) {
 	f := newFakeSite(t)

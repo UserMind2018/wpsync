@@ -834,10 +834,17 @@ func Run(o Options) error {
 	}
 	stamps := committed.Stamps
 	report.Status = "committed"
+	// The answer of the commit is the site's word: an agent that names another number of rows than
+	// the package holds did not apply this package.
+	rowsOff := pkg != nil && committed.Content != nil && committed.Content.Rows != len(pkg.Rows)
 	if committed.Content != nil {
 		report.PostActions = committed.Content.PostActions
-		report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
-		fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
+		if rowsOff {
+			fmt.Fprintf(o.Out, "  ! der Agent nennt %d angewandte Zeilen, das Paket hat %d\n", committed.Content.Rows, len(pkg.Rows))
+		} else {
+			report.Content = &ContentReport{Rows: committed.Content.Rows, Seconds: committed.Content.Seconds}
+			fmt.Fprintf(o.Out, "  Inhalte: %d Zeilen in %s s angewandt\n", committed.Content.Rows, strconv.FormatFloat(committed.Content.Seconds, 'f', -1, 64))
+		}
 		printActions(o.Out, committed.Content.PostActions)
 	}
 	o.event("commit", map[string]any{"push_id": begin.PushID})
@@ -856,6 +863,9 @@ func Run(o Options) error {
 	o.event("health", map[string]any{"pages": len(urls), "worse": append([]string{}, worse...)})
 	if pkg != nil && committed.Content == nil && len(worse) == 0 {
 		worse = []string{"der Agent hat die Inhalte des Pushs nicht angewandt"} // never confirm half a set
+	}
+	if rowsOff && len(worse) == 0 {
+		worse = []string{fmt.Sprintf("der Agent nennt %d angewandte Zeilen, das Paket hat %d", committed.Content.Rows, len(pkg.Rows))}
 	}
 	if len(worse) > 0 {
 		report.Health = WorsePages(before, after)

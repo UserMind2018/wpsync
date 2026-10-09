@@ -790,6 +790,14 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   Abdrücke nach `manifest.jsonl` und die Zeilen des Pakets nach `baseline.jsonl` – das Gepushte
   ist danach keine lokale Änderung mehr. `rollback` nimmt das zurück. Bei `--to staging` bleiben
   beide unverändert: sie beschreiben Live, und dasselbe Paket geht danach nach Live.
+  Die Antwort des Commits ist dabei das Wort der Site, und die CLI prüft sie gegen das Paket:
+  Abdrücke nimmt sie nur für Schlüssel des Pakets an und für die drei Meta-Paare, die der Agent
+  beim Papierkorb selbst schreibt (`_wp_trash_meta_status`, `_wp_trash_meta_time`,
+  `_wp_desired_post_slug` an einem Beitrag mit `op: trash`) – nennt die Antwort einen anderen
+  Schlüssel, bleiben Manifest und Baseline unangetastet und das Ergebnis trägt
+  `warnings: ["content_state_failed"]` (dann `wpsync pull <site> --content`). Nennt die Antwort
+  eine andere Zahl angewandter Zeilen, als das Paket hat, wird der Satz nicht bestätigt, sondern
+  zurückgenommen – wie wenn der Agent die Inhalte gar nicht angewandt hätte.
 - **Staging:** dieselben Abdrücke gelten auf der Kopie; der Agent schreibt nur in ihre Tabellen
   und setzt ihre Adressen ein. Nacharbeiten gibt es dort nur, soweit sie sich mit SQL und Dateien
   sagen lassen. `staging refresh` und `staging delete` verwerfen ein dort angewandtes Paket.

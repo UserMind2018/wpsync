@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -247,12 +248,38 @@ func printActions(out io.Writer, actions []agentapi.PostAction) {
 // replaced.
 func contentUndoName(pushID string) string { return pushID + ".content.json" }
 
+// errForeignAfter: the commit named a fingerprint for a key that is not part of the push.
+var errForeignAfter = errors.New("der Agent nennt einen Abdruck für einen Schlüssel, der nicht zum Paket gehört")
+
+// trashMetaNames are the meta keys the agent writes itself at a post with op trash
+// (ContentPackage::TRASH_META).
+var trashMetaNames = []string{"_wp_trash_meta_status", "_wp_trash_meta_time", "_wp_desired_post_slug"}
+
+// trashMeta reports whether table and key name one of the meta pairs the agent writes for a post
+// the package moves to the trash.
+func trashMeta(rows map[content.Key]PackageRow, table, key string) bool {
+	id, name, ok := strings.Cut(key, "\x00")
+	if table != "postmeta" || !ok || !slices.Contains(trashMetaNames, name) {
+		return false
+	}
+	post, ok := rows[content.Key{T: "posts", K: id}]
+	return ok && post.Op == "trash"
+}
+
 // applyContent brings manifest and baseline of the site folder to the state the agent reports
 // and keeps what they held before for a rollback.
 func applyContent(siteDir string, j *Journal, pkg *Package, after []agentapi.ContentAfter) error {
 	rows := map[content.Key]PackageRow{}
 	for _, r := range pkg.Rows {
 		rows[content.Key{T: r.Table, K: r.Key}] = r
+	}
+	// The fingerprints are the site's word. They count only for keys the package holds and for the
+	// meta the agent writes itself when a post of the package goes to the trash – anything else
+	// would rewrite lines of manifest and baseline the push never touched.
+	for _, a := range after {
+		if _, ok := rows[content.Key{T: a.T, K: a.K}]; !ok && !trashMeta(rows, a.T, a.K) {
+			return fmt.Errorf("%w: %s %s", errForeignAfter, agentapi.Printable(a.T), agentapi.Printable(a.K))
+		}
 	}
 	changes := map[content.Key]content.Change{}
 	for _, a := range after {

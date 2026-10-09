@@ -104,13 +104,14 @@ type fakeSite struct {
 	rbBody      string                                   // answer of /push/rollback on 200; empty: {"ok":true}
 
 	// The content channel (agent 0.7.0, content_run_test.go).
-	staged        map[string][]byte        // sha256 → what /content/stage holds
-	noContent     bool                     // an agent without the channel: no route, no answer for content
-	contentFail   *agentapi.ContentFailure // the check refuses the package: in the dry run's answer, as an error of the real begin
-	contentHealth []string                 // published pages the package changes
-	commitCode    string                   // /push/commit refuses with this code and swaps nothing
-	noApply       bool                     // /push/commit answers without content
-	actions       []agentapi.PostAction    // post actions of the commit
+	staged        map[string][]byte              // sha256 → what /content/stage holds
+	noContent     bool                           // an agent without the channel: no route, no answer for content
+	contentFail   *agentapi.ContentFailure       // the check refuses the package: in the dry run's answer, as an error of the real begin
+	contentHealth []string                       // published pages the package changes
+	commitCode    string                         // /push/commit refuses with this code and swaps nothing
+	noApply       bool                           // /push/commit answers without content
+	actions       []agentapi.PostAction          // post actions of the commit
+	tamper        func(*agentapi.ContentApplied) // changes what the commit answers about the content
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -355,7 +356,11 @@ func (f *fakeSite) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		answer := map[string]any{"next": nil, "stamps": stamps}
 		if ref := f.begins[len(f.begins)-1].Content; ref != nil && !f.noContent && !f.noApply {
-			answer["content"] = f.applied(ref.SHA256)
+			applied := f.applied(ref.SHA256)
+			if f.tamper != nil {
+				f.tamper(applied)
+			}
+			answer["content"] = applied
 		}
 		json.NewEncoder(w).Encode(answer)
 	case "/wpsync/v1/push/confirm":
