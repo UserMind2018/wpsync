@@ -3,7 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unreleased] · CLI 0.9.0 · Agent 0.9.0
+## [0.9.0] – 2026-10-10 · Agent 0.9.0
 
 ### Plugins im Push aktivieren und deaktivieren (Content-Push P4)
 
