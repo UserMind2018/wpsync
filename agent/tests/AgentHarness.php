@@ -185,4 +185,19 @@ namespace {
     {
         return gmdate($format, $timestamp);
     }
+
+    /** Wie WordPress im Kern: Tags weg, Leerraum zusammengezogen und gestutzt. */
+    function sanitize_text_field(string $text): string
+    {
+        return trim((string) preg_replace('/[\r\n\t ]+/', ' ', strip_tags($text)));
+    }
+
+    /**
+     * @param mixed $value
+     * @return mixed
+     */
+    function wp_unslash($value)
+    {
+        return is_string($value) ? stripslashes($value) : $value;
+    }
 }

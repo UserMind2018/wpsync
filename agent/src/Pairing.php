@@ -44,16 +44,44 @@ final class Pairing
     }
 
     /**
-     * @return array{hash: string, expires: int, attempts: int}
+     * @param string $device Gerätename, den der Administrator beim Erzeugen vergeben hat (Spec 0.9.1 G1); '' ohne.
+     *                       Er liegt beim Code und verfällt mit ihm
+     * @return array{hash: string, expires: int, attempts: int, device?: string}
      */
-    public static function stored(string $code, int $now): array
+    public static function stored(string $code, int $now, string $device = ''): array
     {
-        return ['hash' => self::hashCode($code), 'expires' => $now + self::CODE_TTL, 'attempts' => 0];
+        $stored = ['hash' => self::hashCode($code), 'expires' => $now + self::CODE_TTL, 'attempts' => 0];
+        return $device === '' ? $stored : $stored + ['device' => self::device($device)];
     }
 
     /**
-     * @param array{hash: string, expires: int, attempts: int}|null $stored
-     * @return array{0: bool, 1: array{hash: string, expires: int, attempts: int}|null} [gültig, neuer gespeicherter Zustand]
+     * Der Name, der bei einem Code liegt; '' ohne.
+     *
+     * @param array<string, mixed>|null $stored
+     */
+    public static function named(?array $stored): string
+    {
+        return is_array($stored) && is_string($stored['device'] ?? null) ? $stored['device'] : '';
+    }
+
+    /**
+     * Unter welchem Namen eine Kopplung gespeichert wird (G2): --device der CLI > Name aus dem WP-Admin >
+     * Rechnername. Eine CLI vor 0.9.1 sendet device_given nicht – ihr device ist dann meist der Rechnername,
+     * und der Name aus dem Admin gewinnt.
+     *
+     * @param string                    $cli    device der Anfrage, schon bereinigt
+     * @param bool                      $given  die Anfrage sagt: der Name wurde mit --device gesetzt
+     * @param array<string, mixed>|null $stored der Zustand des eingelösten Codes
+     */
+    public static function choose(string $cli, bool $given, ?array $stored): string
+    {
+        $admin = self::named($stored);
+        return self::device(($given && $cli !== '') || $admin === '' ? $cli : $admin);
+    }
+
+    /**
+     * @param array{hash: string, expires: int, attempts: int, device?: string}|null $stored
+     * @return array{0: bool, 1: array{hash: string, expires: int, attempts: int, device?: string}|null} [gültig, neuer gespeicherter Zustand]
      */
     public static function redeem(?array $stored, string $code, int $now): array
     {

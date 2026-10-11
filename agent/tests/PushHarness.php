@@ -80,6 +80,11 @@ namespace {
         return 'https://example.test' . $path;
     }
 
+    function admin_url(string $path = ''): string
+    {
+        return 'https://example.test/wp-admin/' . $path;
+    }
+
     function wp_login_url(): string
     {
         return 'https://example.test/wp-login.php';

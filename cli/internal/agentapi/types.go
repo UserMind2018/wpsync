@@ -85,6 +85,8 @@ type PairResult struct {
 	Secret       string `json:"secret"`
 	Home         string `json:"home"`
 	AgentVersion string `json:"agent_version"`
+	// Device: the name the site stored for this pairing (agent 0.9.1); empty from an older agent.
+	Device string `json:"device"`
 }
 
 // Infosheet is the agent's precomputed inventory (Spec 4.4).

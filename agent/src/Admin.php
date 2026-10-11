@@ -4,7 +4,7 @@ namespace WpSync;
 defined('ABSPATH') || exit;
 
 /**
- * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen und widerrufen, Push-Fenster
+ * Werkzeuge → wpsync: Pairing-Code erzeugen, Pairings ansehen, umbenennen und widerrufen, Push-Fenster
  * öffnen, Pushes ansehen und zurückrollen, Stand der Staging-Kopie ansehen. Das Secret wird nie
  * angezeigt (Spike B19, AC-5).
  */
@@ -48,12 +48,20 @@ final class Admin
         }
         Store::install();
 
-        $code = null;
+        $code       = null;
+        $codeDevice = '';
         if (isset($_POST['wpsync_action']) && check_admin_referer('wpsync_admin')) {
             $action = sanitize_key((string) wp_unslash($_POST['wpsync_action']));
             $keyId  = isset($_POST['key_id']) ? sanitize_key((string) wp_unslash($_POST['key_id'])) : '';
             if ($action === 'new_code') {
-                $code = Store::issuePairingCode();
+                $code       = Store::issuePairingCode(self::deviceName($_POST['device'] ?? ''));
+                $codeDevice = Pairing::named(Store::getState('pairing_code'));
+            } elseif ($action === 'rename' && $keyId !== '') {
+                if (self::rename($keyId, $_POST['device'] ?? '')) {
+                    self::notice('success', 'Gerät umbenannt.');
+                } else {
+                    self::notice('error', 'Der Gerätename darf nicht leer sein – nichts geändert.');
+                }
             } elseif ($action === 'revoke' && $keyId !== '') {
                 Store::deletePairing($keyId);
                 self::notice('success', 'Pairing widerrufen.');
@@ -93,16 +101,25 @@ final class Admin
                 <p><code style="font-size:1.6em;letter-spacing:.15em"><?php echo esc_html($code); ?></code></p>
                 <p>Im Terminal ausführen:<br>
                     <code>wpsync pair <?php echo esc_html(home_url()); ?> <?php echo esc_html($code); ?></code></p>
+                <?php if ($codeDevice !== '') : ?>
+                    <p>Das Gerät wird als <strong><?php echo esc_html($codeDevice); ?></strong> geführt – ausser <code>wpsync pair</code> nennt mit <code>--device</code> einen anderen Namen.</p>
+                <?php endif; ?>
             <?php else : ?>
                 <form method="post">
                     <?php wp_nonce_field('wpsync_admin'); ?>
                     <input type="hidden" name="wpsync_action" value="new_code">
-                    <p><button type="submit" class="button button-primary">Pairing-Code erzeugen</button></p>
+                    <p>
+                        <label for="wpsync-device">Gerätename (optional)</label>
+                        <input type="text" id="wpsync-device" name="device" value="" maxlength="100" class="regular-text" placeholder="sonst der Rechnername">
+                        <button type="submit" class="button button-primary">Pairing-Code erzeugen</button>
+                    </p>
                 </form>
             <?php endif; ?>
 
             <h2>Gekoppelte Geräte</h2>
             <p>Ein Gerät kann Code nur pushen, solange sein Push-Fenster offen ist. Das Fenster schliesst sich von selbst.</p>
+            <p>Unter dem Namen steht die Kennung der Kopplung – dieselbe, die <code>wpsync sites</code> und ein Probelauf auf dem Gerät nennen.
+                Namen müssen nicht eindeutig sein; die Kennung unterscheidet zwei Kopplungen desselben Rechners.</p>
             <p>Die Secrets der Geräte liegen verschlüsselt in der Datenbank. Der Schlüssel stammt aus <code>wp-config.php</code>:
                 aus <code>WPSYNC_KEY</code>, sonst aus <code>AUTH_KEY</code> und <code>SECURE_AUTH_KEY</code>.
                 Werden diese WordPress-Salts erneuert (das tun auch manche Sicherheits-Plugins), müssen alle Geräte neu
@@ -113,7 +130,17 @@ final class Admin
                 <tbody>
                 <?php foreach (Store::pairings() as $pairing) : ?>
                     <tr>
-                        <td><?php echo esc_html($pairing['device']); ?></td>
+                        <td>
+                            <?php echo esc_html($pairing['device']); ?><br>
+                            <code><?php echo esc_html($pairing['key_id']); ?></code>
+                            <form method="post" style="margin-top:.5em">
+                                <?php wp_nonce_field('wpsync_admin'); ?>
+                                <input type="hidden" name="wpsync_action" value="rename">
+                                <input type="hidden" name="key_id" value="<?php echo esc_attr($pairing['key_id']); ?>">
+                                <input type="text" name="device" value="<?php echo esc_attr($pairing['device']); ?>" maxlength="100" aria-label="Gerätename">
+                                <button type="submit" class="button">Umbenennen</button>
+                            </form>
+                        </td>
                         <td><?php echo esc_html(wp_date('d.m.Y H:i', $pairing['created'])); ?></td>
                         <td><?php echo $pairing['last_used'] === null ? '–' : esc_html(wp_date('d.m.Y H:i', $pairing['last_used'])); ?></td>
                         <td<?php echo $pairing['secret_state'] === Store::SECRET_SEALED ? '' : ' style="color:#b32d2e"'; ?>><?php echo esc_html(self::SECRET_STATE[$pairing['secret_state']] ?? $pairing['secret_state']); ?></td>
@@ -216,6 +243,29 @@ final class Admin
     public static function mayRollBack(array $push, int $userId): bool
     {
         return !Push::switchesBack($push) || PushPlugins::allowed($userId);
+    }
+
+    /**
+     * Ein Gerätename aus einem Formular der Seite (Spec 0.9.1 G1, G4): wie WordPress $_POST liefert, bereinigt
+     * und auf die Länge der Spalte gekürzt. '' heisst: kein Name.
+     *
+     * @param mixed $raw
+     */
+    public static function deviceName($raw): string
+    {
+        $name = is_string($raw) ? sanitize_text_field(wp_unslash($raw)) : '';
+        return $name === '' ? '' : Pairing::device($name);
+    }
+
+    /**
+     * Benennt die Kopplung mit dieser Kennung um; false bei leerem Namen – dann ändert sich nichts.
+     *
+     * @param mixed $raw der Name aus dem Formular
+     */
+    public static function rename(string $keyId, $raw): bool
+    {
+        $name = self::deviceName($raw);
+        return $keyId !== '' && $name !== '' && Store::renamePairing($keyId, $name);
     }
 
     public static function closeWindow(string $keyId): void

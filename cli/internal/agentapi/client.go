@@ -296,6 +296,15 @@ func (c *Client) wrapBody(resp *http.Response, route string) (*http.Response, er
 // maxDeviceRunes: the agent stores a device name with at most 100 characters (Pairing::device()).
 const maxDeviceRunes = 100
 
+// cleanDevice makes a device name from the site safe for the terminal: a name an administrator
+// chose stays readable, but never longer than the agent stores it.
+func cleanDevice(name string) string {
+	if device := []rune(CleanText(name)); len(device) > maxDeviceRunes {
+		return string(device[:maxDeviceRunes])
+	}
+	return CleanText(name)
+}
+
 // readAPIError reads a non-200 answer. Code and message come from the site; they are cleaned here,
 // once for every caller, so no error output can steer the terminal (M3).
 func readAPIError(resp *http.Response) error {
@@ -345,12 +354,7 @@ func readAPIError(resp *http.Response) error {
 		}
 		if stepRe.MatchString(wpErr.Data.Reason) {
 			e.Reason = wpErr.Data.Reason
-			// A name an administrator chose: readable, but never more than the agent stores.
-			if device := []rune(CleanText(wpErr.Data.Device)); len(device) > maxDeviceRunes {
-				e.Device = string(device[:maxDeviceRunes])
-			} else {
-				e.Device = string(device)
-			}
+			e.Device = cleanDevice(wpErr.Data.Device)
 		}
 		return e
 	}

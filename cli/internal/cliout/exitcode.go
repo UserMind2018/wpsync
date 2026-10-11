@@ -106,14 +106,18 @@ type Failure struct {
 	// push_foreign_device the device the push came from (Spec 0.9.1 F3).
 	Device   string `json:"device,omitempty"`
 	AdminURL string `json:"admin_url,omitempty"`
+	// KeyID: with exit 40 the key ID of this pairing – the admin page lists it below the device
+	// name, where two pairings of one machine look alike (Spec 0.9.1 G6).
+	KeyID string `json:"key_id,omitempty"`
 }
 
-// WindowError adds to an exit 40 the device and the admin page of the push window. Message and
+// WindowError adds to an exit 40 the device, its key ID and the admin page of the push window. Message and
 // exit code stay those of Err.
 type WindowError struct {
 	Err      error
 	Device   string
 	AdminURL string
+	KeyID    string
 }
 
 func (e *WindowError) Error() string { return e.Err.Error() }
@@ -180,7 +184,7 @@ func Classify(err error) Failure {
 	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
-		f.Device, f.AdminURL = window.Device, window.AdminURL
+		f.Device, f.AdminURL, f.KeyID = window.Device, window.AdminURL, window.KeyID
 	}
 	var apiErr *agentapi.APIError
 	if errors.As(err, &apiErr) && apiErr.Reason != "" && f.Reason == apiErr.Reason {

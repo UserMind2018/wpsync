@@ -322,6 +322,10 @@ final class Push
                     return PushPlugins::slug($unit) . '/';
                 }, $wish['activate']))),
             ],
+            // Wessen Push-Fenster das ist und wo ein Administrator es öffnet (Spec 0.9.1 G6): zwei Kopplungen
+            // desselben Rechners tragen denselben Namen – die Kennung unterscheidet sie.
+            'device'        => ['name' => self::deviceName(Store::deviceFor($keyId)), 'key_id' => $keyId],
+            'admin_url'     => admin_url('tools.php?page=wpsync'),
         ];
         if ($contentPlan !== null) {
             $answer['content'] = $contentPlan;

@@ -404,14 +404,46 @@ func TestDiscoverAndPairBoundTheAnswer(t *testing.T) {
 	if _, err := Discover(srv.Client(), srv.URL); err == nil {
 		t.Error("discover took an answer of 2 MiB")
 	}
-	if _, err := Pair(srv.Client(), srv.URL, "code", "mac"); err == nil {
+	if _, err := Pair(srv.Client(), srv.URL, "code", "mac", false); err == nil {
 		t.Error("pair took an answer of 2 MiB")
 	}
 	huge = `{"namespace":"wpsync/v1","key_id":"k","secret":"s"}`
 	if _, err := Discover(srv.Client(), srv.URL); err != nil {
 		t.Errorf("discover: %v", err)
 	}
-	if res, err := Pair(srv.Client(), srv.URL, "code", "mac"); err != nil || res.Secret != "s" {
+	if res, err := Pair(srv.Client(), srv.URL, "code", "mac", false); err != nil || res.Secret != "s" {
 		t.Errorf("pair: %v", err)
+	}
+}
+
+// Spec 0.9.1 G2, G3: pair sagt, ob der Name mit --device gesetzt wurde, und liest den Namen, den die
+// Site gespeichert hat – bereinigt und nie länger, als der Agent ihn führt.
+func TestPairSendsDeviceGivenAndReadsTheStoredName(t *testing.T) {
+	var got map[string]any
+	answer := `{"key_id":"k","secret":"s","device":"Studio Büro"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		json.NewDecoder(r.Body).Decode(&got)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	res, err := Pair(srv.Client(), srv.URL, "code", "Mac.fritz.box", false)
+	if err != nil || res.Device != "Studio Büro" {
+		t.Fatalf("pair = %+v, %v", res, err)
+	}
+	if _, has := got["device_given"]; has || got["device"] != "Mac.fritz.box" || got["code"] != "code" {
+		t.Errorf("request without --device = %v", got)
+	}
+	if _, err = Pair(srv.Client(), srv.URL, "code", "Laptop", true); err != nil || got["device_given"] != true || got["device"] != "Laptop" {
+		t.Errorf("request with --device = %v, %v", got, err)
+	}
+	// An agent before 0.9.1 names no device.
+	answer = `{"key_id":"k","secret":"s"}`
+	if res, err = Pair(srv.Client(), srv.URL, "code", "Laptop", true); err != nil || res.Device != "" {
+		t.Errorf("pair = %+v, %v", res, err)
+	}
+	answer = `{"key_id":"k","secret":"s","device":"a\u001b[31m` + strings.Repeat("ä", 300) + `"}`
+	if res, err = Pair(srv.Client(), srv.URL, "code", "x", false); err != nil || strings.ContainsRune(res.Device, 0x1b) || len([]rune(res.Device)) != 100 {
+		t.Errorf("device = %q, %v", res.Device, err)
 	}
 }

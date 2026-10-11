@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +140,31 @@ func TestPushErrorsKeepTheAgentCode(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != 403 || apiErr.Code != "wpsync_push_window" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Spec 0.9.1 G6: /push/begin nennt das anfragende Gerät und die Admin-Seite. Der Name wird bereinigt,
+// eine Kennung nur in ihrer Form übernommen, ein Link nur auf die gekoppelte Site.
+func TestPushBeginNamesDeviceAndAdminPage(t *testing.T) {
+	var answer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(answer)) }))
+	defer srv.Close()
+	c, _ := newTestClient(srv.URL)
+	base := `{"push_id":"","agent_version":"0.9.1","window_open":false,"units":[],"rescue":{"url":"x"}`
+
+	answer = base + `,"device":{"name":"Studio Büro","key_id":"0123456789abcdef"},"admin_url":"` + srv.URL + `/wp-admin/tools.php?page=wpsync"}`
+	plan, err := c.PushBegin(PushBeginRequest{Dry: true})
+	if err != nil || plan.Device == nil || *plan.Device != (PushDevice{Name: "Studio Büro", KeyID: "0123456789abcdef"}) || plan.AdminURL != srv.URL+"/wp-admin/tools.php?page=wpsync" {
+		t.Fatalf("plan = %+v, %v", plan, err)
+	}
+	// An agent before 0.9.1.
+	answer = base + `}`
+	if plan, err = c.PushBegin(PushBeginRequest{Dry: true}); err != nil || plan.Device != nil || plan.AdminURL != "" {
+		t.Fatalf("plan = %+v, %v", plan, err)
+	}
+	answer = base + `,"device":{"name":"a\u001b[31mb","key_id":"<script>"},"admin_url":"https://evil.example/wp-admin/tools.php?page=wpsync"}`
+	plan, err = c.PushBegin(PushBeginRequest{Dry: true})
+	if err != nil || strings.ContainsRune(plan.Device.Name, 0x1b) || plan.Device.KeyID != "" || plan.AdminURL != "" {
+		t.Fatalf("plan = %+v (%+v), %v", plan, plan.Device, err)
 	}
 }

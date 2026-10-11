@@ -33,6 +33,14 @@ type agent struct {
 	Anon         string
 	// RejectPair answers /pair like an expired code.
 	RejectPair bool
+	// PairDevice is the name an agent 0.9.1 stores for the pairing and returns: {admin} is replaced
+	// by nothing here – the fake applies the agent's rule (--device > CodeDevice > host name) when
+	// CodeDevice is set. Empty and no CodeDevice: an older agent, the answer names no device.
+	CodeDevice string
+	// NamesDevice: the agent answers /pair with the stored name (agent 0.9.1).
+	NamesDevice bool
+	// pairs are the bodies of the /pair requests.
+	pairs []map[string]any
 	// OnFiles runs when /files is requested; the request then waits until it is cancelled
 	// (SIGTERM test). nil answers normally.
 	OnFiles func()
@@ -73,7 +81,19 @@ func (a *agent) serve(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"code":"wpsync_code","message":"Pairing-Code ungültig oder abgelaufen."}`))
 			return
 		}
-		fmt.Fprintf(w, `{"key_id":"0123456789abcdef","secret":%q,"home":%q,"agent_version":%q}`, testSecret, a.srv.URL, a.AgentVersion)
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		a.pairs = append(a.pairs, req)
+		device := ""
+		if a.NamesDevice {
+			// The agent's rule (Pairing::choose()): --device > name of the code > what the CLI sent.
+			device, _ = req["device"].(string)
+			if req["device_given"] != true && a.CodeDevice != "" {
+				device = a.CodeDevice
+			}
+			device = fmt.Sprintf(`,"device":%q`, device)
+		}
+		fmt.Fprintf(w, `{"key_id":"0123456789abcdef","secret":%q,"home":%q,"agent_version":%q%s}`, testSecret, a.srv.URL, a.AgentVersion, device)
 	case "/wpsync/v1/infosheet":
 		fmt.Fprintf(w, `{"sheet":{"env":%s,"tables":%s,
 "post_types":[],"plugins":[],"themes":[],"uploads":[],"findings":[],"orphan_meta":{}},"job":{}}`, env, tables)

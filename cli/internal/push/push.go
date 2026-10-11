@@ -512,6 +512,25 @@ func (o Options) healthPages(agentURLs []string) (*copyAccess, []string, error) 
 	return acc, urls, nil
 }
 
+// window says whose push window a plan is about and where an administrator opens it: the agent's
+// words (agent 0.9.1, Spec 0.9.1 G6), else what pair stored for this site. Two pairings of one
+// machine carry the same name – the key ID tells them apart.
+func (o Options) window(plan *agentapi.PushBegin) (device agentapi.PushDevice, adminURL string) {
+	device = agentapi.PushDevice{Name: o.Site.Device, KeyID: o.Site.KeyID}
+	if d := plan.Device; d != nil {
+		if d.Name != "" {
+			device.Name = d.Name
+		}
+		if d.KeyID != "" {
+			device.KeyID = d.KeyID
+		}
+	}
+	if adminURL = plan.AdminURL; adminURL == "" {
+		adminURL = strings.TrimRight(o.Site.URL, "/") + "/wp-admin/tools.php?page=wpsync"
+	}
+	return device, adminURL
+}
+
 // planEvent is the plan of push --json. Versions and conflicts are the agent's words, unescaped.
 // skipped are local units new to the baseline that were not named (U14), missing the units of the
 // baseline that are gone locally and stay on the site (Spec Container-Push C7).
@@ -805,7 +824,8 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		fmt.Fprintln(o.Out, "Ziel: Staging-Kopie (Live bleibt unverändert, die Baseline auch)")
 	}
-	conflict, readonly, versionChange := printPlan(o.Out, units, plan, sw.Activate)
+	device, adminURL := o.window(plan)
+	conflict, readonly, versionChange := printPlan(o.Out, units, plan, sw.Activate, device, adminURL)
 	for i, u := range units {
 		// Such a unit was compared with the last push to staging, not with the last pull.
 		if len(plan.Units[i].Conflicts) > 0 && known.unit(u.Path) != nil {
@@ -825,6 +845,7 @@ func Run(o Options) error {
 		report.Warnings = append(report.Warnings, plan.Plugins.Warnings...)
 	}
 	ev := planEvent(units, plan, target, skipped, deleted, upPlan, plan.Content)
+	ev["device"], ev["admin_url"] = device, adminURL
 	if (pkg != nil || sw.any()) && plan.Rescue.DB != nil {
 		ev["rescue_db"] = plan.Rescue.DB // only from agent 0.8.0 (Spec Content-Push P3 §5.3)
 	}
@@ -1246,12 +1267,26 @@ func selectUnits(changed []Unit, only []string, out io.Writer) ([]Unit, error) {
 	return picked, nil
 }
 
+// WindowOf names the pairing a closed push window belongs to: „für Gerät <Name> (Kennung <key_id>)“,
+// as far as both are known.
+func WindowOf(name, keyID string) string {
+	switch {
+	case name != "" && keyID != "":
+		return fmt.Sprintf("für Gerät %s (Kennung %s)", name, keyID)
+	case name != "":
+		return "für Gerät " + name
+	case keyID != "":
+		return fmt.Sprintf("für dieses Gerät (Kennung %s)", keyID)
+	}
+	return "für dieses Gerät"
+}
+
 // printPlan shows what would happen and reports conflicts, missing permissions and version changes.
-func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin, activate []string) (conflict, readonly, versionChange bool) {
+func printPlan(out io.Writer, units []Unit, plan *agentapi.PushBegin, activate []string, device agentapi.PushDevice, adminURL string) (conflict, readonly, versionChange bool) {
 	if plan.WindowOpen {
 		fmt.Fprintln(out, "Push-Fenster: offen")
 	} else {
-		fmt.Fprintln(out, "Push-Fenster: geschlossen – im WP-Admin unter Werkzeuge → wpsync öffnen")
+		fmt.Fprintf(out, "Push-Fenster geschlossen %s – öffnen unter %s\n", WindowOf(device.Name, device.KeyID), adminURL)
 	}
 	for i, u := range units {
 		p := plan.Units[i]

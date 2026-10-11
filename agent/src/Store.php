@@ -181,11 +181,12 @@ final class Store
         return (string) ($state['key'] ?? '');
     }
 
-    public static function issuePairingCode(): string
+    /** @param string $device Gerätename für die Kopplung, die den Code einlöst – schon bereinigt; '' ohne (Spec 0.9.1 G1) */
+    public static function issuePairingCode(string $device = ''): string
     {
         self::install();
         $code = Pairing::newCode();
-        self::setState('pairing_code', Pairing::stored($code, time()));
+        self::setState('pairing_code', Pairing::stored($code, time(), $device));
         return $code;
     }
 
@@ -352,6 +353,16 @@ final class Store
                 'secret_state' => $state === self::SECRET_STALE ? self::SECRET_SEALED : $state,
             ];
         }, (array) $rows);
+    }
+
+    /** Gibt einer Kopplung einen neuen Namen (Spec 0.9.1 G4). Pushes behalten den Namen, den sie beim Begin hatten. */
+    public static function renamePairing(string $keyId, string $device): bool
+    {
+        global $wpdb;
+        if ($keyId === '' || $device === '') {
+            return false;
+        }
+        return false !== $wpdb->update(self::table('pairings'), ['device' => Pairing::device($device)], ['key_id' => $keyId]);
     }
 
     public static function deletePairing(string $keyId): void
