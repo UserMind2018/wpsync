@@ -106,7 +106,7 @@ final class ContentApply
                     }
                 }
                 $after   = self::verify($writes, $target, $wanted);
-                $changes = $check === null ? self::noChanges() : self::changes($writes, $check);
+                $changes = $check === null ? self::noChanges() : self::changes($writes, $check, $store);
                 if ($delta !== null) {
                     $changes['plugins'] = $delta + ['h' => null];
                     if ($delta['added'] !== [] || $delta['removed'] !== []) {
@@ -176,7 +176,7 @@ final class ContentApply
      */
     private static function noChanges(): array
     {
-        return ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => [], 'rewrite' => false];
+        return ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => [], 'rewrite' => false, 'elementor' => ['posts' => [], 'global' => false]];
     }
 
     /**
@@ -318,9 +318,11 @@ final class ContentApply
      * dieselben Schritte geht.
      *
      * @param list<array{0: string, 1: string, 2: array<string, mixed>|null}> $writes
-     * @return array{posts: list<int>, revisions: list<int>, terms: list<int>, term_taxonomy: list<int>, options: list<string>, rewrite: bool}
+     * @return array{posts: list<int>, revisions: list<int>, terms: list<int>, term_taxonomy: list<int>, options: list<string>, rewrite: bool, elementor: array{posts: list<int>, global: bool}}
+     *         elementor: der Umfang der Nacharbeit elementor_css (Spec 0.9.1 E1) – posts nennt auch Beiträge, an
+     *         denen nur eine Zuordnung hängt, und taugt dafür nicht
      */
-    private static function changes(array $writes, ContentCheck $check): array
+    private static function changes(array $writes, ContentCheck $check, ContentStore $store): array
     {
         $posts     = [];
         $revisions = [];
@@ -374,6 +376,7 @@ final class ContentApply
             'term_taxonomy' => array_keys($tts),
             'options'       => array_map('strval', array_keys($options)),
             'rewrite'       => $rewrite,
+            'elementor'     => ContentElementor::touched($writes, $check->state('posts'), $store),
         ];
     }
 

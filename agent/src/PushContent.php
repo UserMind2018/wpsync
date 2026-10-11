@@ -503,7 +503,7 @@ final class PushContent
      * Nacharbeiten nach dem Anwenden oder der Rücknahme (§7.7); nie ein Fehler des Pushs.
      *
      * @param array<string, mixed>|null $changes
-     * @return list<array{step: string, ok: bool}>
+     * @return list<array{step: string, ok: bool, scope?: string, count?: int}>
      */
     public static function postActions(string $name, string $content, ?array $changes): array
     {
@@ -517,7 +517,7 @@ final class PushContent
                 $uploads = Staging::inside($target->uploadsDir) ? $target->uploadsDir : '';
                 return ContentPostActions::staging($changes, $target->store, $wpdb, $target->indexables, $uploads, class_exists('\Elementor\Plugin', false));
             }
-            return ContentPostActions::live($changes, $wpdb, $target->indexables);
+            return ContentPostActions::live($changes, $wpdb, $target->indexables, $target->store, $target->uploadsDir);
         } catch (\Throwable $e) {
             return [['step' => 'post_actions', 'ok' => false]];
         }

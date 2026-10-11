@@ -148,14 +148,15 @@ final class ContentPostActionsTest extends TestCase
         file_put_contents($dir . '/elementor/css/post-219.css', 'alt');
         file_put_contents($dir . '/elementor/css/bleibt.txt', 'x');
         $store = new ContentMemory([
-            'postmeta'           => ["219\0_elementor_css" => ['values' => ['x']], "219\0_elementor_data" => ['values' => ['[]']]],
+            'postmeta'           => ["219\0_elementor_css" => ['values' => ['x']], "219\0_elementor_data" => ['values' => ['[]']],
+                "300\0_elementor_element_cache" => ['values' => ['x']], "300\0_elementor_page_assets" => ['values' => ['x']]],
             'options'            => ['_elementor_global_css' => ['option_value' => 'x'], 'rewrite_rules' => ['option_value' => 'a:0:{}'], 'blogname' => ['option_value' => 'Kunde']],
             'term_taxonomy'      => ['5' => ContentFixturesLite::taxonomy('5')],
             'term_relationships' => ["219\0category" => ['values' => ['5:0']], "220\0category" => ['values' => ['5:0']]],
         ]);
         $steps = ContentPostActions::staging(self::CHANGES, $store, $this->db, 'stgabcdef_yoast_indexable', $dir, true);
         $this->assertSame(
-            [['step' => 'elementor_css', 'ok' => true], ['step' => 'seo_indexables', 'ok' => true], ['step' => 'rewrite_rules', 'ok' => true], ['step' => 'term_counts', 'ok' => true]],
+            [['step' => 'elementor_css', 'ok' => true, 'scope' => 'global'], ['step' => 'seo_indexables', 'ok' => true], ['step' => 'rewrite_rules', 'ok' => true], ['step' => 'term_counts', 'ok' => true]],
             $steps
         );
         $this->assertSame(["219\0_elementor_data"], array_keys($store->data['postmeta']));
@@ -169,6 +170,130 @@ final class ContentPostActionsTest extends TestCase
 
         $none = ContentPostActions::staging(['posts' => [219], 'term_taxonomy' => [], 'rewrite' => false], $store, $this->db, '', '', false);
         $this->assertSame([], $none);
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
+    /** @return array<string, mixed> changes eines Pakets, das nur die Seite 219 ändert */
+    private static function onePage(): array
+    {
+        return ['posts' => [219], 'revisions' => [219], 'terms' => [], 'term_taxonomy' => [], 'options' => [], 'rewrite' => false,
+            'elementor' => ['posts' => [219], 'global' => false]];
+    }
+
+    /** Elementor, wie die Nacharbeiten es sehen: clear_cache() steht im Protokoll der Aufrufe. */
+    private static function elementor(): void
+    {
+        eval('namespace Elementor { class Plugin { public static $instance; } }');
+        \Elementor\Plugin::$instance = (object) ['files_manager' => new class {
+            public function clear_cache(): void
+            {
+                \wpsync_note('elementor clear_cache');
+            }
+        }];
+    }
+
+    /** @return array{0: string, 1: ContentMemory} Ordner uploads und Store mit dem Cache zweier Elementor-Seiten */
+    private static function twoPages(): array
+    {
+        $dir = sys_get_temp_dir() . '/wpsync-postactions-' . bin2hex(random_bytes(4));
+        mkdir($dir . '/elementor/css', 0777, true);
+        file_put_contents($dir . '/elementor/css/post-219.css', 'x');
+        file_put_contents($dir . '/elementor/css/post-220.css', 'y');
+        file_put_contents($dir . '/elementor/css/global.css', 'g');
+        touch($dir . '/elementor/css/post-220.css', 1700000000);
+        $meta = [];
+        foreach ([219, 220] as $id) {
+            foreach (['_elementor_css', '_elementor_element_cache', '_elementor_page_assets', '_elementor_data'] as $key) {
+                $meta[$id . "\0" . $key] = ['values' => [$key . ' von ' . $id]];
+            }
+        }
+        return [$dir, new ContentMemory(['postmeta' => $meta, 'options' => ['_elementor_global_css' => ['option_value' => 'x']]])];
+    }
+
+    /**
+     * Spec 0.9.1 E, AC-233/AC-234: ein Paket (und seine Rücknahme – dieselben changes), das nur die Seite X
+     * ändert, leert nur deren Meta und CSS-Datei. Die unberührte Seite Y behält Meta-Wert und Datei samt mtime.
+     */
+    public function testElementorCacheOfOnlyTheTouchedPosts(): void
+    {
+        self::elementor();
+        list($dir, $store) = self::twoPages();
+        $steps = ContentPostActions::live(self::onePage(), $this->db, '', $store, $dir);
+        $this->assertSame([
+            ['step' => 'object_cache', 'ok' => true],
+            ['step' => 'elementor_css', 'ok' => true, 'scope' => 'posts', 'count' => 1],
+            ['step' => 'revisions', 'ok' => true],
+        ], $steps);
+        $this->assertNotContains('elementor clear_cache', $this->calls(), 'nicht die ganze Site');
+        // Der Meta-Cache des Beitrags, nachdem die Meta per SQL gingen.
+        $this->assertSame(['clean_post_cache [219]', 'wp_cache_delete ["alloptions","options"]', 'wp_cache_delete ["notoptions","options"]',
+            'wp_cache_delete ["219","post_meta"]', 'wp_save_post_revision [219]'], $this->calls());
+        $this->assertSame(["219\0_elementor_data", "220\0_elementor_css", "220\0_elementor_element_cache", "220\0_elementor_page_assets", "220\0_elementor_data"], array_keys($store->data['postmeta']));
+        $this->assertSame(['_elementor_css von 220'], $store->data['postmeta']["220\0_elementor_css"]['values']);
+        $this->assertArrayHasKey('_elementor_global_css', $store->data['options']);
+        $this->assertFileDoesNotExist($dir . '/elementor/css/post-219.css');
+        $this->assertSame(1700000000, filemtime($dir . '/elementor/css/post-220.css'));
+        $this->assertFileExists($dir . '/elementor/css/global.css');
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
+    /** AC-235, AC-236: Template, Kit oder Option von Elementor – global, mit der API von Elementor wie bisher. */
+    public function testElementorCacheGlobalWhenThePackageReachesFurther(): void
+    {
+        self::elementor();
+        list($dir, $store) = self::twoPages();
+        $changes = ['elementor' => ['posts' => [], 'global' => true]] + self::onePage();
+        $steps   = ContentPostActions::live($changes, $this->db, '', $store, $dir);
+        $this->assertContains(['step' => 'elementor_css', 'ok' => true, 'scope' => 'global'], $steps);
+        $this->assertContains('elementor clear_cache', $this->calls());
+        $this->assertCount(8, $store->data['postmeta'], 'global räumt Elementor selbst');
+        // Ohne Store lässt sich nicht gezielt leeren: dann alles.
+        $GLOBALS['wpsync_post_actions'] = [];
+        $this->assertContains(['step' => 'elementor_css', 'ok' => true, 'scope' => 'global'], ContentPostActions::live(self::onePage(), $this->db, ''));
+        $this->assertContains('elementor clear_cache', $this->calls());
+        // Ein Fehlschlag steht im Ergebnis – mit seinem Umfang.
+        $store->failWrite = 1;
+        $this->assertContains(['step' => 'elementor_css', 'ok' => false, 'scope' => 'posts', 'count' => 1], ContentPostActions::live(self::onePage(), $this->db, '', $store, $dir));
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
+    /** AC-237, AC-240: ohne berührten Beitrag und ohne Option von Elementor kein Schritt – ebenso ohne Elementor. */
+    public function testNoElementorStepWithoutATouchedPostOrWithoutElementor(): void
+    {
+        list($dir, $store) = self::twoPages();
+        // Elementor ist nicht aktiv (AC-240).
+        $this->assertNotContains('elementor_css', array_column(ContentPostActions::live(self::onePage(), $this->db, '', $store, $dir), 'step'));
+        $this->assertNotContains('elementor_css', array_column(ContentPostActions::staging(self::onePage(), $store, $this->db, '', $dir, false), 'step'));
+        self::elementor();
+        // Nur ein Term – und ein Beitrag, an dem nur eine Zuordnung hängt (posts nennt ihn, elementor nicht).
+        $term = ['posts' => [219], 'revisions' => [], 'terms' => [5], 'term_taxonomy' => [], 'options' => ['blogname'], 'rewrite' => false,
+            'elementor' => ['posts' => [], 'global' => false]];
+        $this->assertNotContains('elementor_css', array_column(ContentPostActions::live($term, $this->db, '', $store, $dir), 'step'));
+        $this->assertNotContains('elementor_css', array_column(ContentPostActions::staging($term, $store, $this->db, '', $dir, true), 'step'));
+        $this->assertNotContains('elementor clear_cache', $this->calls());
+        $this->assertCount(8, $store->data['postmeta']);
+        $this->assertFileExists($dir . '/elementor/css/post-219.css');
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
+    /** AC-239: in der Kopie dasselbe – gezielt über Store und Datei, ohne eine Funktion von Live. */
+    public function testElementorCacheInTheStagingCopy(): void
+    {
+        list($dir, $store) = self::twoPages();
+        $steps = ContentPostActions::staging(self::onePage(), $store, $this->db, '', $dir, true);
+        $this->assertSame([['step' => 'elementor_css', 'ok' => true, 'scope' => 'posts', 'count' => 1]], $steps);
+        $this->assertSame(["219\0_elementor_data", "220\0_elementor_css", "220\0_elementor_element_cache", "220\0_elementor_page_assets", "220\0_elementor_data"], array_keys($store->data['postmeta']));
+        $this->assertArrayHasKey('_elementor_global_css', $store->data['options']);
+        $this->assertFileDoesNotExist($dir . '/elementor/css/post-219.css');
+        $this->assertSame(1700000000, filemtime($dir . '/elementor/css/post-220.css'));
+        $this->assertSame([], $this->calls(), 'keine WordPress-Funktion von Live für die Kopie');
+
+        // Global (AC-235 in der Kopie): alle drei Meta jeder Seite, die Optionen, jede CSS-Datei (E4).
+        $steps = ContentPostActions::staging(['elementor' => ['posts' => [], 'global' => true]] + self::onePage(), $store, $this->db, '', $dir, true);
+        $this->assertSame([['step' => 'elementor_css', 'ok' => true, 'scope' => 'global']], $steps);
+        $this->assertSame(["219\0_elementor_data", "220\0_elementor_data"], array_keys($store->data['postmeta']));
+        $this->assertSame([], $store->data['options']);
+        $this->assertSame([], glob($dir . '/elementor/css/*.css'));
         exec('rm -rf ' . escapeshellarg($dir));
     }
 

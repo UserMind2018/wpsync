@@ -55,6 +55,8 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertSame([1000002, 5], $result['changes']['term_taxonomy']);
         $this->assertSame(['blogname', 'page_on_front'], $result['changes']['options']);
         $this->assertTrue($result['changes']['rewrite']);
+        // Spec 0.9.1 E1: für elementor_css zählen nur posts- und postmeta-Zeilen – hier drei Seiten, kein Template.
+        $this->assertSame(['posts' => [219, 220, 1000001], 'global' => false], $result['changes']['elementor']);
     }
 
     /** N1: sind die Vorher-Zustände zu gross, wird nichts geschrieben – auch kein before.json. */
@@ -470,5 +472,21 @@ final class ContentApplyTest extends ContentApplyCase
         $this->assertSame(['seite-220__trashed', '220', 'page', '0'], $seen);
         $this->assertSame('seite-220__trashed-2', $this->store->data['posts']['220']['post_name']);
         $this->assertSame(['seite-220'], $this->store->data['postmeta']["220\0_wp_desired_post_slug"]['values']);
+    }
+
+    /** Spec 0.9.1 E1, AC-237: eine Zuordnung allein berührt für Elementor keinen Beitrag; changes.posts nennt ihn weiter. */
+    public function testARelationAloneTouchesNoPostForElementor(): void
+    {
+        $result = $this->apply([
+            ContentFixtures::row('update', 'term_relationships', "219\0category", $this->h('term_relationships', "219\0category"), ['values' => []]),
+            ContentFixtures::row('update', 'options', 'blogname', $this->h('options', 'blogname'), ['option_value' => 'Kunde GmbH']),
+        ]);
+        $this->assertSame([219], $result['changes']['posts']);
+        $this->assertSame(['posts' => [], 'global' => false], $result['changes']['elementor']);
+        // Nur die Meta einer Seite: die Seite zählt.
+        $result = $this->apply([
+            ContentFixtures::row('update', 'postmeta', "219\0_elementor_data", $this->h('postmeta', "219\0_elementor_data"), ['values' => ['[]']]),
+        ]);
+        $this->assertSame(['posts' => [219], 'global' => false], $result['changes']['elementor']);
     }
 }

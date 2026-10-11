@@ -153,7 +153,9 @@ func TestPushCommitFullReturnsStampsAndContent(t *testing.T) {
 		h := strings.Repeat("a", 64)
 		w.Write([]byte(`{"next":null,"stamps":{"plugins/x":{"a.php":{"size":1,"mtime":2}}},"content":{"rows":2,
 "after":[{"t":"posts","k":"219","h":"` + h + `"},{"t":"postmeta","k":"219\u0000_x","h":null},{"t":"posts","k":"220","h":"kein hash"}],
-"post_actions":[{"step":"object_cache","ok":true},{"step":"Elementor CSS!","ok":true},{"step":"revisions","ok":false}],"seconds":0.42}}`))
+"post_actions":[{"step":"object_cache","ok":true},{"step":"Elementor CSS!","ok":true},{"step":"revisions","ok":false},
+{"step":"elementor_css","ok":true,"scope":"posts","count":3},{"step":"elementor_css","ok":true,"scope":"global","count":9},
+{"step":"elementor_css","ok":true,"scope":"<b>","count":-1}],"seconds":0.42}}`))
 	}))
 	defer srv.Close()
 	c, _ := newTestClient(srv.URL)
@@ -168,7 +170,9 @@ func TestPushCommitFullReturnsStampsAndContent(t *testing.T) {
 	if len(res.Content.After) != 2 || res.Content.After[1].H != nil || res.Content.After[1].K != "219\x00_x" {
 		t.Errorf("after = %+v", res.Content.After)
 	}
-	if !reflect.DeepEqual(res.Content.PostActions, []PostAction{{Step: "object_cache", OK: true}, {Step: "revisions", OK: false}}) {
+	// Scope and count of elementor_css (agent 0.9.1): only the two known words, a count only with "posts".
+	if !reflect.DeepEqual(res.Content.PostActions, []PostAction{{Step: "object_cache", OK: true}, {Step: "revisions", OK: false},
+		{Step: "elementor_css", OK: true, Scope: "posts", Count: 3}, {Step: "elementor_css", OK: true, Scope: "global"}, {Step: "elementor_css", OK: true}}) {
 		t.Errorf("post actions = %+v", res.Content.PostActions)
 	}
 	stamps, err := c.PushCommit("p_20261005_0123456789ab")
