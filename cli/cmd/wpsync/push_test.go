@@ -84,6 +84,14 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"require_rescue_db_old", &push.RescueDBError{Reason: "agent_outdated"}, cliout.ExitUnknown, "Agent 0.8.0"},
 		{"require_rescue_db_expires", fmt.Errorf("Push p_x nicht getauscht – er verfällt auf dem Server: %w", &push.RescueDBError{Reason: "probe_failed"}), cliout.ExitUnknown, "verfällt auf dem Server"},
 		{"rollback_busy", &agentapi.APIError{Status: 423, Code: "wpsync_push_busy", Message: "Für Push p_x läuft gerade eine Rücknahme oder sein Commit – gleich noch einmal versuchen."}, cliout.ExitBusy, "gleich noch einmal versuchen"},
+		// Spec 0.9.1 F3, H3: der Push eines anderen Geräts und ein confirm ohne quittierten Inhalts-Schritt.
+		{"foreign_device", &agentapi.APIError{Status: 404, Code: "wpsync_push_unknown", Message: "Push p_x stammt von einem anderen Gerät (Studio Büro) – zurücknehmen kann ihn nur dieses Gerät oder ein Administrator unter Werkzeuge → wpsync.", Reason: "push_foreign_device", Device: "Studio Büro"},
+			cliout.ExitUnknown, "von einem anderen Gerät (Studio Büro)"},
+		{"foreign_device_admin", &agentapi.APIError{Status: 404, Code: "wpsync_push_unknown", Message: "Push p_x stammt von einem anderen Gerät (Studio Büro) – zurücknehmen kann ihn nur dieses Gerät oder ein Administrator unter Werkzeuge → wpsync.", Reason: "push_foreign_device", Device: "Studio Büro"},
+			cliout.ExitUnknown, "https://kunde.example/wp-admin/tools.php?page=wpsync"},
+		{"unknown_push", &agentapi.APIError{Status: 404, Code: "wpsync_push_unknown", Message: "Unbekannter Push."}, cliout.ExitUnknown, "Unbekannter Push."},
+		{"content_pending", &agentapi.APIError{Status: 409, Code: "wpsync_push_state", Message: "Der Inhalts-Schritt von Push p_x ist nicht quittiert – erst `wpsync rollback <site> p_x`, dann neu pushen.", Reason: "content_pending"},
+			cliout.ExitUnknown, "erst `wpsync rollback kunde p_x`, dann neu pushen"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1255,6 +1255,12 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
+	case errors.As(err, &apiErr) && apiErr.Reason == "push_foreign_device":
+		// The agent names the device; where an administrator takes the push back, the CLI knows (Spec 0.9.1 F3).
+		return cliout.Hint(err, fmt.Sprintf("%s\n  Im WP-Admin zurückrollen: %s", agentText(apiErr.Message), adminURL(site)))
+	case errors.As(err, &apiErr) && apiErr.Reason == "content_pending":
+		// The agent does not know the local name of the site (Spec 0.9.1 H3).
+		return cliout.Hint(err, strings.Replace(agentText(apiErr.Message), "<site>", site.Name, 1))
 	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_") || strings.HasPrefix(apiErr.Code, "wpsync_content_") || strings.HasPrefix(apiErr.Code, agentapi.PluginsCodePrefix)):
 		return cliout.Hint(err, agentText(apiErr.Message))
 	}

@@ -51,6 +51,11 @@ type APIError struct {
 	// it is about, and – without a rescue envelope – why there is none. Never a value of the option.
 	Plugins []PluginRefusal
 	Detail  string
+	// Reason and Device: the case within Code the agent names in its error data (agent 0.9.1) –
+	// push_foreign_device with the name of the device that pushed, content_pending. Empty from an
+	// older agent.
+	Reason string
+	Device string
 }
 
 func (e *APIError) Error() string {
@@ -288,6 +293,9 @@ func (c *Client) wrapBody(resp *http.Response, route string) (*http.Response, er
 	return resp, nil
 }
 
+// maxDeviceRunes: the agent stores a device name with at most 100 characters (Pairing::device()).
+const maxDeviceRunes = 100
+
 // readAPIError reads a non-200 answer. Code and message come from the site; they are cleaned here,
 // once for every caller, so no error output can steer the terminal (M3).
 func readAPIError(resp *http.Response) error {
@@ -314,6 +322,8 @@ func readAPIError(resp *http.Response) error {
 			Tables     []string        `json:"tables"`
 			Plugins    []PluginRefusal `json:"plugins"`
 			Detail     string          `json:"detail"`
+			Reason     string          `json:"reason"`
+			Device     string          `json:"device"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
@@ -331,6 +341,15 @@ func readAPIError(resp *http.Response) error {
 				if e.Detail = wpErr.Data.Detail; !stepRe.MatchString(e.Detail) {
 					e.Detail = "unknown"
 				}
+			}
+		}
+		if stepRe.MatchString(wpErr.Data.Reason) {
+			e.Reason = wpErr.Data.Reason
+			// A name an administrator chose: readable, but never more than the agent stores.
+			if device := []rune(CleanText(wpErr.Data.Device)); len(device) > maxDeviceRunes {
+				e.Device = string(device[:maxDeviceRunes])
+			} else {
+				e.Device = string(device)
 			}
 		}
 		return e

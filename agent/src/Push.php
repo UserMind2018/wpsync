@@ -985,7 +985,20 @@ final class Push
             // hat die Zeile eben neu gelesen. Der gepushte Code steht dann unverändert – bestätigen ist
             // richtig und der einzige Ausweg, sonst sperrte der Push jeden weiteren. Gibt es den Datensatz,
             // muss er den Status auch tragen.
-            if (PushRescue::read($dirs[1], $push['push_id']) !== null && !PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED)) {
+            $record = PushRescue::read($dirs[1], $push['push_id']);
+            // Der Inhalts-Schritt wurde nie quittiert (Spec 0.9.1 H1, P4 Q8): kam die Transaktion nicht an, würde
+            // hier ein halber Satz bestätigt – Code ohne Inhalte bzw. ohne Liste – und der Notfallweg geschlossen.
+            // Erst die Rücknahme; sie entscheidet am Abdruck, was von den Inhalten wirklich steht. Hat rescue.php
+            // den Push schon zurückgenommen, griff oben der Ausweg content_kept (H2).
+            if ($record !== null && $record['status'] === PushRescue::COMMITTED
+                && is_array($record['content'] ?? null) && ($record['content']['state'] ?? '') === PushRescue::CONTENT_PENDING) {
+                return new \WP_Error(
+                    'wpsync_push_state',
+                    'Der Inhalts-Schritt von Push ' . $push['push_id'] . ' ist nicht quittiert – erst `wpsync rollback <site> ' . $push['push_id'] . '`, dann neu pushen.',
+                    ['status' => 409, 'reason' => 'content_pending']
+                );
+            }
+            if ($record !== null && !PushRescue::setStatus($dirs[1], $push['push_id'], PushRescue::CONFIRMED)) {
                 return self::error('wpsync_push_state', 'Push ' . $push['push_id'] . ' liess sich nicht bestätigen – noch einmal versuchen.', 409);
             }
             // Einen bestätigten Push nimmt rescue.php nie zurück: der Umschlag mit den Zugangsdaten hat ausgedient (P3 R14).
@@ -1707,10 +1720,28 @@ final class Push
     {
         $pushId = is_string($params['push_id'] ?? null) ? $params['push_id'] : '';
         $push   = preg_match(PushRescue::ID, $pushId) === 1 ? Store::getPush($pushId) : null;
-        if ($push === null || $push['key_id'] !== $keyId) {
+        if ($push === null) {
             return self::error('wpsync_push_unknown', 'Unbekannter Push.', 404);
         }
+        if ($push['key_id'] !== $keyId) {
+            // Den Push gibt es, er gehört nur einem anderen Gerät (Spec 0.9.1 F1): Status und Code bleiben – alte
+            // Clients reagieren wie bisher –, dazu der Grund und der Name des Geräts. Den nennen pending und das
+            // Protokoll einem gekoppelten Gerät ohnehin.
+            $device = self::deviceName((string) $push['device']);
+            return new \WP_Error(
+                'wpsync_push_unknown',
+                'Push ' . $push['push_id'] . ' stammt von einem anderen Gerät (' . $device . ') – zurücknehmen kann ihn nur dieses Gerät oder ein Administrator unter Werkzeuge → wpsync.',
+                ['status' => 404, 'reason' => 'push_foreign_device', 'device' => $device]
+            );
+        }
         return $push;
+    }
+
+    /** Ein Gerätename aus der Datenbank für eine Antwort: ohne Steuerzeichen, höchstens 100 Zeichen. */
+    private static function deviceName(string $name): string
+    {
+        $clean = preg_replace('/[\x00-\x1f\x7f]/u', '', $name);
+        return Pairing::device(is_string($clean) ? $clean : self::printable($name));
     }
 
     /**

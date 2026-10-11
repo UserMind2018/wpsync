@@ -233,3 +233,27 @@ func TestContentRefusalsCarryTotalStateBytesAndTables(t *testing.T) {
 		}
 	}
 }
+
+// Spec 0.9.1 F3, H3: a push of another device and a confirm the agent refuses keep exit 1; the
+// JSON error names the agent's reason and the device.
+func TestAgentReasonAndDeviceReachTheFailure(t *testing.T) {
+	foreign := &agentapi.APIError{Status: 404, Code: "wpsync_push_unknown", Message: "Push p_x stammt von einem anderen Gerät (Studio Büro)", Reason: "push_foreign_device", Device: "Studio Büro"}
+	for _, err := range []error{foreign, Hint(fmt.Errorf("Push p_x: %w", foreign), "Text")} {
+		if f := Classify(err); f.Exit != ExitUnknown || f.Reason != "push_foreign_device" || f.Device != "Studio Büro" || f.AdminURL != "" {
+			t.Errorf("failure = %+v", f)
+		}
+	}
+	if f := Classify(&agentapi.APIError{Status: 404, Code: "wpsync_push_unknown", Message: "Unbekannter Push."}); f.Exit != ExitUnknown || f.Reason != "" || f.Device != "" {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := Classify(&agentapi.APIError{Status: 409, Code: "wpsync_push_state", Message: "nicht quittiert", Reason: "content_pending"}); f.Exit != ExitUnknown || f.Reason != "content_pending" {
+		t.Errorf("failure = %+v", f)
+	}
+	// The reasons the CLI assigns itself win; an exit code of its own carries no reason.
+	if f := Classify(&agentapi.APIError{Status: 409, Code: "wpsync_staging_state", Reason: "anders"}); f.Reason != "staging_state" {
+		t.Errorf("failure = %+v", f)
+	}
+	if f := Classify(&agentapi.APIError{Status: 403, Code: "wpsync_push_window", Reason: "anders"}); f.Exit != ExitPushWindowClosed || f.Reason != "" {
+		t.Errorf("failure = %+v", f)
+	}
+}

@@ -280,3 +280,41 @@ func TestContentErrorsCarryTotalStateBytesAndTables(t *testing.T) {
 		t.Errorf("failure = %+v", f)
 	}
 }
+
+// Spec 0.9.1 F3, H1: reason and device of a refusal come from the error data – cleaned, and only
+// in the shape the agent uses.
+func TestErrorsCarryReasonAndDevice(t *testing.T) {
+	body := `{"code":"wpsync_push_unknown","message":"Push p_x stammt von einem anderen Gerät (Studio Büro)","data":{"status":404,"reason":"push_foreign_device","device":"Studio Büro"}}`
+	status := http.StatusNotFound
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := newTestClient(srv.URL)
+
+	var apiErr *APIError
+	_, err := c.PushRollbackNotes("p_20261005_0123456789ab")
+	if !errors.As(err, &apiErr) || apiErr.Status != 404 || apiErr.Reason != "push_foreign_device" || apiErr.Device != "Studio Büro" {
+		t.Fatalf("err = %#v", err)
+	}
+	// An invented push: no reason, no device.
+	body = `{"code":"wpsync_push_unknown","message":"Unbekannter Push.","data":{"status":404}}`
+	if _, err = c.PushRollbackNotes("p_20261005_0123456789ab"); !errors.As(err, &apiErr) || apiErr.Reason != "" || apiErr.Device != "" {
+		t.Fatalf("err = %#v", err)
+	}
+	// confirm of a push whose content step was never acknowledged.
+	body, status = `{"code":"wpsync_push_state","message":"nicht quittiert","data":{"status":409,"reason":"content_pending"}}`, http.StatusConflict
+	if _, _, err = c.PushConfirmState("p_20261005_0123456789ab"); !errors.As(err, &apiErr) || apiErr.Reason != "content_pending" || apiErr.Device != "" {
+		t.Fatalf("err = %#v", err)
+	}
+	// What does not look like a reason is dropped; a device is cleaned and cut, and without a reason not taken.
+	body = `{"code":"wpsync_push_unknown","message":"x","data":{"status":409,"reason":"Nicht <b>so</b>","device":"y"}}`
+	if _, err = c.PushRollbackNotes("p_20261005_0123456789ab"); !errors.As(err, &apiErr) || apiErr.Reason != "" || apiErr.Device != "" {
+		t.Fatalf("err = %#v", err)
+	}
+	body = `{"code":"wpsync_push_unknown","message":"x","data":{"status":409,"reason":"push_foreign_device","device":"a\u001b[31m` + strings.Repeat("ä", 300) + `"}}`
+	if _, err = c.PushRollbackNotes("p_20261005_0123456789ab"); !errors.As(err, &apiErr) || strings.ContainsRune(apiErr.Device, 0x1b) || len([]rune(apiErr.Device)) != 100 {
+		t.Fatalf("device = %q", apiErr.Device)
+	}
+}
