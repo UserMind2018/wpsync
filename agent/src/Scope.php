@@ -26,6 +26,13 @@ final class Scope
     private $uploadsSince = '';
     /** @var bool */
     private $plainPii = false;
+    /** @var PathPatterns */
+    private $paths;
+
+    public function __construct()
+    {
+        $this->paths = PathPatterns::fromList([]);
+    }
 
     /**
      * @param mixed $raw JSON-Objekt aus dem Request; null oder leer = alles
@@ -63,6 +70,7 @@ final class Scope
             throw new \InvalidArgumentException('plain_pii must be a boolean');
         }
         $scope->plainPii = $plain;
+        $scope->paths    = PathPatterns::fromList($raw['exclude_paths'] ?? []);
         return $scope;
     }
 
@@ -81,6 +89,22 @@ final class Scope
     public function excludedPostTypes(): array
     {
         return $this->postTypes;
+    }
+
+    /**
+     * Ausschluss-Muster des Profils (Spec 0.10.0). Getrennt von excludesPath, weil die
+     * Staging-Kopie vollständig bleibt (C5): sie fragt nur excludesPath.
+     *
+     * @param string $rel relativ zu wp-content
+     */
+    public function excludesPattern(string $rel, bool $isDir): bool
+    {
+        return $this->paths->matches($rel, $isDir);
+    }
+
+    public function patterns(): PathPatterns
+    {
+        return $this->paths;
     }
 
     /** Pfad relativ zu wp-content ohne führenden Slash; entschieden wird nur auf der obersten Ebene. */
