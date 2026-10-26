@@ -174,7 +174,11 @@ final class PushSwap
             @symlink((string) readlink($from), $to);
             return;
         }
-        if (is_file($from) && @copy($from, $to)) {
+        if (is_file($from)) {
+            // Übernommenes fehlt sonst still auf dem Ziel (Spec 0.10.0 E1) – lieber den Push abbrechen.
+            if (!@copy($from, $to)) {
+                throw new \RuntimeException('cannot carry ' . basename($from));
+            }
             chmod($to, fileperms($from) & 0777);
             touch($to, (int) filemtime($from));
         }

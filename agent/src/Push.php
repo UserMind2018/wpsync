@@ -233,6 +233,20 @@ final class Push
         if ($units instanceof \WP_Error) {
             return $units;
         }
+        // Spec 0.10.0 E: Ausschluss-Muster des Profils – im Ziel weder neu noch gelöscht.
+        try {
+            $excluded = PathPatterns::fromList($params['exclude_paths'] ?? []);
+        } catch (\InvalidArgumentException $e) {
+            return self::error('wpsync_push_excluded', 'Ungültige Ausschluss-Muster: ' . $e->getMessage(), 400);
+        }
+        foreach ($units as $unit) {
+            $prefix = $unit['path'] === PushUploads::UNIT ? 'uploads' : $unit['path'];
+            foreach (array_keys($unit['files']) as $rel) {
+                if ($excluded->matches($prefix . '/' . (string) $rel, false)) {
+                    return self::error('wpsync_push_excluded', 'Ausgeschlossen, nicht pushbar: wp-content/' . self::printable($prefix . '/' . (string) $rel), 400);
+                }
+            }
+        }
         $now = time();
         self::sync();
         self::prune($now);
@@ -264,7 +278,7 @@ final class Push
             }
             $exists    = is_dir($dir);
             $base      = $target === 'staging' ? self::copyBase($live . '/' . $unit['path'], $dir, $unit['path'], $unit['base']) : $unit['base'];
-            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path']) : [], $base);
+            $conflicts = PushManifest::conflicts($exists ? PushManifest::stamps($dir, $unit['path'], $excluded) : [], $base);
             $writable  = is_writable(dirname($dir)) && (!$exists || is_writable($dir));
             $plans[]   = [
                 'path'      => $unit['path'],
@@ -402,7 +416,7 @@ final class Push
                 'path'        => $unit['path'],
                 'files'       => $unit['files'],
                 'need'        => $plans[$i]['need'],
-                'carried'     => $plans[$i]['exists'] && $unit['path'] !== PushUploads::UNIT ? PushManifest::carried($dir, $unit['path']) : [],
+                'carried'     => $plans[$i]['exists'] && $unit['path'] !== PushUploads::UNIT ? PushManifest::carried($dir, $unit['path'], $excluded) : [],
                 'exists'      => $plans[$i]['exists'],
                 'old_version' => $plans[$i]['version'],
             ];
@@ -424,6 +438,8 @@ final class Push
             'key_id'   => $keyId,
             'key_hash' => hash('sha256', $rescueKey),
             'units'    => $planned,
+            // Für die Stempel nach dem Tausch (Spec 0.10.0 E3).
+            'exclude_paths' => PathPatterns::normalize((array) ($params['exclude_paths'] ?? [])),
         ];
         // Das geprüfte Paket kommt in den Arbeitsordner des Pushs (bei Staging: in die Kopie) – der
         // Commit wendet genau diese Datei an, auch wenn die Ablage inzwischen verfallen ist.
@@ -735,8 +751,10 @@ final class Push
         PushSwap::resetCaches();
         PushSwap::remove($base . '/stage');
 
-        $stamps  = [];
-        $summary = [];
+        // Ausgeschlossenes steht nicht in der neuen Baseline (Spec 0.10.0 E3); ein Plan von 0.9.x hat keine Liste.
+        $excluded = PathPatterns::fromList($plan['exclude_paths'] ?? []);
+        $stamps   = [];
+        $summary  = [];
         foreach ($plan['units'] as $unit) {
             if ($unit['path'] === PushUploads::UNIT) {
                 $stamps[PushUploads::UNIT] = (object) PushUploads::stamps($content, $uploads);
@@ -744,7 +762,7 @@ final class Push
                 continue;
             }
             $dir                   = $content . '/' . $unit['path'];
-            $stamps[$unit['path']] = (object) PushManifest::stamps($dir, $unit['path']);
+            $stamps[$unit['path']] = (object) PushManifest::stamps($dir, $unit['path'], $excluded);
             $summary[]             = [
                 'path'        => $unit['path'],
                 'exists'      => $unit['exists'],

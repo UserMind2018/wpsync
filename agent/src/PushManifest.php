@@ -14,10 +14,13 @@ final class PushManifest
      *
      * @return array<string, array{size: int, mtime: int}>
      */
-    public static function stamps(string $dir, string $unit): array
+    public static function stamps(string $dir, string $unit, ?PathPatterns $ex = null): array
     {
         $out = [];
         foreach (self::walk($dir, '', false) as $rel) {
+            if ($ex !== null && $ex->matches($unit . '/' . $rel, false)) {
+                continue; // Spec 0.10.0 E3: weder neu noch gelöscht
+            }
             $full = $dir . '/' . $rel;
             $size = (int) @filesize($full);
             if (Excludes::path($unit . '/' . $rel, $size) === null) {
@@ -30,16 +33,18 @@ final class PushManifest
 
     /**
      * Dateien, die in keiner Baseline stehen und den Tausch trotzdem überleben müssen:
-     * feste Ausschlüsse, geschützte Dateien, Symlinks.
+     * feste Ausschlüsse, geschützte Dateien, Symlinks und die Ausschluss-Muster des Profils
+     * (Spec 0.10.0 E1).
      *
      * @return list<string>
      */
-    public static function carried(string $dir, string $unit): array
+    public static function carried(string $dir, string $unit, ?PathPatterns $ex = null): array
     {
         $out = [];
         foreach (self::walk($dir, '', true) as $rel) {
             $full = $dir . '/' . $rel;
-            if (is_link($full) || PushUnits::isProtected($unit, $rel) || Excludes::path($unit . '/' . $rel, (int) @filesize($full)) !== null) {
+            if (is_link($full) || PushUnits::isProtected($unit, $rel) || Excludes::path($unit . '/' . $rel, (int) @filesize($full)) !== null
+                || ($ex !== null && $ex->matches($unit . '/' . $rel, false))) {
                 $out[] = $rel;
             }
         }
