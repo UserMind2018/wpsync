@@ -71,7 +71,8 @@ func StatusReport(o Options) (*StatusResult, error) {
 	for _, f := range changed {
 		res.FilesChanged = append(res.FilesChanged, f.Path)
 	}
-	res.FilesDeleted = append(res.FilesDeleted, inScope(deleted, p.scope)...)
+	gone, _ := splitDeleted(deleted, p.scope, p.keep)
+	res.FilesDeleted = append(res.FilesDeleted, gone...)
 	for _, t := range ChangedTables(p.delta.Tables, base) {
 		res.Tables = append(res.Tables, TableChange{Name: t.Name, Mode: t.Mode, PreviousMode: base.Mode(t.Name)})
 	}

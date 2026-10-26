@@ -3,6 +3,43 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.10.0] – 2026-10-26 · Agent 0.10.0
+
+### Ordner und Dateien ausschliessen
+
+**Agent und CLI ändern sich.** Alle neuen Felder sind zusätzlich. CLI 0.10.0 zieht auch von Agent
+0.9.x und filtert dann selbst; ein Push, dessen Ausschlüsse eine Code-Einheit berühren können,
+braucht Agent 0.10.0.
+
+**Neu**
+- `paths.exclude` im Profil: Muster relativ zu `wp-content/` (`uploads/videos/`,
+  `uploads/2020/film.mp4`, `*.mp4`, `uploads/*/originals/`), case-insensitiv, gesetzt mit
+  `wpsync scan … --preset … --exclude-path <muster>` (mehrfach, ersetzt die Liste) und geleert mit
+  `--no-exclude-paths`; ein Scan ohne die Schalter behält die Liste. `scan --json` nennt
+  `profile.paths.exclude` immer als Liste
+- Pull: der Agent schickt `exclude_paths` im Scope mit und betritt ausgeschlossene Ordner nicht;
+  bei einem Agent vor 0.10.0 filtert die CLI und sagt es einmal. Lokale Kopien, die ein neuer
+  Ausschluss trifft, bleiben liegen und werden genannt (`--json`: `kept_excluded`)
+- Push: ausgeschlossene Dateien sind weder neu noch gelöscht. Die CLI schickt `exclude_paths`
+  im Begin, der Agent übernimmt solche Dateien beim Tausch aus dem Ziel, lässt sie aus Konflikten
+  und neuen Stempeln und lehnt ein Manifest ab, das welche nennt (`400 wpsync_push_excluded`)
+- Infosheet: `dirs` und `big_files` als Kandidaten zum Ausschliessen; Befunde tragen
+  `transferred` und `reason`. Der Scan zeigt die fünf grössten Ordner, die noch übertragen werden,
+  und bei Agent 0.10.0 „wird nicht übertragen“ an den Befunden
+
+**Geändert**
+- Ganze Plugins, Themes und `mu-plugins/` lassen sich nicht über Pfade ausschliessen (dafür
+  `--exclude-plugin`), auch nicht per Platzhalter (`*s/`, `*/<slug>/`); Unterordner wie
+  `plugins/<slug>/cache/` schon. Ein Muster nur aus `*`/`?` wird abgelehnt
+- Ein Push bricht nach dem Probelauf ab, wenn der Agent älter als 0.10.0 ist und ein Muster eine
+  der Einheiten berühren kann (Exit `agent_outdated`); eine Datei aus `--uploads` unter einem
+  Ausschluss bricht vor dem ersten Request ab (Exit 2)
+- Gespeicherte Ausschlüsse, die nicht mehr gültig sind, stoppen einen Push
+
+**Behoben**
+- Agent: eine Datei, die beim Tausch einer Einheit übernommen werden muss und sich nicht
+  kopieren lässt, fehlte danach still auf der Site; der Push bricht jetzt vor dem Tausch ab
+
 ## [0.9.1] – 2026-10-26 · Agent 0.9.1
 
 ### Elementor-Cache gezielt, fremder Push, Gerätename, `confirm`

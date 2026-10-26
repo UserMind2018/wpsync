@@ -49,7 +49,7 @@ func TestRollbackRestoresTheBaseline(t *testing.T) {
 	if len(commits) != 1 || !strings.Contains(commits[0], "rollback "+testID) {
 		t.Errorf("commits = %v", commits)
 	}
-	if units, _, _ := Scan(siteDir+"/public", base); len(units) != 1 {
+	if units, _, _ := Scan(siteDir+"/public", base, nil); len(units) != 1 {
 		t.Errorf("the local edit must count as changed again: %v", units)
 	}
 }

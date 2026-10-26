@@ -135,7 +135,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
-| `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ] [--table <tabelle>=structure\|skip]…` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. Nur mit `--preset`: `--uploads-since`, `--exclude-plugin <slug>`, `--exclude-post-type <typ>` und `--table` (alle drei mehrfach), siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage). |
+| `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ] [--table <tabelle>=structure\|skip]… [--exclude-path <muster>]… [--no-exclude-paths]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. Nur mit `--preset`: `--uploads-since`, `--exclude-plugin <slug>`, `--exclude-post-type <typ>`, `--table` und `--exclude-path <muster>` (alle vier mehrfach) sowie `--no-exclude-paths`, siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage) und [Ordner und Dateien ausschliessen](#ordner-und-dateien-ausschliessen). |
 | `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
@@ -191,9 +191,12 @@ Pull so scannt, gibt die Abweichungen deshalb jedes Mal mit:
 | `--exclude-post-type <typ>` | Post-Typ nicht ziehen (`post_types.exclude`) |
 | `--uploads-since <JJJJ>\|alle` | Uploads ab diesem Jahr bzw. alle Jahre |
 | `--table <tabelle>=structure\|skip` | Tabelle nur als Struktur (`structure`) oder gar nicht (`skip`) ziehen (`tables.overrides`) |
+| `--exclude-path <muster>` | Ordner oder Dateien unter `wp-content/` weder ziehen noch beim Push anfassen (`paths.exclude`), siehe [unten](#ordner-und-dateien-ausschliessen) |
+| `--no-exclude-paths` | gespeicherte Ausschlüsse leeren |
 
-Alle bis auf `--uploads-since` sind mehrfach möglich; ohne `--preset` sind sie ein Aufruffehler
-(Exit 2).
+Alle bis auf `--uploads-since` und `--no-exclude-paths` sind mehrfach möglich; ohne `--preset`
+sind sie ein Aufruffehler (Exit 2). Anders als die übrigen Abweichungen bleiben die Ausschlüsse
+(`paths.exclude`) bei einem Scan ohne `--exclude-path` erhalten.
 
 `--table` erwartet den vollen Tabellennamen mit Präfix, wie ihn der Scan nennt – z. B.
 `--table wp_wffilemods=skip` für die Datei-Protokolle von Wordfence, die das Preset
@@ -215,6 +218,68 @@ Die Ablehnung gilt für den Schalter. Ein Override, der von Hand in der Profil-D
 (`tables.overrides`, siehe [Format](#format)), gilt weiter – auch für eine Kern-Tabelle; `pull
 --content` lehnt ein Profil, dem eine der sieben Inhaltstabellen mit Daten fehlt, dann mit
 Exit 2 ab.
+
+### Ordner und Dateien ausschliessen
+
+Ab CLI und Agent 0.10.0 schliesst `paths.exclude` Ordner und Dateien unter `wp-content/` dauerhaft
+pro Site aus – etwa Videos, Rohdaten oder den Cache eines Plugins:
+
+```bash
+wpsync scan kunde --preset ohne-transaktionen --exclude-path uploads/videos/ --exclude-path '*.mp4'
+wpsync scan kunde --preset ohne-transaktionen                       # Liste bleibt
+wpsync scan kunde --preset ohne-transaktionen --exclude-path uploads/x/   # ersetzt die Liste
+wpsync scan kunde --preset ohne-transaktionen --no-exclude-paths    # leert sie
+```
+
+| Eintrag | wirkt auf |
+|---|---|
+| `uploads/videos/` (endet auf `/`) | den Ordner samt Inhalt, nur an dieser Stelle |
+| `uploads/2020/film.mp4` (enthält `/`) | genau diese Datei |
+| `*.mp4`, `film-?.mov` (kein `/`) | jeden Dateinamen, in jeder Tiefe |
+| `uploads/*/originals/` | Platzhalter innerhalb eines Ordnernamens |
+
+- Pfade relativ zu `wp-content/`, Trenner `/`. `*` steht für beliebig viele Zeichen, `?` für eines,
+  beide nie für `/`. Kein `**`, keine Zeichenklassen (`[` gilt wörtlich), keine Ausnahmen mit `!`.
+- Gross- und Kleinschreibung zählt nicht (`*.MP4` trifft `a.mp4`). Doppelte `/` werden
+  zusammengefasst, Duplikate entfernt, die Liste sortiert gespeichert. Ein Muster, das nichts
+  trifft, ist kein Fehler.
+- Exit 2, nichts gespeichert: leer, führender `/`, Ordner `.` oder `..`, Backslash, Steuerzeichen,
+  mehr als 512 Zeichen, mehr als 200 Einträge, ein Muster nur aus `*` und `?` – und ganze Plugins
+  oder Themes (`plugins/`, `plugins/<slug>/`, `themes/<slug>/`, `mu-plugins/`, auch per Platzhalter
+  wie `*s/` oder `*/<slug>/`): die wählt
+  `--exclude-plugin` ab, damit die lokale Nacharbeit (`active_plugins`) stimmt. Ein Unterordner in
+  einem Plugin (`plugins/<slug>/cache/`) ist erlaubt.
+
+**Pull.** Der Agent betritt ausgeschlossene Ordner nicht und nennt nichts darunter. Ein Agent vor
+0.10.0 kennt die Muster nicht: Die CLI filtert dann selbst und sagt einmal „Der Agent auf der Site
+ist älter als 0.10.0 – ausgeschlossene Ordner werden noch durchsucht, aber nicht übertragen.“
+Lokale Kopien bleiben: Was ein neuer Ausschluss trifft, löscht der Pull nicht, er nennt es
+(„Ausgeschlossen, lokal behalten“, `--json`: `kept_excluded`). Fällt ein Ausschluss weg, holt der
+nächste Pull fehlende Dateien nach.
+
+**Push.** Ausgeschlossenes ist beim Push weder neu noch gelöscht: Die CLI schickt es nicht und
+nennt es nicht in der Baseline, der Agent übernimmt es beim Tausch einer Einheit aus dem alten
+Stand der Site (auch bei der Rücknahme unverändert) und lässt es aus den neuen Stempeln – auch
+was erst während des Uploads entsteht. Übernommen heisst kopiert: Grosse Datenmengen unter einem
+Ausschluss in einer Code-Einheit kosten jeden Push Zeit und vorübergehend doppelten Platz. Lässt
+sich eine solche Datei nicht kopieren, bricht der Push vor dem Tausch ab. Eine Datei aus
+`--uploads` unter einem Ausschluss bricht den Push vor dem ersten Request ab (Exit 2). Ein Agent
+vor 0.10.0 würde ausgeschlossene Dateien einer Einheit beim Tausch verlieren – die CLI bricht
+den Push nach dem Probelauf ab, wenn ein Muster eine der Einheiten berühren kann (Exit
+`agent_outdated`); Muster nur unter `uploads/` stören ihn nicht.
+
+**Staging** bleibt eine vollständige Kopie von Live: die Muster gelten für Pull und Push, nicht
+für das Kopieren der Site.
+
+**Scan.** Agent 0.10.0 nennt im Infosheet Kandidaten: `dirs` (Ordner direkt unter `wp-content/`
+ausser `plugins`, `themes`, `mu-plugins`, `uploads`, und Ordner direkt unter `uploads/`) und
+`big_files` (bis zu 50 Dateien ab 50 MB), je mit `path`, `files`, `bytes`, `excluded` und, wenn
+wpsync sie ohnehin nie überträgt, `reason` (`excluded_dir`, `too_large` …). Die Auffälligkeiten
+tragen `transferred` und `reason`: Backup-Ordner und Dateien über 256 MB gehen nie mit,
+`advanced-cache.php` und `object-cache.php` entfernt die CLI lokal (`reason: drop_in`),
+`maintenance.php` wird übertragen. Der Scan zeigt die fünf grössten Ordner, die noch übertragen
+werden. Eine Datei direkt in `wp-content/` lässt sich nicht als genauer Pfad ausschliessen: ohne
+`/` wird der Eintrag ein Namens-Muster und gilt in jeder Tiefe.
 
 ### Format
 
@@ -241,6 +306,8 @@ profile:
   uploads:
     since: "2025"                # ältere Jahre lädt der Uploads-Proxy bei Bedarf
     proxy: true
+  paths:
+    exclude: ["*.mp4", uploads/videos/]   # relativ zu wp-content, siehe oben
   seen:                          # Stand beim letzten Scan – verwaltet wpsync
     tables: [wp_comments, wp_posts]
 ```

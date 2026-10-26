@@ -63,9 +63,12 @@ final class FakeProbe implements Probe
         return ['revision' => ['count' => 40, 'bytes' => 4000], '' => ['count' => 2, 'bytes' => 20]];
     }
 
+    /** @var list<string> */
+    public $dropIns = ['wp-content/object-cache.php'];
+
     public function dropIns(): array
     {
-        return ['wp-content/object-cache.php'];
+        return $this->dropIns;
     }
 }
 
@@ -136,8 +139,8 @@ final class InventoryTest extends TestCase
             [['year' => '2024', 'files' => 1, 'bytes' => 100], ['year' => 'other', 'files' => 1, 'bytes' => 1]],
             $sheet['uploads']
         );
-        $this->assertContains(['kind' => 'backup_dir', 'path' => 'wp-content/backups-dup-pro', 'bytes' => 500], $sheet['findings']);
-        $this->assertContains(['kind' => 'drop_in', 'path' => 'wp-content/object-cache.php', 'bytes' => 0], $sheet['findings']);
+        $this->assertContains(['kind' => 'backup_dir', 'path' => 'wp-content/backups-dup-pro', 'bytes' => 500, 'transferred' => false, 'reason' => 'excluded_dir'], $sheet['findings']);
+        $this->assertContains(['kind' => 'drop_in', 'path' => 'wp-content/object-cache.php', 'bytes' => 0, 'transferred' => false, 'reason' => 'drop_in'], $sheet['findings']);
     }
 
     /** Zwischen den Häppchen liegt der Zustand als JSON in wpsync_state. */
@@ -201,5 +204,55 @@ final class InventoryTest extends TestCase
     {
         $this->assertSame('elementor', Inventory::pluginSlug('elementor/elementor.php'));
         $this->assertSame('hello', Inventory::pluginSlug('hello.php'));
+    }
+
+    /** AC-269, AC-270: Ordner und grosse Dateien als Kandidaten; Befunde sagen, ob sie übertragen werden. */
+    public function testSheetListsCandidatesAndWhetherFindingsMove(): void
+    {
+        $dir = sys_get_temp_dir() . '/wpsync-inventory-cand-' . bin2hex(random_bytes(4));
+        foreach (['ai1wm-backups/x.wpress' => 1024, 'uploads/videos/a.mp4' => 2048, 'my-cache/a.html' => 10, 'plugins/p/p.php' => 1] as $path => $size) {
+            @mkdir(dirname($dir . '/' . $path), 0777, true);
+            file_put_contents($dir . '/' . $path, str_repeat('x', $size));
+        }
+        @mkdir($dir . '/uploads/2024', 0777, true);
+        @mkdir($dir . '/uploads/2025', 0777, true);
+        foreach (['uploads/2024/big.bin' => 80 * 1024 * 1024, 'uploads/2025/huge.mp4' => \WpSync\Excludes::MAX_FILE_BYTES + 1] as $path => $size) {
+            $handle = fopen($dir . '/' . $path, 'w');
+            ftruncate($handle, $size); // sparse
+            fclose($handle);
+        }
+        $probe          = new FakeProbe();
+        $probe->dropIns = ['wp-content/object-cache.php', 'wp-content/maintenance.php'];
+        $inv            = new Inventory($probe, new SizeScan($dir));
+        $state          = Inventory::initial(100.0);
+        for ($i = 0; $i < 20 && $state['phase'] !== 'done'; $i++) {
+            $state = $inv->step($state, microtime(true) + 60);
+        }
+        $sheet = $inv->sheet(json_decode((string) json_encode($state), true), 160.0);
+        exec('rm -rf ' . escapeshellarg($dir));
+
+        $this->assertContains(['path' => 'wp-content/ai1wm-backups', 'files' => 1, 'bytes' => 1024, 'excluded' => true, 'reason' => 'excluded_dir'], $sheet['dirs']);
+        $this->assertContains(['path' => 'wp-content/uploads/videos', 'files' => 1, 'bytes' => 2048, 'excluded' => false], $sheet['dirs']);
+        $this->assertContains(['path' => 'wp-content/my-cache', 'files' => 1, 'bytes' => 10, 'excluded' => false], $sheet['dirs']);
+        $this->assertSame('wp-content/uploads/2025', $sheet['dirs'][0]['path'], 'largest first');
+        foreach ($sheet['dirs'] as $d) {
+            $this->assertNotContains($d['path'], ['wp-content/plugins', 'wp-content/themes', 'wp-content/uploads', 'wp-content/mu-plugins']);
+        }
+        $this->assertSame([
+            ['path' => 'wp-content/uploads/2025/huge.mp4', 'files' => 1, 'bytes' => \WpSync\Excludes::MAX_FILE_BYTES + 1, 'excluded' => true, 'reason' => 'too_large'],
+            ['path' => 'wp-content/uploads/2024/big.bin', 'files' => 1, 'bytes' => 80 * 1024 * 1024, 'excluded' => false],
+        ], $sheet['big_files']);
+
+        $kinds = [];
+        foreach ($sheet['findings'] as $f) {
+            $kinds[$f['kind'] . ':' . $f['path']] = [$f['transferred'], $f['reason'] ?? null];
+        }
+        $this->assertSame([false, 'excluded_dir'], $kinds['backup_dir:wp-content/ai1wm-backups']);
+        $this->assertSame([false, 'drop_in'], $kinds['drop_in:wp-content/object-cache.php']);
+        $this->assertSame([true, null], $kinds['drop_in:wp-content/maintenance.php']);
+        $this->assertSame([false, 'too_large'], $kinds['large_file:wp-content/uploads/2025/huge.mp4']);
+        // Die Upload-Jahre bleiben, wie sie waren – die Ordner-Gruppen zählen dort nicht doppelt.
+        $this->assertSame(['2024', '2025', 'other'], array_column($sheet['uploads'], 'year'));
+        $this->assertSame(1, array_column($sheet['uploads'], null, 'year')['other']['files']);
     }
 }

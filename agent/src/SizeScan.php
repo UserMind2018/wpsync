@@ -5,12 +5,18 @@ defined('ABSPATH') || exit;
 
 /**
  * Größen unter wp-content nach Gruppen für das Infosheet: plugins/<slug>, themes/<slug>,
- * uploads/<Jahr>, uploads/other, top/<Ordner>, top/. – seitenweise mit Pfad-Cursor.
+ * uploads/<Jahr>, uploads/other, top/<Ordner>, top/. – seitenweise mit Pfad-Cursor. Dazu, quer zu
+ * diesen Gruppen, dir/uploads/<Ordner> für die Kandidaten zum Ausschliessen (Spec 0.10.0 D1): wer
+ * Gruppen summiert, lässt die dir/-Schlüssel weg.
  * Anders als FileWalker zählt SizeScan Backup- und Cache-Ordner mit (Auffälligkeiten, AC-8);
  * nur Symlinks, .git und eine Staging-Kopie (wpsync-staging-*) bleiben aussen vor.
  */
 final class SizeScan
 {
+    /** Ab dieser Grösse nennt das Infosheet eine Datei als Kandidat zum Ausschliessen (Spec 0.10.0 D2). */
+    public const BIG_FILE_BYTES = 52428800; // 50 MB
+    public const BIG_FILES_MAX  = 50;
+
     /** @var string */
     private $contentDir;
 
@@ -26,14 +32,15 @@ final class SizeScan
      *
      * @param array<string, array{files: int, bytes: int}> $buckets bisheriger Stand
      * @param list<array{path: string, bytes: int}>       $large   bisheriger Stand
-     * @return array{buckets: array<string, array{files: int, bytes: int}>, large: list<array{path: string, bytes: int}>, next: string|null, files: int}
+     * @param list<array{path: string, bytes: int}>       $big     bisheriger Stand
+     * @return array{buckets: array<string, array{files: int, bytes: int}>, large: list<array{path: string, bytes: int}>, big: list<array{path: string, bytes: int}>, next: string|null, files: int}
      */
-    public function page(string $after, float $deadline, array $buckets = [], array $large = []): array
+    public function page(string $after, float $deadline, array $buckets = [], array $large = [], array $big = []): array
     {
         $files = 0;
         foreach ($this->walk($this->contentDir, $after) as $full) {
             if ($files > 0 && microtime(true) > $deadline) {
-                return ['buckets' => $buckets, 'large' => $large, 'next' => $after, 'files' => $files];
+                return ['buckets' => $buckets, 'large' => $large, 'big' => $big, 'next' => $after, 'files' => $files];
             }
             $after = substr($full, strlen($this->contentDir) + 1);
             $bytes = (int) @filesize($full);
@@ -43,12 +50,30 @@ final class SizeScan
             }
             $buckets[$key]['files']++;
             $buckets[$key]['bytes'] += $bytes;
+            $parts = explode('/', $after);
+            if ($parts[0] === 'uploads' && count($parts) > 2) {
+                $dirKey = 'dir/uploads/' . $parts[1];
+                if (!isset($buckets[$dirKey])) {
+                    $buckets[$dirKey] = ['files' => 0, 'bytes' => 0];
+                }
+                $buckets[$dirKey]['files']++;
+                $buckets[$dirKey]['bytes'] += $bytes;
+            }
+            if ($bytes >= self::BIG_FILE_BYTES) {
+                $big[] = ['path' => 'wp-content/' . $after, 'bytes' => $bytes];
+                if (count($big) > self::BIG_FILES_MAX) {
+                    usort($big, static function (array $a, array $b): int {
+                        return $b['bytes'] <=> $a['bytes'];
+                    });
+                    array_pop($big);
+                }
+            }
             if ($bytes > Excludes::MAX_FILE_BYTES) {
                 $large[] = ['path' => 'wp-content/' . $after, 'bytes' => $bytes];
             }
             $files++;
         }
-        return ['buckets' => $buckets, 'large' => $large, 'next' => null, 'files' => $files];
+        return ['buckets' => $buckets, 'large' => $large, 'big' => $big, 'next' => null, 'files' => $files];
     }
 
     /** Gruppe einer Datei, Pfad relativ zu wp-content. */

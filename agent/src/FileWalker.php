@@ -17,6 +17,10 @@ final class FileWalker
     private $skipDir;
     /** @var Scope|null */
     private $scope;
+    /** @var bool Nur Tests schalten das ein (AC-263) – im Betrieb wüchse die Liste mit jedem Ordner. */
+    public static $trace = false;
+    /** @var list<string> */
+    private $entered = [];
 
     public function __construct(string $absPath, string $contentDir, string $skipDir, ?Scope $scope = null)
     {
@@ -63,6 +67,12 @@ final class FileWalker
         return ['files' => $files, 'skipped' => $skipped, 'next' => null];
     }
 
+    /** @return list<string> Ordner, die der Lauf betreten hat – für Tests (AC-263) */
+    public function entered(): array
+    {
+        return $this->entered;
+    }
+
     /**
      * @return \Generator<int, string>
      */
@@ -72,6 +82,9 @@ final class FileWalker
         if ($entries === false) {
             return;
         }
+        if (self::$trace) {
+            $this->entered[] = $dir;
+        }
         foreach ($entries as $name) {
             if ($name === '.' || $name === '..') {
                 continue;
@@ -80,11 +93,13 @@ final class FileWalker
             if (is_link($full)) {
                 continue;
             }
-            // Profil-Umfang: abgewählte Plugins/Themes und Upload-Jahre (Spec 5.2)
-            if ($this->scope !== null && $this->scope->excludesPath(substr($full, strlen($this->contentDir) + 1), is_dir($full))) {
+            $rel   = substr($full, strlen($this->contentDir) + 1);
+            $isDir = is_dir($full);
+            // Profil-Umfang: abgewählte Plugins/Themes, Upload-Jahre (Spec 5.2) und Ausschluss-Muster (Spec 0.10.0)
+            if ($this->scope !== null && ($this->scope->excludesPath($rel, $isDir) || $this->scope->excludesPattern($rel, $isDir))) {
                 continue;
             }
-            if (is_dir($full)) {
+            if ($isDir) {
                 if ($full === $this->skipDir || Excludes::dir($name, $isTop)) {
                     continue;
                 }

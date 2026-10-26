@@ -207,7 +207,7 @@ func TestHashRefusesAFileSwappedForASymlink(t *testing.T) {
 	other := otherSite(t, siteDir)
 	docroot := filepath.Join(siteDir, "public")
 	base := mustLoad(t, siteDir)
-	units, _, err := Scan(docroot, base)
+	units, _, err := Scan(docroot, base, nil)
 	if err != nil || len(units) != 1 {
 		t.Fatalf("units = %v, %v", units, err)
 	}
@@ -225,7 +225,7 @@ func TestHashRefusesADirectorySwappedForASymlink(t *testing.T) {
 	docroot := filepath.Join(siteDir, "public")
 	write(t, docroot, "plugins/x/inc/new.php", "<?php // other site", 1800000000)
 	base := mustLoad(t, siteDir)
-	units, _, err := Scan(docroot, base)
+	units, _, err := Scan(docroot, base, nil)
 	if err != nil || len(units) != 1 {
 		t.Fatalf("units = %v, %v", units, err)
 	}

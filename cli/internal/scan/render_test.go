@@ -131,3 +131,51 @@ func TestTableLabel(t *testing.T) {
 		t.Errorf("other = %q", other)
 	}
 }
+
+// Spec 0.10.0 D: agent 0.10.0 says whether a finding moves and names folders to exclude.
+func TestRenderExclusionCandidates(t *testing.T) {
+	no, yes := false, true
+	s := renderSheet()
+	s.Findings = []agentapi.Finding{
+		{Kind: "backup_dir", Path: "wp-content/backups-dup-pro", Bytes: 1800 << 20, Transferred: &no, Reason: "excluded_dir"},
+		{Kind: "large_file", Path: "wp-content/uploads/video.mp4", Bytes: 300 << 20, Transferred: &no, Reason: "too_large"},
+		{Kind: "drop_in", Path: "wp-content/object-cache.php", Transferred: &no, Reason: "drop_in"},
+		{Kind: "drop_in", Path: "wp-content/maintenance.php", Transferred: &yes},
+	}
+	s.Dirs = []agentapi.PathSize{
+		{Path: "wp-content/backups-dup-pro", Files: 3, Bytes: 1800 << 20, Excluded: true, Reason: "excluded_dir"},
+		{Path: "wp-content/uploads/videos", Files: 12, Bytes: 900 << 20},
+		{Path: "wp-content/uploads/2024", Files: 40, Bytes: 600 << 20},
+		{Path: "wp-content/my-cache", Files: 2, Bytes: 5 << 20},
+		{Path: "wp-content/uploads/a", Bytes: 4 << 20},
+		{Path: "wp-content/uploads/b", Bytes: 3 << 20},
+		{Path: "wp-content/uploads/c", Bytes: 2 << 20},
+	}
+	var out bytes.Buffer
+	Render(&out, s, time.Unix(1700000000, 0))
+	got := out.String()
+	for _, want := range []string{
+		"Backup-Ordner wp-content/backups-dup-pro (1,8 GB) – wird nicht übertragen\n",
+		"Datei über 256 MB: wp-content/uploads/video.mp4 (300 MB) – wird nicht übertragen\n",
+		"Drop-in wp-content/object-cache.php – wird nicht übertragen\n",
+		"Drop-in wp-content/maintenance.php – Wartungsmodus auf der Quelle?\n",
+		"Grösste Ordner",
+		"  uploads/videos/  ",
+		"Ausschliessen: wpsync scan <site> --preset … --exclude-path <ordner>/",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	section := got[strings.Index(got, "Grösste Ordner"):]
+	if strings.Contains(section, "backups-dup-pro") || strings.Contains(section, "uploads/c/") || !strings.Contains(section, "uploads/b/") {
+		t.Errorf("excluded folder or more than five listed:\n%s", section)
+	}
+
+	// Ein alter Agent: keine Abschnitte, Befunde wie bisher.
+	out.Reset()
+	Render(&out, renderSheet(), time.Unix(1700000000, 0))
+	if strings.Contains(out.String(), "Grösste Ordner") || strings.Contains(out.String(), "wird nicht übertragen") {
+		t.Errorf("old agent:\n%s", out.String())
+	}
+}

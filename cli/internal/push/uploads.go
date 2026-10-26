@@ -14,6 +14,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/pathmatch"
 )
 
 // UploadsUnit is the unit of new files below wp-content/uploads (Spec Content-Push §8.1). Its paths
@@ -40,6 +41,8 @@ var (
 	ErrUploadTypeBlocked = errors.New("dieser Dateityp geht nie als Upload auf die Site")
 	// ErrUploadMissing: a file of the list is no regular file below the local wp-content/uploads.
 	ErrUploadMissing = errors.New("liegt lokal nicht vor")
+	// ErrUploadExcluded: a file of --uploads lies below an exclude path (Spec 0.10.0 E2).
+	ErrUploadExcluded = errors.New("ist ausgeschlossen, nicht pushbar")
 	// ErrUploadsThere: no code to push and every file of the list is on the site already.
 	ErrUploadsThere = fmt.Errorf("%w – alle Dateien aus --uploads liegen schon auf der Site", ErrNothing)
 )
@@ -175,7 +178,12 @@ func ReadUploadList(file string) ([]string, error) {
 // uploadsUnit builds the unit uploads from the list: every file must be a regular file below
 // docroot/wp-content/uploads, reached without a symlink. It is read through a root pinned to the
 // folder like a code unit; Hash and upload use the same unit.
-func uploadsUnit(docroot string, list []string) (Unit, error) {
+func uploadsUnit(docroot string, list []string, ex *pathmatch.Set) (Unit, error) {
+	for _, rel := range list {
+		if ex.Match(UploadsUnit+"/"+rel, false) {
+			return Unit{}, fmt.Errorf("wp-content/%s/%s %w", UploadsUnit, showPath(rel), ErrUploadExcluded)
+		}
+	}
 	if _, ok, err := realDir(docroot, "wp-content/"+UploadsUnit); err != nil {
 		return Unit{}, err
 	} else if !ok {

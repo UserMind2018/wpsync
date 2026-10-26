@@ -48,6 +48,8 @@ func TestPushErrorKeepsExitCode(t *testing.T) {
 		{"upload_type", &push.UploadTypeError{Path: "2026/10/x.php"}, cliout.ExitUnknown, "gehen nie als Upload auf die Site"},
 		{"upload_type_agent", fmt.Errorf("%w: %w", push.ErrUploadTypeBlocked, &agentapi.APIError{Status: 400, Code: "wpsync_upload_type_blocked", Message: "Inhalt passt nicht zum Dateityp: \"2026/10/a.png\""}), cliout.ExitUnknown, "Inhalt passt nicht zum Dateityp"},
 		{"upload_missing", fmt.Errorf("wp-content/uploads/2026/10/a.png %w", push.ErrUploadMissing), cliout.ExitUsage, "relativ zu wp-content/uploads/"},
+		{"no_exclude_paths", push.ErrAgentNoExcludePaths, cliout.ExitAgentOutdated, "kennt noch keine Ausschlüsse – Agent 0.10.0 installieren"},
+		{"upload_excluded", fmt.Errorf("wp-content/uploads/videos/a.mp4 %w", push.ErrUploadExcluded), cliout.ExitUsage, "--exclude-path"},
 		{"uploads_there", push.ErrUploadsThere, cliout.ExitUnknown, "liegen schon auf der Site"},
 		{"upload_layout", &agentapi.APIError{Status: 409, Code: "wpsync_upload_layout", Message: "wp-content/uploads ist ein symbolischer Link"}, cliout.ExitUnknown, "symbolischer Link"},
 		{"no_content", fmt.Errorf("%w: %w", push.ErrAgentNoContent, &agentapi.APIError{Status: 404, Code: "rest_no_route"}), cliout.ExitAgentOutdated, "kann noch keine Inhalte pushen – Agent 0.7.0 installieren"},

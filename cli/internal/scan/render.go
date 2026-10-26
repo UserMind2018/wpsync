@@ -81,19 +81,52 @@ func Render(w io.Writer, s *agentapi.Infosheet, now time.Time) {
 		fmt.Fprintln(w, "\nAuffälligkeiten")
 	}
 	for _, f := range s.Findings {
+		// Agent 0.10.0 says whether the finding moves (Spec 0.10.0 D3); before, the kind tells.
+		notMoved := f.Transferred != nil && !*f.Transferred
 		switch f.Kind {
 		case "backup_dir":
-			fmt.Fprintf(w, "  ! Backup-Ordner %s (%s) – wird nie gezogen\n", f.Path, Bytes(f.Bytes))
+			fmt.Fprintf(w, "  ! Backup-Ordner %s (%s) – %s\n", f.Path, Bytes(f.Bytes), pick(notMoved, "wird nie gezogen"))
 		case "large_file":
-			fmt.Fprintf(w, "  ! Datei über 256 MB: %s (%s) – wird übersprungen\n", f.Path, Bytes(f.Bytes))
+			fmt.Fprintf(w, "  ! Datei über 256 MB: %s (%s) – %s\n", f.Path, Bytes(f.Bytes), pick(notMoved, "wird übersprungen"))
 		case "drop_in":
-			if strings.HasSuffix(f.Path, "maintenance.php") {
+			if strings.HasSuffix(f.Path, "maintenance.php") && !notMoved {
 				fmt.Fprintf(w, "  ! Drop-in %s – Wartungsmodus auf der Quelle?\n", f.Path)
 			} else {
-				fmt.Fprintf(w, "  ! Drop-in %s – wird lokal entfernt\n", f.Path)
+				fmt.Fprintf(w, "  ! Drop-in %s – %s\n", f.Path, pick(notMoved, "wird lokal entfernt"))
 			}
 		}
 	}
+	renderDirs(w, s.Dirs)
+}
+
+// pick is the suffix of a finding: "wird nicht übertragen" when the agent says so, else the old text.
+func pick(notMoved bool, old string) string {
+	if notMoved {
+		return "wird nicht übertragen"
+	}
+	return old
+}
+
+// renderDirs names the five largest folders a pull still transfers – candidates for --exclude-path
+// (Spec 0.10.0 D1). An agent before 0.10.0 sends none.
+func renderDirs(w io.Writer, dirs []agentapi.PathSize) {
+	var open []agentapi.PathSize
+	for _, d := range dirs {
+		if !d.Excluded {
+			open = append(open, d)
+		}
+	}
+	if len(open) == 0 {
+		return
+	}
+	sort.SliceStable(open, func(i, j int) bool { return open[i].Bytes > open[j].Bytes })
+	fmt.Fprintln(w, "\nGrösste Ordner unter wp-content/")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, d := range open[:min(5, len(open))] {
+		fmt.Fprintf(tw, "  %s/\t%s Dateien\t%s\n", strings.TrimPrefix(d.Path, "wp-content/"), Count(d.Files), Bytes(d.Bytes))
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "  Ausschliessen: wpsync scan <site> --preset … --exclude-path <ordner>/")
 }
 
 func components(items []agentapi.Component) string {

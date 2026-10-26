@@ -727,7 +727,7 @@ func TestRunPushesChangedUnitAndUpdatesTheBaseline(t *testing.T) {
 	if base.Files["wp-content/plugins/x/main.php"].MTime != 1800000000 || base.Files["wp-content/themes/t/style.css"].MTime != 1700000000 {
 		t.Errorf("baseline = %v", base.Files)
 	}
-	if units, _, _ := Scan(filepath.Join(siteDir, "public"), base); len(units) != 0 {
+	if units, _, _ := Scan(filepath.Join(siteDir, "public"), base, nil); len(units) != 0 {
 		t.Errorf("still changed after the push: %v", units)
 	}
 	j, err := LoadJournal(siteDir, testID)

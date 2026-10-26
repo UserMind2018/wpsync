@@ -95,4 +95,20 @@ final class PushManifestTest extends TestCase
         $this->assertSame(['inc/api.php', 'new.php', 'link.php'], PushManifest::need($this->dir, $files));
         $this->assertSame(['main.php', 'inc/api.php', 'new.php', '123', 'link.php'], PushManifest::need($this->dir . '/fehlt', $files));
     }
+
+    /** Spec 0.10.0 E1, E3: Ausschluss-Muster sind keine Stempel, überleben aber den Tausch. */
+    public function testExcludedFilesAreNoStampsButCarried(): void
+    {
+        mkdir($this->dir . '/cache');
+        file_put_contents($this->dir . '/cache/x.bin', 'x');
+        $ex = \WpSync\PathPatterns::fromList(['plugins/foo/cache/']);
+        $this->assertArrayNotHasKey('cache/x.bin', PushManifest::stamps($this->dir, 'plugins/foo', $ex));
+        $this->assertArrayHasKey('main.php', PushManifest::stamps($this->dir, 'plugins/foo', $ex));
+        $this->assertArrayHasKey('cache/x.bin', PushManifest::stamps($this->dir, 'plugins/foo'));
+        $this->assertContains('cache/x.bin', PushManifest::carried($this->dir, 'plugins/foo', $ex));
+        $this->assertNotContains('main.php', PushManifest::carried($this->dir, 'plugins/foo', $ex));
+        $this->assertNotContains('cache/x.bin', PushManifest::carried($this->dir, 'plugins/foo'));
+        // Ein Muster einer anderen Einheit trifft hier nichts.
+        $this->assertArrayHasKey('cache/x.bin', PushManifest::stamps($this->dir, 'plugins/bar', $ex));
+    }
 }

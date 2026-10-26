@@ -12,6 +12,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/pathmatch"
 )
 
 // PluginsUnit is how the push log names the plugin state of a push. It is no unit of a request.
@@ -94,7 +95,7 @@ func unitBase(b *baseline.Baseline, unit string) map[string]baseline.FileStamp {
 // only code the same push uploaded and checked. units are the units picked so far, all the changed
 // units of the scan, links the units that are symlinks. A unit that is missing locally, empty or a
 // symlink is a wrong call.
-func withActivated(docroot string, base *baseline.Baseline, units, all []Unit, activate, links []string) ([]Unit, error) {
+func withActivated(docroot string, base *baseline.Baseline, units, all []Unit, activate, links []string, ex *pathmatch.Set) ([]Unit, error) {
 	if len(activate) == 0 {
 		return units, nil
 	}
@@ -115,7 +116,7 @@ func withActivated(docroot string, base *baseline.Baseline, units, all []Unit, a
 			return nil, fmt.Errorf("%w: --activate %s – der Ordner %s fehlt lokal; aktiviert wird nur ein Plugin, das derselbe Push überträgt",
 				ErrPluginSwitch, name, showDir(docroot, "wp-content/"+name))
 		}
-		u, err := scanUnit(docroot, name, unitBase(base, name))
+		u, err := scanUnit(docroot, name, unitBase(base, name), ex)
 		if err != nil {
 			return nil, err
 		}

@@ -60,7 +60,7 @@ final class SizeScanTest extends TestCase
         $this->assertSame(['files' => 1, 'bytes' => 4], $page['buckets']['uploads/other']);
         $this->assertSame(['files' => 1, 'bytes' => 1000], $page['buckets']['top/backups-dup-pro']);
         $this->assertArrayNotHasKey('top/.git', $page['buckets']);
-        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+        $this->assertSame(9, array_sum(array_column(self::sizeGroups($page['buckets']), 'files')));
         $this->assertSame([], $page['large']);
     }
 
@@ -76,7 +76,7 @@ final class SizeScanTest extends TestCase
         } while ($page['next'] !== null && $rounds < 100);
 
         $this->assertSame(9, $rounds, 'one file per page when the deadline has passed');
-        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+        $this->assertSame(9, array_sum(array_column(self::sizeGroups($page['buckets']), 'files')));
     }
 
     public function testCursorIsThePathOfTheLastCountedFile(): void
@@ -96,7 +96,7 @@ final class SizeScanTest extends TestCase
         $page = $scan->page((string) $page['next'], microtime(true) + 60, $page['buckets'], $page['large']);
 
         $this->assertNull($page['next']);
-        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
+        $this->assertSame(9, array_sum(array_column(self::sizeGroups($page['buckets']), 'files')));
     }
 
     public function testResumeDoesNotEnterDirectoriesBeforeTheCursor(): void
@@ -109,7 +109,7 @@ final class SizeScanTest extends TestCase
         }
         $this->assertNull($page['next']);
         $this->assertSame(3, $page['files']);
-        $this->assertSame(['uploads/2024', 'uploads/2025', 'uploads/other'], array_keys($page['buckets']));
+        $this->assertSame(['uploads/2024', 'uploads/2025', 'uploads/other'], array_keys(self::sizeGroups($page['buckets'])));
     }
 
     public function testLargeFilesAreListed(): void
@@ -131,10 +131,31 @@ final class SizeScanTest extends TestCase
         }
         $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
         $this->assertNull($page['next']);
-        $this->assertSame(9, array_sum(array_column($page['buckets'], 'files')));
-        foreach (array_keys($page['buckets']) as $bucket) {
+        $this->assertSame(9, array_sum(array_column(self::sizeGroups($page['buckets']), 'files')));
+        foreach (array_keys(self::sizeGroups($page['buckets'])) as $bucket) {
             $this->assertStringNotContainsStringIgnoringCase('wpsync-staging', (string) $bucket);
         }
         $this->assertSame(['files' => 1, 'bytes' => 4], $page['buckets']['uploads/other']);
+    }
+
+    /**
+     * Die Gruppen ohne die Ordner-Kandidaten dir/… (Spec 0.10.0), die quer dazu zählen.
+     *
+     * @param array<string, array{files: int, bytes: int}> $buckets
+     * @return array<string, array{files: int, bytes: int}>
+     */
+    private static function sizeGroups(array $buckets): array
+    {
+        return array_filter($buckets, static function (string $key): bool {
+            return strpos($key, 'dir/') !== 0;
+        }, ARRAY_FILTER_USE_KEY);
+    }
+
+    public function testUploadFoldersAreCountedApart(): void
+    {
+        $page = (new SizeScan($this->dir))->page('', microtime(true) + 60);
+        $this->assertSame(['files' => 1, 'bytes' => 100], $page['buckets']['dir/uploads/2024']);
+        $this->assertSame(['files' => 1, 'bytes' => 4], $page['buckets']['dir/uploads/elementor']);
+        $this->assertSame([], $page['big']);
     }
 }

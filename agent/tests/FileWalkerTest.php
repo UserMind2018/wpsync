@@ -146,4 +146,50 @@ final class FileWalkerTest extends TestCase
             exec('rm -rf ' . escapeshellarg($root));
         }
     }
+
+    public function testExcludePathsAreNotEntered(): void
+    {
+        $root = sys_get_temp_dir() . '/wpsync-walker-paths-' . bin2hex(random_bytes(4));
+        foreach ([
+            'wp-content/uploads/videos/a.mp4',
+            'wp-content/uploads/videos/sub/keep.jpg',
+            'wp-content/uploads/videosammlung/b.mp4',
+            'wp-content/uploads/videosammlung/b.jpg',
+            'wp-content/uploads/2024/c.MP4',
+            'wp-content/uploads/2024/c.mp4.txt',
+        ] as $path) {
+            @mkdir(dirname($root . '/' . $path), 0777, true);
+            file_put_contents($root . '/' . $path, 'x');
+        }
+        $content = $root . '/wp-content';
+        $scope   = Scope::fromArray(['exclude_paths' => ['uploads/videos/', '*.mp4']]);
+        $walker  = new FileWalker($root, $content, $content . '/plugins/wpsync-agent', $scope);
+        FileWalker::$trace = true;
+        try {
+            $paths = array_column($walker->page(0, microtime(true) + 60)['files'], 'path');
+        } finally {
+            FileWalker::$trace = false;
+        }
+        exec('rm -rf ' . escapeshellarg($root));
+
+        $this->assertSame(['wp-content/uploads/2024/c.mp4.txt', 'wp-content/uploads/videosammlung/b.jpg'], $paths);
+        $this->assertNotContains($content . '/uploads/videos', $walker->entered()); // AC-263
+        $this->assertNotContains($content . '/uploads/videos/sub', $walker->entered());
+        $this->assertContains($content . '/uploads/videosammlung', $walker->entered());
+    }
+
+    public function testInvalidExcludePathIsRefused(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        Scope::fromArray(['exclude_paths' => ['plugins/foo/']]);
+    }
+
+    public function testStagingIgnoresExcludePaths(): void
+    {
+        $scope = Scope::fromArray(['exclude_paths' => ['plugins/foo/cache/']]);
+        $this->assertFalse($scope->excludesPath('plugins/foo', true)); // C5: Kopie vollständig
+        $this->assertFalse($scope->excludesPath('plugins/foo/cache', true));
+        $this->assertTrue($scope->excludesPattern('plugins/foo/cache', true));
+        $this->assertFalse(Scope::fromArray(null)->excludesPattern('plugins/foo/cache', true));
+    }
 }

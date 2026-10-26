@@ -106,6 +106,15 @@ final class PushSwapTest extends TestCase
         PushSwap::build($this->old, $this->stage, $this->new, $files, [], 0, microtime(true) + 30);
     }
 
+    /** Spec 0.10.0 E1: eine übernommene Datei, die sich nicht kopieren lässt, bricht den Bau ab. */
+    public function testBuildFailsWhenACarriedFileCannotBeCopied(): void
+    {
+        chmod($this->old . '/debug.log', 0000);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('debug.log');
+        PushSwap::build($this->old, $this->stage, $this->new, $this->manifest(), ['debug.log'], 0, microtime(true) + 30);
+    }
+
     public function testBuildOfANewUnit(): void
     {
         $missing = $this->root . '/plugins/neu';

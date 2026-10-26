@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,5 +106,78 @@ func TestScanTableOverrideUnknownTableWarns(t *testing.T) {
 	r = run(t, context.Background(), testSecret+"\n", "scan", "kunde", "--secret-stdin", "--preset", "vollstaendig", "--table", "wp_tippfehler=skip")
 	if r.code != 0 || !strings.Contains(r.stderr, "wp_tippfehler") || strings.Contains(r.stdout, "nicht im Infosheet") {
 		t.Errorf("exit %d\nstdout: %s\nstderr: %s", r.code, r.stdout, r.stderr)
+	}
+}
+
+// AC-260: --exclude-path ersetzt die gespeicherte Liste, ein Scan ohne Flag behält sie,
+// --no-exclude-paths leert sie; scan --json nennt sie immer als Liste (B3).
+func TestScanExcludePathsAreStored(t *testing.T) {
+	scanAgent(t)
+	excludes := func(r result) any {
+		d := requireKeys(t, lastResult(t, r, "scan", 0)["data"], "profile")
+		return requireKeys(t, requireKeys(t, d["profile"], "paths")["paths"], "exclude")["exclude"]
+	}
+	steps := []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"--exclude-path", "uploads/videos/", "--exclude-path", "*.mp4", "--exclude-path", "*.MP4"}, []string{"*.mp4", "uploads/videos/"}},
+		{nil, []string{"*.mp4", "uploads/videos/"}},
+		{[]string{"--exclude-path", "uploads/x/"}, []string{"uploads/x/"}},
+		{[]string{"--no-exclude-paths"}, []string{}},
+	}
+	for i, s := range steps {
+		r := scanJSON(t, append([]string{"--preset", "vollstaendig"}, s.args...)...)
+		want := []any{}
+		for _, p := range s.want {
+			want = append(want, p)
+		}
+		if got := excludes(r); !reflect.DeepEqual(got, want) {
+			t.Errorf("step %d: data.profile.paths.exclude = %#v, want %#v", i, got, want)
+		}
+		if got := storedProfile(t).Paths.Exclude; len(got) != len(s.want) || (len(got) > 0 && !reflect.DeepEqual(got, s.want)) {
+			t.Errorf("step %d: stored = %q, want %q", i, got, s.want)
+		}
+	}
+}
+
+// AC-261: ungültige Muster sind usage-Fehler, das gespeicherte Profil bleibt unverändert.
+func TestScanExcludePathRejected(t *testing.T) {
+	var many []string
+	for i := 0; i <= 200; i++ {
+		many = append(many, "--exclude-path", fmt.Sprintf("uploads/d%d/", i))
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"leading slash", []string{"--preset", "vollstaendig", "--exclude-path", "/uploads/"}, "ohne führenden /"},
+		{"dot dot", []string{"--preset", "vollstaendig", "--exclude-path", "uploads/../x"}, ". und .."},
+		{"whole plugin", []string{"--preset", "vollstaendig", "--exclude-path", "plugins/foo/"}, "--exclude-plugin"},
+		{"themes", []string{"--preset", "vollstaendig", "--exclude-path", "themes/"}, "--exclude-plugin"},
+		{"backslash", []string{"--preset", "vollstaendig", "--exclude-path", `a\b`}, "Backslash"},
+		{"too many", append([]string{"--preset", "vollstaendig"}, many...), "mehr als 200"},
+		{"without preset", []string{"--exclude-path", "uploads/videos/"}, "nur zusammen mit --preset"},
+		{"clear without preset", []string{"--no-exclude-paths"}, "nur zusammen mit --preset"},
+		{"both", []string{"--preset", "vollstaendig", "--exclude-path", "uploads/x/", "--no-exclude-paths"}, "schliessen sich aus"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			scanAgent(t)
+			scanJSON(t, "--preset", "vollstaendig", "--exclude-path", "uploads/old/")
+			r := scanJSON(t, c.args...)
+			e := requireKeys(t, lastResult(t, r, "scan", 2)["error"], "code", "message")
+			if msg, _ := e["message"].(string); e["code"] != "usage" || !strings.Contains(msg, c.want) {
+				t.Errorf("error = %v, want %q", e, c.want)
+			}
+			if got := storedProfile(t).Paths.Exclude; !reflect.DeepEqual(got, []string{"uploads/old/"}) {
+				t.Errorf("stored = %q", got)
+			}
+		})
+	}
+	scanAgent(t)
+	if r := scanJSON(t, "--preset", "vollstaendig", "--exclude-path", "plugins/foo/cache/"); r.code != 0 {
+		t.Errorf("plugins/foo/cache/ refused: %s", r.stderr)
 	}
 }

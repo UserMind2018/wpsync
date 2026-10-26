@@ -102,6 +102,9 @@ type Infosheet struct {
 	OrphanMeta  OrphanMeta   `json:"orphan_meta"`
 	Uploads     []UploadYear `json:"uploads"`
 	Findings    []Finding    `json:"findings"`
+	// Dirs and BigFiles are exclusion candidates (agent 0.10.0, Spec 0.10.0 D); nil before.
+	Dirs     []PathSize `json:"dirs,omitempty"`
+	BigFiles []PathSize `json:"big_files,omitempty"`
 }
 
 // Component is a plugin or theme with its size on disk.
@@ -155,6 +158,18 @@ type Finding struct {
 	Kind  string `json:"kind"`
 	Path  string `json:"path"`
 	Bytes int64  `json:"bytes"`
+	// Transferred is nil before agent 0.10.0; Reason says why not (excluded_dir, too_large, drop_in).
+	Transferred *bool  `json:"transferred,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// PathSize is a folder or file the scan offers for exclusion.
+type PathSize struct {
+	Path     string `json:"path"`
+	Files    int64  `json:"files"`
+	Bytes    int64  `json:"bytes"`
+	Excluded bool   `json:"excluded"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // InfosheetStatus reports the background inventory on the agent.
@@ -173,6 +188,8 @@ type Scope struct {
 	ExcludePlugins   []string          `json:"exclude_plugins,omitempty"`
 	ExcludeThemes    []string          `json:"exclude_themes,omitempty"`
 	UploadsSince     string            `json:"uploads_since,omitempty"`
+	// ExcludePaths are patterns relative to wp-content (Spec 0.10.0 A); agent 0.10.0 and later.
+	ExcludePaths []string `json:"exclude_paths,omitempty"`
 	// PlainPII asks for personal data in plain text. Without it the agent pseudonymizes (Spec 11.3).
 	PlainPII bool `json:"plain_pii,omitempty"`
 }

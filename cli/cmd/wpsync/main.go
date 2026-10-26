@@ -30,6 +30,7 @@ import (
 	"github.com/usermind/wpsync/internal/keychain"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/mailguard"
+	"github.com/usermind/wpsync/internal/pathmatch"
 	"github.com/usermind/wpsync/internal/profile"
 	"github.com/usermind/wpsync/internal/pull"
 	"github.com/usermind/wpsync/internal/push"
@@ -664,13 +665,25 @@ func (a *app) cmdScan(args []string) error {
 	fs.Var(&plugins, "exclude-plugin", "Plugin nicht ziehen, mehrfach möglich (nur mit --preset)")
 	fs.Var(&postTypes, "exclude-post-type", "Post-Typ nicht ziehen, mehrfach möglich (nur mit --preset)")
 	fs.Var(&tableSpecs, "table", "<tabelle>=structure|skip: Tabelle ohne Daten bzw. gar nicht ziehen, mehrfach möglich (nur mit --preset)")
+	var excludePaths listFlag
+	fs.Var(&excludePaths, "exclude-path", "Ordner/Datei unter wp-content ausschliessen (uploads/videos/, *.mp4), mehrfach; ersetzt die gespeicherte Liste (nur mit --preset)")
+	noExcludePaths := fs.Bool("no-exclude-paths", false, "gespeicherte Ausschlüsse leeren (nur mit --preset)")
 	secretStdin := secretStdinFlag(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync scan <site> [--refresh] [--preset p [--table t=structure|skip]] [--json] [--secret-stdin]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync scan <site> [--refresh] [--preset p [--table t=structure|skip] [--exclude-path p …|--no-exclude-paths]] [--json] [--secret-stdin]")
 	if err != nil {
 		return err
 	}
-	if *preset == "" && (len(plugins) > 0 || len(postTypes) > 0 || len(tableSpecs) > 0 || *since != "") {
-		return cliout.Usage(errors.New("--exclude-plugin, --exclude-post-type, --table und --uploads-since nur zusammen mit --preset"))
+	if *preset == "" && (len(plugins) > 0 || len(postTypes) > 0 || len(tableSpecs) > 0 || *since != "" || len(excludePaths) > 0 || *noExcludePaths) {
+		return cliout.Usage(errors.New("--exclude-plugin, --exclude-post-type, --table, --exclude-path, --no-exclude-paths und --uploads-since nur zusammen mit --preset"))
+	}
+	if len(excludePaths) > 0 && *noExcludePaths {
+		return cliout.Usage(errors.New("--exclude-path und --no-exclude-paths schliessen sich aus"))
+	}
+	var paths []string
+	if len(excludePaths) > 0 {
+		if paths, err = pathmatch.Normalize(excludePaths); err != nil {
+			return cliout.Usage(err)
+		}
 	}
 	tables, err := scan.ParseTables(tableSpecs)
 	if err != nil {
@@ -698,7 +711,8 @@ func (a *app) cmdScan(args []string) error {
 		Preset:  *preset,
 		OnSheet: func(s *agentapi.Infosheet) { res.Infosheet = s },
 	}
-	opts.Adjust = scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since, AllUploads: allUploads, Tables: tables}
+	opts.Adjust = scan.Adjust{ExcludePlugins: plugins, ExcludePostTypes: postTypes, UploadsSince: *since, AllUploads: allUploads, Tables: tables,
+		Paths: paths, ClearPaths: *noExcludePaths}
 	if *preset == "" && a.interactive() {
 		opts.Select = scan.Interactive
 	}
@@ -1229,6 +1243,11 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.Is(err, push.ErrAgentNoUploads):
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgentUploads, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kennt noch keine Uploads – Agent %s installieren", site.URL, push.MinAgentUploads))
+	case errors.Is(err, push.ErrAgentNoExcludePaths):
+		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentExcludePaths, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kennt noch keine Ausschlüsse – Agent %s installieren", site.URL, agentapi.MinAgentExcludePaths))
+	case errors.Is(err, push.ErrUploadExcluded):
+		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("%v – die Datei aus der Liste nehmen oder den Ausschluss ändern: wpsync scan %s --preset … --exclude-path", err, site.Name))
 	case errors.Is(err, push.ErrUploadsThere):
 		return err
 	case errors.Is(err, push.ErrUploadExists):
