@@ -46,6 +46,9 @@ type PushBeginRequest struct {
 	Activate    []string                     `json:"activate,omitempty"`
 	Deactivate  []string                     `json:"deactivate,omitempty"`
 	PluginHeads map[string]map[string][]byte `json:"plugin_heads,omitempty"`
+	// ExcludePaths: the profile's patterns (agent 0.10.0, Spec 0.10.0 E). Matching files are
+	// neither sent nor deleted; a code unit keeps them from the target.
+	ExcludePaths []string `json:"exclude_paths,omitempty"`
 }
 
 // PushUnitPlan is the agent's view of one unit.

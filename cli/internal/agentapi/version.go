@@ -10,6 +10,9 @@ import (
 // (Spec 11, AC-36). Scan and pair report it, pull enforces it.
 const MinAgentVersion = "0.3.0"
 
+// MinAgentExcludePaths is the first agent that filters exclude paths itself (Spec 0.10.0 C3).
+const MinAgentExcludePaths = "0.10.0"
+
 // OutdatedError: the agent is older than the CLI needs (exit code agent_outdated).
 type OutdatedError struct {
 	Installed string // "" if the agent does not report its version
