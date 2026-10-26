@@ -66,6 +66,7 @@ final class Inventory
                 'meta'       => [],
                 'buckets'    => [],
                 'large'      => [],
+                'big'        => [],
                 'after'      => '',
             ];
             return self::next($state, 'posts');
@@ -82,12 +83,14 @@ final class Inventory
         }
         if ($state['phase'] === 'files') {
             if (!isset($data['after'])) { // Job eines Agents ≤ 0.2.1 mit Zähl-Cursor: Dateien neu zählen
-                $data   = ['buckets' => [], 'large' => [], 'after' => ''] + $data;
+                $data   = ['buckets' => [], 'large' => [], 'big' => [], 'after' => ''] + $data;
                 $cursor = 0;
             }
-            $page = $this->sizes->page((string) $data['after'], $deadline, $data['buckets'], $data['large']);
+            // Ein Job, den ein Agent < 0.10.0 begonnen hat, kennt 'big' noch nicht.
+            $page = $this->sizes->page((string) $data['after'], $deadline, $data['buckets'], $data['large'], $data['big'] ?? []);
             $state['data']['buckets'] = $page['buckets'];
             $state['data']['large']   = $page['large'];
+            $state['data']['big']     = $page['big'];
             $state['data']['after']   = (string) $page['next'];
             return $page['next'] === null ? self::next($state, 'done') : self::advance($state, $cursor + $page['files']);
         }
@@ -141,14 +144,41 @@ final class Inventory
         $findings = [];
         foreach (Excludes::BACKUP_DIRS as $dir) {
             if (isset($buckets['top/' . $dir])) {
-                $findings[] = ['kind' => 'backup_dir', 'path' => 'wp-content/' . $dir, 'bytes' => (int) $buckets['top/' . $dir]['bytes']];
+                $findings[] = ['kind' => 'backup_dir', 'path' => 'wp-content/' . $dir, 'bytes' => (int) $buckets['top/' . $dir]['bytes'], 'transferred' => false, 'reason' => 'excluded_dir'];
             }
         }
         foreach ($d['large'] as $f) {
-            $findings[] = ['kind' => 'large_file', 'path' => (string) $f['path'], 'bytes' => (int) $f['bytes']];
+            $findings[] = ['kind' => 'large_file', 'path' => (string) $f['path'], 'bytes' => (int) $f['bytes'], 'transferred' => false, 'reason' => 'too_large'];
         }
         foreach ($d['drop_ins'] as $path) {
-            $findings[] = ['kind' => 'drop_in', 'path' => (string) $path, 'bytes' => 0];
+            // advanced-cache.php und object-cache.php löscht das CLI lokal (RemoveDropIns), maintenance.php bleibt.
+            $removed    = in_array(basename((string) $path), ['advanced-cache.php', 'object-cache.php'], true);
+            $findings[] = ['kind' => 'drop_in', 'path' => (string) $path, 'bytes' => 0, 'transferred' => !$removed] + ($removed ? ['reason' => 'drop_in'] : []);
+        }
+
+        // Kandidaten zum Ausschliessen (Spec 0.10.0 D1, D2)
+        $dirs = [];
+        foreach ($buckets as $key => $b) {
+            $key = (string) $key;
+            if (strpos($key, 'top/') === 0 && $key !== 'top/.' && !in_array(substr($key, 4), ['plugins', 'themes', 'mu-plugins', 'uploads'], true)) {
+                $name   = substr($key, 4);
+                $dirs[] = self::candidate('wp-content/' . $name, (int) $b['files'], (int) $b['bytes'], Excludes::dir($name, true) ? 'excluded_dir' : null);
+            } elseif (strpos($key, 'dir/uploads/') === 0) {
+                $name   = substr($key, 12);
+                $dirs[] = self::candidate('wp-content/uploads/' . $name, (int) $b['files'], (int) $b['bytes'], Excludes::dir($name, false) ? 'excluded_dir' : null);
+            }
+        }
+        usort($dirs, static function (array $a, array $b): int {
+            return [$b['bytes'], $a['path']] <=> [$a['bytes'], $b['path']];
+        });
+        $big = $d['big'] ?? [];
+        usort($big, static function (array $a, array $b): int {
+            return $b['bytes'] <=> $a['bytes'];
+        });
+        $bigFiles = [];
+        foreach ($big as $f) {
+            $rel        = substr((string) $f['path'], strlen('wp-content/'));
+            $bigFiles[] = self::candidate((string) $f['path'], 1, (int) $f['bytes'], Excludes::path($rel, (int) $f['bytes']));
         }
 
         return [
@@ -163,7 +193,19 @@ final class Inventory
             'orphan_meta'  => ['rows' => (int) $orphan['count'], 'bytes' => (int) $orphan['bytes']],
             'uploads'      => $uploads,
             'findings'     => $findings,
+            'dirs'         => $dirs,
+            'big_files'    => $bigFiles,
         ];
+    }
+
+    /** @return array{path: string, files: int, bytes: int, excluded: bool, reason?: string} */
+    private static function candidate(string $path, int $files, int $bytes, ?string $reason): array
+    {
+        $out = ['path' => $path, 'files' => $files, 'bytes' => $bytes, 'excluded' => $reason !== null];
+        if ($reason !== null) {
+            $out['reason'] = $reason;
+        }
+        return $out;
     }
 
     /**
