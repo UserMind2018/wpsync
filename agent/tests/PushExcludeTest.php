@@ -83,6 +83,22 @@ final class PushExcludeTest extends PushContentFlowCase
         $this->assertSame(self::MTIME, filemtime($cache));
     }
 
+    /** E1: was das Plugin zwischen Begin und Commit unter dem Ausschluss anlegt, überlebt den Tausch. */
+    public function testFilesCreatedAfterTheBeginAreCarried(): void
+    {
+        $begin = $this->beginX('new');
+        $this->assertInstanceOf(\WP_REST_Response::class, $begin, $begin instanceof \WP_Error ? $begin->code . ' ' . $begin->message : '');
+        $id = (string) $begin->data['push_id'];
+        $this->assertInstanceOf(\WP_REST_Response::class, Push::upload(['push_id' => $id, 'unit' => 0, 'files' => [['path' => 'main.php', 'data' => base64_encode('new'), 'offset' => 0]]], self::KEY));
+        mkdir($this->live . '/plugins/x/cache/sub');
+        file_put_contents($this->live . '/plugins/x/cache/sub/neu.bin', 'neu');
+        $commit = Push::commit(['push_id' => $id], self::KEY);
+        $this->assertInstanceOf(\WP_REST_Response::class, $commit, $commit instanceof \WP_Error ? $commit->code . ' ' . $commit->message : '');
+        clearstatcache();
+        $this->assertSame('neu', file_get_contents($this->live . '/plugins/x/cache/sub/neu.bin'));
+        $this->assertSame(self::CACHE, file_get_contents($this->live . '/plugins/x/cache/x.bin'));
+    }
+
     /** E2: eine Manifest-Datei unter einem Ausschluss wird abgelehnt – schon im Probelauf. */
     public function testManifestWithExcludedFileIsRefused(): void
     {

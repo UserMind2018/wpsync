@@ -617,7 +617,7 @@ final class Push
                     PushSwap::remove($base . '/new/' . $u); // Rest eines abgebrochenen Versuchs
                     wp_mkdir_p($base . '/new');
                 }
-                $next = PushSwap::build($content . '/' . $unit['path'], $base . '/stage/' . $u, $base . '/new/' . $u, $unit['files'], $unit['carried'], $i, $deadline);
+                $next = PushSwap::build($content . '/' . $unit['path'], $base . '/stage/' . $u, $base . '/new/' . $u, $unit['files'], self::carriedNow($content, $unit, $plan), $i, $deadline);
                 if ($next !== null) {
                     return new \WP_REST_Response(['next' => ['u' => $u, 'i' => $next], 'stamps' => new \stdClass()]);
                 }
@@ -1570,6 +1570,31 @@ final class Push
                 : self::error('wpsync_push_state', 'Das Ziel dieses Pushs ist nicht benutzbar.', 409);
         }
         return [$content, self::workDir($content)];
+    }
+
+    /**
+     * Was der Tausch aus dem Ziel übernimmt: die Liste vom Begin und hinten angehängt, was seither
+     * dazugekommen ist – ein Plugin schreibt in seinen ausgeschlossenen Cache auch während des
+     * Uploads (Spec 0.10.0 E1). Angehängt, damit der Index eines fortgesetzten Commits gültig bleibt.
+     *
+     * @param array<string, mixed> $unit
+     * @param array<string, mixed> $plan
+     * @return list<string>
+     */
+    private static function carriedNow(string $content, array $unit, array $plan): array
+    {
+        $carried = array_values(array_map('strval', (array) $unit['carried']));
+        $dir     = $content . '/' . $unit['path'];
+        if (empty($unit['exists']) || !is_dir($dir)) {
+            return $carried;
+        }
+        $known = array_flip($carried) + (array) $unit['files'];
+        foreach (PushManifest::carried($dir, (string) $unit['path'], PathPatterns::fromList($plan['exclude_paths'] ?? [])) as $rel) {
+            if (!isset($known[$rel])) {
+                $carried[] = $rel;
+            }
+        }
+        return $carried;
     }
 
     /**
