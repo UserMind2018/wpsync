@@ -22,6 +22,24 @@ type Adjust struct {
 	AllUploads bool
 	// Tables are overrides of single tables (--table <name>=structure|skip), see ParseTables.
 	Tables map[string]string
+	// Paths replace the stored exclude paths (--exclude-path, normalized); nil keeps them.
+	Paths []string
+	// ClearPaths empties them (--no-exclude-paths).
+	ClearPaths bool
+}
+
+// paths is the exclude list after this scan: the flags replace or clear it, otherwise the stored
+// one stays – also when the preset or the interactive selection builds a new profile.
+func (a Adjust) paths(current *profile.Profile) profile.Paths {
+	switch {
+	case a.ClearPaths:
+		return profile.Paths{Exclude: []string{}}
+	case a.Paths != nil:
+		return profile.Paths{Exclude: a.Paths}
+	case current != nil && current.Paths.Exclude != nil:
+		return current.Paths
+	}
+	return profile.Paths{Exclude: []string{}}
 }
 
 // ErrEssentialTable: --table names a table that is always pulled with data.
@@ -168,6 +186,7 @@ func Run(o Options) (*profile.Profile, error) {
 	default:
 		return nil, ErrNeedsPreset
 	}
+	next.Paths = o.Adjust.paths(o.Current)
 	RenderSummary(o.Out, sheet, next)
 	fmt.Fprintf(o.Out, "\nRequests: %d\n", o.Client.Stats.Requests)
 	return next, nil

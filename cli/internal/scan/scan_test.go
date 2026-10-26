@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -101,5 +102,25 @@ func TestRunWithoutTerminalNeedsPreset(t *testing.T) {
 	_, err := Run(Options{Client: testClient(srv.URL), Out: &bytes.Buffer{}, Now: time.Now()})
 	if err == nil || !strings.Contains(err.Error(), "--preset") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAdjustPaths(t *testing.T) {
+	cur := &profile.Profile{Paths: profile.Paths{Exclude: []string{"uploads/old/"}}}
+	cases := []struct {
+		name string
+		a    Adjust
+		cur  *profile.Profile
+		want []string
+	}{
+		{"keep stored", Adjust{}, cur, []string{"uploads/old/"}},
+		{"replace", Adjust{Paths: []string{"uploads/x/"}}, cur, []string{"uploads/x/"}},
+		{"clear", Adjust{ClearPaths: true}, cur, []string{}},
+		{"none stored", Adjust{}, nil, []string{}},
+	}
+	for _, c := range cases {
+		if got := c.a.paths(c.cur); !reflect.DeepEqual(got.Exclude, c.want) {
+			t.Errorf("%s: %q, want %q", c.name, got.Exclude, c.want)
+		}
 	}
 }
