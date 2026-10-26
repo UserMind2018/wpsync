@@ -102,17 +102,22 @@ type Failure struct {
 	// about and why (Spec Content-Push P4 §4.5). Never a value of the option, never the target's list.
 	Plugins []agentapi.PluginRefusal `json:"plugins,omitempty"`
 	// Device and AdminURL: with exit 40 whose push window it is (as far as pair stored it) and
-	// where an administrator opens it (Spec Container-Push C8).
+	// where an administrator opens it (Spec Container-Push C8). Device alone: with reason
+	// push_foreign_device the device the push came from (Spec 0.9.1 F3).
 	Device   string `json:"device,omitempty"`
 	AdminURL string `json:"admin_url,omitempty"`
+	// KeyID: with exit 40 the key ID of this pairing – the admin page lists it below the device
+	// name, where two pairings of one machine look alike (Spec 0.9.1 G6).
+	KeyID string `json:"key_id,omitempty"`
 }
 
-// WindowError adds to an exit 40 the device and the admin page of the push window. Message and
+// WindowError adds to an exit 40 the device, its key ID and the admin page of the push window. Message and
 // exit code stay those of Err.
 type WindowError struct {
 	Err      error
 	Device   string
 	AdminURL string
+	KeyID    string
 }
 
 func (e *WindowError) Error() string { return e.Err.Error() }
@@ -179,7 +184,11 @@ func Classify(err error) Failure {
 	}
 	var window *WindowError
 	if f.Exit == ExitPushWindowClosed && errors.As(err, &window) {
-		f.Device, f.AdminURL = window.Device, window.AdminURL
+		f.Device, f.AdminURL, f.KeyID = window.Device, window.AdminURL, window.KeyID
+	}
+	var apiErr *agentapi.APIError
+	if errors.As(err, &apiErr) && apiErr.Reason != "" && f.Reason == apiErr.Reason {
+		f.Device = apiErr.Device
 	}
 	return f
 }
@@ -189,7 +198,8 @@ func Classify(err error) Failure {
 // reached the copy instead of the live site, an address of the agent outside the paired site,
 // the push cases of Spec Container-Push C11 and P-O3, what stops pull --content after the tables
 // are loaded (manifest, export of the working copy, canonical form), a push that
-// --require-rescue-db stopped, and a refusal of the plugin state of a push.
+// --require-rescue-db stopped, a refusal of the plugin state of a push, and the case the agent names
+// in the data of an error (Spec 0.9.1 F3, H3).
 func reason(err error, exit int) string {
 	if errors.Is(err, pull.ErrPullRunning) {
 		return "site_locked"
@@ -249,6 +259,10 @@ func reason(err error, exit int) string {
 		return "content_export_failed"
 	case errors.Is(err, content.ErrCanonVersion):
 		return "canon_version"
+	}
+	// What the agent itself names within its code (agent 0.9.1): push_foreign_device, content_pending.
+	if apiErr != nil {
+		return apiErr.Reason
 	}
 	return ""
 }

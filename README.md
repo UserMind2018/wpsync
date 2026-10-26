@@ -109,7 +109,7 @@ go build -o bin/wpsync ./cmd/wpsync
 wpsync setup
 wpsync doctor
 
-# 2. Auf der Site: Werkzeuge → wpsync → „Pairing-Code erzeugen“
+# 2. Auf der Site: Werkzeuge → wpsync → „Pairing-Code erzeugen“ (Gerätename optional)
 #    (oder per SSH: wp wpsync pair-code)
 wpsync pair https://www.example.com <code>
 
@@ -130,7 +130,8 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 |---|---|
 | `wpsync setup` | Einmalig pro Mac: legt `/etc/resolver/ddev.site` an (umgeht den DNS-Rebind-Schutz von Routern wie der FRITZ!Box), führt `mkcert -install` aus, prüft Docker und DDEV. Fragt einmal nach dem Passwort. |
 | `wpsync doctor [--server]` | Prüft ohne sudo: Resolver, Docker ≥ 25, DDEV, local-mailguard, freie Ports. Nennt pro Problem die Lösung, Exit-Code ≠ 0 bei Fehlern. `--server` prüft nur Version, Mail-Riegel, Docker-CLI und `WPSYNC_CONFIG_DIR` (OS-Container). |
-| `wpsync pair <url> <code> [--name n] [--device d] [--insecure]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). Nur über `https://`; `--insecure` erlaubt `http://` für lokale Testumgebungen. |
+| `wpsync pair <url> <code> [--name n] [--device d] [--insecure]` | Koppelt eine Site. Folgt Redirects und speichert die kanonische URL; das Secret landet in der macOS-Keychain. Der Name wird sonst aus der URL abgeleitet (`www.example.com` → `example-com`). `--device` ist der Gerätename im WP-Admin; ohne ihn gilt der Name, den der Administrator beim Erzeugen des Codes vergeben hat, sonst der Rechnername ([Gerätename und Kennung](#gerätename-und-kennung)). Nur über `https://`; `--insecure` erlaubt `http://` für lokale Testumgebungen. |
+| `wpsync sites` | Die gekoppelten Sites dieses Rechners mit Gerätename und Kennung (`key_id`), wie sie im WP-Admin unter Werkzeuge → wpsync stehen. Rein lokal: keine Anfrage an die Site, kein Secret. |
 | `wpsync unpair <site>` | Entfernt Konfiguration und Keychain-Eintrag lokal. Das Pairing danach im WP-Admin widerrufen. |
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
@@ -140,8 +141,8 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
 | `wpsync push <site> code [einheit…] [--activate plugins/<slug>]… [--deactivate plugins/<slug>]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0), mit `--content` ein Paket aus Inhaltszeilen (ab Agent 0.7.0, [Inhalte pushen](#inhalte-pushen)); `--no-code` lässt den Code weg, `--require-rescue-db` pusht Inhalte nur, wenn `rescue.php` sie auch ohne WordPress zurücknehmen kann (ab Agent 0.8.0, [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)). `--activate` und `--deactivate` schalten Plugins im selben Satz ein und aus (ab Agent 0.9.0, [Plugins im Push schalten](#plugins-im-push-schalten)). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
-| `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung. |
-| `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php` (ab Agent 0.8.0 samt Inhalten, ab 0.9.0 samt Plugin-Zustand). Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. |
+| `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung – nur einen Push des eigenen Geräts, und nicht, solange sein Inhalts-Schritt nie quittiert wurde ([Anwenden, Health-Check, Rücknahme](#anwenden-health-check-rücknahme)). |
+| `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php` (ab Agent 0.8.0 samt Inhalten, ab 0.9.0 samt Plugin-Zustand). Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. Zurücknehmen kann einen Push nur das Gerät, das ihn gepusht hat – oder ein Administrator im WP-Admin ([Code pushen](#code-pushen)). |
 | `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
 | `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. Nicht im selben Browserprofil öffnen, in dem man bei Live angemeldet ist (siehe [Zugang](#staging-auf-dem-server)). |
 | `wpsync staging refresh <site> [--code] [--yes] [--no-anonymize]` | Datenbank der Kopie neu von Live, mit `--code` auch den Code. Fragt nach, weil Daten der Kopie verloren gehen. |
@@ -331,6 +332,38 @@ Ab Agent 0.6.0 merkt sich der Agent, welcher WordPress-Benutzer das Fenster geö
 Push in diesem Fenster nennt ihn im Protokoll (`opened_by` mit der Benutzer-ID in
 `wpsync pushes --json`, Spalte „Fenster von“ im WP-Admin). Ein Fenster, das nicht im WP-Admin
 geöffnet wurde, hat keinen.
+
+#### Gerätename und Kennung
+
+Jede Kopplung hat einen **Gerätenamen** und eine **Kennung** (`key_id`, 16 Hex-Zeichen). Der Name
+ist frei und muss nicht eindeutig sein; die Kennung unterscheidet zwei Kopplungen desselben
+Rechners. Ab Agent 0.9.1 und CLI 0.9.1:
+
+- **Name beim Koppeln.** Im WP-Admin steht neben „Pairing-Code erzeugen“ das Feld „Gerätename
+  (optional)“. Der Name liegt beim Code und verfällt mit ihm (eingelöst, abgelaufen, verbrannt).
+  Vorrang: `wpsync pair … --device <name>` > Name aus dem WP-Admin > Rechnername. Die Antwort von
+  `/pair` nennt den gespeicherten Namen; die CLI merkt ihn sich und zeigt ihn samt Kennung
+  (`pair --json`: `device`, `key_id`). Eine CLI vor 0.9.1 sagt nicht, ob `--device` gesetzt war –
+  dann gewinnt der Name aus dem WP-Admin
+- **Tabelle „Gekoppelte Geräte“.** Unter dem Namen steht die Kennung; „Umbenennen“ ändert den
+  Namen dieser einen Kopplung (ein leerer Name wird abgelehnt). Pushes im Protokoll behalten den
+  Namen, den das Gerät beim Push hatte. Die Site-Datei der CLI behält den Namen vom Koppeln; ein
+  Probelauf nennt den aktuellen
+- **Auf dem Gerät.** `wpsync sites` nennt je Site Gerätename und Kennung (`--json`:
+  `data.sites: [{"site","url","key_id","device"}]`)
+- **Geschlossenes Fenster.** Der Probelauf sagt, wessen Fenster geschlossen ist: „Push-Fenster
+  geschlossen für Gerät <Name> (Kennung <key_id>) – öffnen unter <admin_url>“. Im `plan` stehen
+  immer `device: {"name","key_id"}` und `admin_url` – vom Agent, sonst (Agent vor 0.9.1, oder ein
+  Link ausserhalb der gekoppelten Site) aus dem, was `pair` gespeichert hat. Exit 40 nennt
+  zusätzlich `error.key_id`
+
+**Der Push eines anderen Geräts.** `rollback` und `pushes --confirm` gehen nur für Pushes der
+eigenen Kopplung. Für den Push eines anderen Geräts endet die CLI mit Exit 1,
+`error.reason: "push_foreign_device"` und `error.device` (Name des pushenden Geräts) – der Agent
+antwortet dafür weiter mit 404 `wpsync_push_unknown`, ab 0.9.1 mit `reason` und `device` in den
+Fehlerdaten. Zurücknehmen kann ihn das Gerät selbst oder ein Administrator im WP-Admin
+(Werkzeuge → wpsync → „Zurückrollen“). Eine Push-ID, die es nicht gibt, bleibt „Unbekannter
+Push.“ ohne `reason`.
 
 **Was gepusht wird.** Eine Einheit ist immer ein ganzes Verzeichnis: `plugins/<slug>`,
 `themes/<slug>` oder `mu-plugins`. Als geändert gilt eine Einheit, wenn eine ihrer Dateien lokal
@@ -1023,7 +1056,22 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
 - **Nacharbeiten** (`data.post_actions: [{"step","ok"}]`): Object-Cache der betroffenen Objekte,
   Elementor-CSS, Yoast-Indexables, bekannte Cache-Plugins (WP Rocket, W3 Total Cache, LiteSpeed,
   SG Optimizer, Breeze), Rewrite-Regeln bei Bedarf, Term-Zähler, eine Revision je geänderter
-  Seite – jeder Schritt nur, wenn das Plugin da ist. Ein Fehlschlag (`ok: false`) ist kein
+  Seite – jeder Schritt nur, wenn das Plugin da ist.
+  **Umfang von `elementor_css` (ab Agent 0.9.1):** Der Schritt leert nur, was das Paket berührt,
+  und sagt es mit `scope` (und `count` bei `posts`):
+  - `scope: "posts"`, `count: <n>` – je berührtem Beitrag die Meta `_elementor_css`,
+    `_elementor_element_cache`, `_elementor_page_assets` und die Datei
+    `uploads/elementor/css/post-<id>.css`; alle anderen Seiten behalten ihr CSS. Berührt ist ein
+    Beitrag, wenn eine `posts`- oder `postmeta`-Zeile von ihm im Paket steht (bei einer Revision
+    der Elternbeitrag); eine Zuordnung (`term_relationships`) allein zählt nicht
+  - `scope: "global"` – der ganze Cache wie bisher, sobald das Paket ein Template
+    (`elementor_library`), das aktive Kit oder eine Option `elementor_*`/`_elementor_*` berührt,
+    sich der Typ eines berührten Beitrags nicht bestimmen lässt oder mehr als 200 Beiträge
+    berührt sind
+  - kein Schritt – das Paket berührt keinen Beitrag und keine Option von Elementor (etwa nur
+    einen Term), oder Elementor ist nicht aktiv
+  Die Rücknahme geht denselben Umfang, auf Live wie in der Staging-Kopie; die Rücknahme eines
+  Pushs von vor 0.9.1 leert wie bisher alles. Ein Fehlschlag (`ok: false`) ist kein
   Fehler des Pushs – ausser bei einem Satz mit Plugin-Zustand für `object_cache`, `plugins_cache`
   und `plugins_effective` ([Plugins im Push schalten](#plugins-im-push-schalten)). Nach einer Rücknahme nennt das Feld die Nacharbeiten der Rücknahme (über den
   Agent); nach einer Rücknahme über `rescue.php` fehlt es – die holt der Agent nach, sobald
@@ -1044,6 +1092,17 @@ zulässt, entscheidet bisher allein das Paket – eine Freigabe auf der Site gib
   ab – nicht als bestätigt, sondern als zurückgerollt: Code und Uploads sind zurück, die Inhalte
   bleiben stehen (`status: "rolled_back"`, `warnings: ["content_kept"]`). Das Vorher-Abbild wird
   dabei aufgeräumt; zurücknehmen lassen sich diese Inhalte danach nicht mehr.
+- **`pushes --confirm` bei unquittiertem Inhalts-Schritt (ab Agent 0.9.1):** Ist ein Push
+  getauscht, sein Datenbank-Anteil aber nie quittiert worden (der Commit starb, bevor die
+  Transaktion ankam oder vermerkt war), lehnt der Agent die Bestätigung ab: 409
+  `wpsync_push_state` mit `reason: "content_pending"`, in der CLI Exit 1 mit
+  `error.reason: "content_pending"`. Sonst würde ein halber Satz bestätigt – Code ohne Inhalte
+  bzw. ohne Plugin-Liste – und der Notfallweg geschlossen. Der Weg: erst
+  `wpsync rollback <site> <push-id>` (die Rücknahme entscheidet am Abdruck, was von den Inhalten
+  wirklich steht), dann neu pushen. Bis 0.9.0 bestätigte `confirm` einen solchen Push. Der Ausweg
+  oben bleibt: hat `rescue.php` Code und Uploads schon zurückgenommen, nimmt `--confirm` die
+  Inhalte weiter an (`content_kept`). Die CLI selbst bestätigt nach einem Push ohnehin erst nach
+  quittiertem Inhalts-Schritt.
 - **`rollback`:** stellt das Vorher-Abbild her – an bestehenden Zeilen nur die Spalten, die der
   Push geschrieben hat (Kommentarzahl, Autor, `guid`, `autoload` bleiben, wie sie inzwischen
   sind) –, löscht eingefügte Objekte samt Meta und
@@ -1811,6 +1870,11 @@ Ergebnis von `push` `rescue_url`, sobald es eine `push_id` gibt; bei `push` und 
 (`snapshot_incomplete`, auch bei `pull`), wenn ihm nicht lesbare Dateien fehlen. Den
 Rollback-Schlüssel nennt die CLI nie – der Rückweg ist `wpsync rollback <site> <push-id>`, das bei
 stummem WordPress selbst über `rescue.php` geht.
+Ab CLI 0.9.1 zusätzlich: im `plan` immer `device` (`{"name","key_id"}` der anfragenden Kopplung)
+und `admin_url`; an einem Schritt `elementor_css` in `post_actions` `scope` (`posts`, `global`) und
+bei `posts` `count` (ab Agent 0.9.1); `pair` nennt `device`; neu `sites --json`
+(`data.sites: [{"site","url","key_id","device"}]`); `error.reason` `push_foreign_device` (mit
+`error.device`) und `content_pending`; Exit 40 mit `error.key_id`.
 `push` braucht mit `--json` `--yes`, bei geänderter Version zusätzlich `--allow-version-change`.
 `--to` kennt nur `live` und `staging`, genau so geschrieben; alles andere ist Exit 2.
 Ab CLI 0.6.0 zusätzlich: mit `--uploads` im `plan` das Objekt `uploads` (`need`, `same`,
@@ -1865,7 +1929,7 @@ Der Schlüssel sind die ersten 16 Hex-Zeichen von SHA-256 über den Pfad des Sit
 | 21 | disk_full | lokal kein Platz – oder der Server meldet keinen (HTTP 507, bei `push` und `staging`) |
 | 22 | postsetup_failed | Search-Replace oder Mail-Riegel gescheitert |
 | 30 | interrupted | SIGTERM; der nächste Pull setzt fort. `push`: nur vor dem Tausch, danach läuft er zu Ende |
-| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open`; ab CLI 0.5.0 mit `error.admin_url` und – wenn `pair` es kannte – `error.device` |
+| 40 | push_window_closed | Push-Fenster geschlossen, auch beim Rollback eines bestätigten Pushs und bei `staging create`/`refresh`/`delete`/`open`; ab CLI 0.5.0 mit `error.admin_url` und – wenn `pair` es kannte – `error.device`, ab CLI 0.9.1 bei `push` und `rollback` mit `error.key_id` (Kennung der Kopplung) |
 | 41 | push_conflict | Einheit auf dem Server geändert |
 | 42 | push_pending | ein unbestätigter Push blockiert – auch `staging refresh`/`delete` bei unbestätigtem Push nach Staging |
 | 43 | push_rolled_back | Health-Check schlechter als vorher, zurückgerollt |
@@ -1894,6 +1958,8 @@ gegen einen Agent unter 0.6.0 und `pull --content` gegen einen Agent unter 0.7.0
 | `rescue_db_unavailable` | `push --content --require-rescue-db`: `rescue.php` könnte die Inhalte nicht ohne WordPress zurücknehmen; `error.detail` nennt den Grund (`no_crypto`, `driver`, `no_image_key`, `probe_failed`, `write_failed`, `agent_outdated`). Nichts wurde getauscht |
 | `local_changed` | `push`: eine lokale Datei oder ein Verzeichnis änderte sich während des Pushs oder ist ein Symlink |
 | `target_mismatch` | `push`/`rollback`: der Agent antwortet für ein anderes Ziel, oder der Push ging an das andere Ziel |
+| `push_foreign_device` | `rollback`, `pushes --confirm`: den Push gibt es, er stammt aber von einem anderen Gerät; `error.device` nennt es. Zurücknehmen kann ihn nur dieses Gerät oder ein Administrator im WP-Admin (ab Agent 0.9.1) |
+| `content_pending` | `pushes --confirm`: der Inhalts-Schritt des Pushs wurde nie quittiert – erst `wpsync rollback <site> <push-id>`, dann neu pushen (ab Agent 0.9.1) |
 | `not_readable` | `push`: eine Datei oder ein Ordner einer zu pushenden Einheit ist für wpsync nicht lesbar; `error.path` nennt ihn relativ zum Docroot |
 | `upload_exists` | `push --uploads`: auf der Site liegt am selben Pfad eine andere Datei – nichts übertragen, nichts getauscht, auch mit `--force` |
 | `upload_type_blocked` | `push --uploads`: der Dateityp geht nie als Upload (PHP, `.htaccess`, `.user.ini`, versteckte Dateien, aktive Typen wie SVG/HTML, von WordPress nicht erlaubt), der Dateiname ist nicht WordPress-konform (Leerzeichen, Sonderzeichen, mittlere Endungen) oder der Inhalt passt nicht zur Endung |
@@ -2003,9 +2069,11 @@ denselben Code, sind dort aber von keinem E2E-Lauf abgedeckt.
   dessen `rescue_url`.
 - **`rollback`** braucht im Container-Modus die Push-ID (ohne: Exit 2) – ohne ID wählte die CLI
   den neuesten Push über alle Kopplungen der Site.
-- **Push-Fenster.** Exit 40 nennt `error.admin_url` (`…/wp-admin/tools.php?page=wpsync`) und das
-  Gerät aus `pair --device` (`error.device`, fehlt bei Kopplungen vor CLI 0.5.0). Das Fenster
-  öffnet immer ein Administrator im WP-Admin, nie der Aufrufer.
+- **Push-Fenster.** Exit 40 nennt `error.admin_url` (`…/wp-admin/tools.php?page=wpsync`), das
+  Gerät, wie `pair` es gespeichert hat (`error.device`, fehlt bei Kopplungen vor CLI 0.5.0), und
+  ab CLI 0.9.1 die Kennung der Kopplung (`error.key_id`) – sie steht im WP-Admin unter dem
+  Gerätenamen. Der Probelauf nennt dieselben Angaben schon im `plan` (`device`, `admin_url`).
+  Das Fenster öffnet immer ein Administrator im WP-Admin, nie der Aufrufer.
 - **Abbruch.** SIGTERM vor dem Tausch: Exit 30, auf der Site ist nichts getauscht; ein schon
   angelegter Push verfällt dort nach höchstens 10 Minuten (bis dahin Exit 44 für den nächsten
   Push). Ab dem Tausch läuft der Push trotz SIGTERM bis zur Bestätigung oder zum Rollback weiter,

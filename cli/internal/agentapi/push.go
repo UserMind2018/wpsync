@@ -107,7 +107,20 @@ type PushBegin struct {
 	// Plugins: the agent's plan for the plugin state the request named; nil when it named none –
 	// or when the agent is older than 0.9.0 and ignored the fields.
 	Plugins *PluginsPlan `json:"plugins"`
+	// Device and AdminURL: whose push window this is – name and key ID of the asking pairing – and
+	// where an administrator opens it (agent 0.9.1, Spec 0.9.1 G6). nil and empty from an older
+	// agent; AdminURL is empty too when it does not lie on the paired site.
+	Device   *PushDevice `json:"device"`
+	AdminURL string      `json:"admin_url"`
 }
+
+// PushDevice names a pairing: Name as the site lists it, KeyID tells two pairings of one machine apart.
+type PushDevice struct {
+	Name  string `json:"name"`
+	KeyID string `json:"key_id"`
+}
+
+var keyIDRe = regexp.MustCompile(`^[a-f0-9]{16}$`)
 
 // PushChunk is a file or a piece of one; Data travels base64-encoded.
 type PushChunk struct {
@@ -181,6 +194,15 @@ func (c *Client) PushBegin(req PushBeginRequest) (*PushBegin, error) {
 		case !stepRe.MatchString(db.Reason):
 			db.Reason = "unknown"
 		}
+	}
+	if res.Device != nil {
+		if res.Device.Name = cleanDevice(res.Device.Name); !keyIDRe.MatchString(res.Device.KeyID) {
+			res.Device.KeyID = ""
+		}
+	}
+	// The link is shown and handed to callers: only one into the paired site.
+	if !SameOrigin(c.BaseURL, res.AdminURL) {
+		res.AdminURL = ""
 	}
 	return &res, nil
 }

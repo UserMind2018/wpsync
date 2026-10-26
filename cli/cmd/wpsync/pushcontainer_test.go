@@ -127,6 +127,65 @@ func TestPushContainerDryRunJSON(t *testing.T) {
 	}
 }
 
+// Spec 0.9.1 G6, AC-248: bei geschlossenem Fenster nennt der Probelauf Gerät, Kennung und Admin-Seite –
+// im Plan-Event und im Text. Vom Agent 0.9.1 die Angaben der Site, sonst was pair gespeichert hat.
+func TestPushDryRunNamesTheDeviceOfAClosedWindow(t *testing.T) {
+	f, docroot := containerPushSite(t)
+	f.shut = true
+	admin := f.srv.URL + "/wp-admin/tools.php?page=wpsync"
+	begin := func(extra string) string {
+		return `{"push_id":"","target":"live","agent_version":"0.9.1","health_urls":[],"window_open":false,"pending":null,
+"units":[{"path":"plugins/x","exists":true,"version":"1.0","conflicts":[],"need":["x.php"],"writable":true}],"rescue":{"url":"","salt":""}` + extra + `}`
+	}
+	dry := func(json bool) result {
+		args := cargs(docroot, "push", "kunde", "code", "--dry-run")
+		if json {
+			args = append(args, "--json")
+		}
+		return runKC(t, context.Background(), lockedKeychain{t}, testSecret+"\n", args...)
+	}
+	planOf := func(res result) map[string]any {
+		lastResult(t, res, "push", 0)
+		return jsonLines(t, res.stdout)[0]["data"].(map[string]any)
+	}
+
+	// Agent 0.9.1: Name, wie die Site ihn führt (auch nach einem Umbenennen im WP-Admin).
+	f.begin = begin(`,"device":{"name":"Studio Büro","key_id":"0123456789abcdef"},"admin_url":"` + admin + `"`)
+	plan := planOf(dry(true))
+	if d := plan["device"].(map[string]any); d["name"] != "Studio Büro" || d["key_id"] != "0123456789abcdef" || plan["admin_url"] != admin || plan["window_open"] != false {
+		t.Errorf("plan = %v", plan)
+	}
+	if res := dry(false); res.code != 0 || !strings.Contains(res.stdout, "Push-Fenster geschlossen für Gerät Studio Büro (Kennung 0123456789abcdef) – öffnen unter "+admin) {
+		t.Errorf("exit %d\n%s%s", res.code, res.stdout, res.stderr)
+	}
+	// Ein Link ausserhalb der gekoppelten Site wird nie gezeigt: dann die Seite, die die CLI selbst kennt.
+	f.begin = begin(`,"device":{"name":"Studio Büro","key_id":"0123456789abcdef"},"admin_url":"https://evil.example/wp-admin/tools.php?page=wpsync"`)
+	if plan := planOf(dry(true)); plan["admin_url"] != admin {
+		t.Errorf("plan = %v", plan)
+	}
+	// Agent vor 0.9.1: Kennung und Name aus der Site-Datei.
+	f.begin = begin("")
+	plan = planOf(dry(true))
+	if d := plan["device"].(map[string]any); d["name"] != "" || d["key_id"] != "0123456789abcdef" || plan["admin_url"] != admin {
+		t.Errorf("plan = %v", plan)
+	}
+	s, _ := sites.Load("kunde")
+	s.Device = "agentic-os-dev"
+	sites.Save(s)
+	if d := planOf(dry(true))["device"].(map[string]any); d["name"] != "agentic-os-dev" {
+		t.Errorf("device = %v", d)
+	}
+	// Bei offenem Fenster stehen die Felder ebenso im Plan; der Text bleibt.
+	f.shut, f.begin = false, ""
+	res := dry(false)
+	if !strings.Contains(res.stdout, "Push-Fenster: offen") {
+		t.Errorf("stdout = %s", res.stdout)
+	}
+	if plan := planOf(dry(true)); plan["window_open"] != true || plan["admin_url"] != admin {
+		t.Errorf("plan = %v", plan)
+	}
+}
+
 // Spec Content-Push §10: --uploads gilt auch im Container-Modus. Der Fake ist ein Agent 0.5.0 –
 // die Einheit geht mit, die CLI bricht mit Exit 11 und required 0.6.0 ab. Eine fehlende oder
 // kaputte Liste ist Exit 2, ohne Anfrage an die Site.
@@ -201,6 +260,10 @@ func TestPushContainerWindowClosedNamesDeviceAndAdminPage(t *testing.T) {
 	}
 	if _, ok := e["device"]; ok {
 		t.Errorf("device unknown for an old pairing, must be missing: %v", e)
+	}
+	// Spec 0.9.1 G6: die Kennung der Kopplung steht immer dabei – auch im Text.
+	if e["key_id"] != "0123456789abcdef" || !strings.Contains(fmt.Sprint(e["message"]), "(Kennung 0123456789abcdef)") {
+		t.Errorf("error = %v", e)
 	}
 	s, _ := sites.Load("kunde")
 	s.Device = "agentic-os-dev"

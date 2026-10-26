@@ -44,8 +44,10 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 
   wpsync setup                         einmalig pro Mac (fragt einmal nach dem Passwort)
   wpsync doctor [--server]             Umgebung prüfen (--server: nur was im OS-Container zählt)
-  wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync; nur https, lokal: --insecure)
+  wpsync pair <url> <code> [--name n]  Site koppeln (Code aus Werkzeuge → wpsync; nur https, lokal: --insecure;
+                                       --device n: Gerätename im WP-Admin statt des Rechnernamens)
   wpsync unpair <site>                 Kopplung lokal entfernen
+  wpsync sites                         gekoppelte Sites mit Gerätename und Kennung (wie im WP-Admin)
   wpsync list                          lokale Umgebungen mit Status, lokaler und Live-URL
   wpsync stop <site>… | --all          lokale Umgebung(en) stoppen (Daten bleiben erhalten)
   wpsync scan <site> [--refresh]       zeigen, was auf der Site liegt, und auswählen, was gezogen wird
@@ -87,7 +89,7 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 // text-only.
 var jsonCommands = map[string]bool{
 	"pair": true, "scan": true, "pull": true, "status": true, "unpair": true, "doctor": true, "version": true,
-	"staging": true, "push": true, "pushes": true, "rollback": true, "content": true,
+	"staging": true, "push": true, "pushes": true, "rollback": true, "content": true, "sites": true,
 }
 
 // stagingCommands are the subcommands of wpsync staging (Spec 2b 6.1).
@@ -166,6 +168,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdPair(args)
 	case "unpair":
 		return a.cmdUnpair(args)
+	case "sites":
+		return a.cmdSites(args)
 	case "list":
 		return a.cmdList(args)
 	case "stop":
@@ -300,9 +304,11 @@ func (a *app) cmdVersion(args []string) error {
 
 // pairResult is the data of pair --json.
 type pairResult struct {
-	Site                 string `json:"site"`
-	URL                  string `json:"url"`
-	KeyID                string `json:"key_id"`
+	Site  string `json:"site"`
+	URL   string `json:"url"`
+	KeyID string `json:"key_id"`
+	// Device: the name the site lists this pairing under (Spec 0.9.1 G3).
+	Device               string `json:"device"`
 	AgentVersion         string `json:"agent_version"`
 	RequiredAgentVersion string `json:"required_agent_version"`
 	AgentOK              bool   `json:"agent_ok"`
@@ -313,10 +319,10 @@ type pairResult struct {
 func (a *app) cmdPair(args []string) error {
 	fs := a.flags("pair")
 	name := fs.String("name", "", "lokaler Name der Site (Standard: aus der URL)")
-	device := fs.String("device", "", "Gerätename im WP-Admin (Standard: Rechnername)")
+	device := fs.String("device", "", "Gerätename im WP-Admin (Standard: der Name, den der Administrator dem Code gab, sonst der Rechnername)")
 	insecure := fs.Bool("insecure", false, "http:// zulassen – nur für lokale Testumgebungen")
 	secretOut := fs.Bool("secret-out", false, "Secret einmal im JSON-Ergebnis ausgeben statt in der Keychain speichern (nur mit --json)")
-	positional, err := a.parse(fs, args, exactly(2), "wpsync pair <url> <code> [--name n] [--insecure] [--json [--secret-out]]")
+	positional, err := a.parse(fs, args, exactly(2), "wpsync pair <url> <code> [--name n] [--device n] [--insecure] [--json [--secret-out]]")
 	if err != nil {
 		return err
 	}
@@ -339,11 +345,13 @@ func (a *app) cmdPair(args []string) error {
 	if !sites.ValidName(*name) {
 		return cliout.Usage(fmt.Errorf("ungültiger Name %q (erlaubt: a-z, 0-9, Bindestrich)", *name))
 	}
-	if *device == "" {
+	// --device wins over a name the administrator gave the code; the host name loses to it (Spec 0.9.1 G2).
+	given := *device != ""
+	if !given {
 		host, _ := os.Hostname()
 		*device = host
 	}
-	res, err := agentapi.Pair(hc, base, positional[1], *device)
+	res, err := agentapi.Pair(hc, base, positional[1], *device, given)
 	if err != nil {
 		var apiErr *agentapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Message != "" {
@@ -356,17 +364,62 @@ func (a *app) cmdPair(args []string) error {
 			return fmt.Errorf("Secret konnte nicht in der Keychain gespeichert werden: %w", err)
 		}
 	}
+	// The name the site stored (agent 0.9.1); an older agent took the one sent.
+	if res.Device != "" {
+		*device = res.Device
+	}
 	if err := sites.Save(&sites.Site{Name: *name, URL: base, KeyID: res.KeyID, RPS: 1, Device: *device}); err != nil {
 		return err
 	}
-	data := pairResult{Site: *name, URL: base, KeyID: res.KeyID, AgentVersion: res.AgentVersion,
+	data := pairResult{Site: *name, URL: base, KeyID: res.KeyID, Device: *device, AgentVersion: res.AgentVersion,
 		RequiredAgentVersion: agentapi.MinAgentVersion, AgentOK: agentapi.VersionAtLeast(res.AgentVersion, agentapi.MinAgentVersion)}
 	if *secretOut {
 		data.Secret = res.Secret
 	}
 	a.data = data
-	fmt.Fprintf(a.out(), "✓ %s gekoppelt als %q (Agent %s)\n  Nächster Schritt: wpsync scan %s\n", base, *name, res.AgentVersion, *name)
+	fmt.Fprintf(a.out(), "✓ %s gekoppelt als %q (Agent %s)\n  Gerät: %s (Kennung %s) – so steht es im WP-Admin unter Werkzeuge → wpsync\n  Nächster Schritt: wpsync scan %s\n",
+		base, *name, res.AgentVersion, *device, res.KeyID, *name)
 	return nil
+}
+
+// pairedSite is one entry of sites --json: the pairing as this machine knows it. No secret.
+type pairedSite struct {
+	Site   string `json:"site"`
+	URL    string `json:"url"`
+	KeyID  string `json:"key_id"`
+	Device string `json:"device"`
+}
+
+// cmdSites lists the paired sites with the name and the key ID the WP admin shows for this
+// machine (Spec 0.9.1 G7). Purely local: no request, no secret.
+func (a *app) cmdSites(args []string) error {
+	fs := a.flags("sites")
+	if _, err := a.parse(fs, args, exactly(0), "wpsync sites [--json]"); err != nil {
+		return err
+	}
+	paired, err := sites.List()
+	if err != nil {
+		return err
+	}
+	list := make([]pairedSite, 0, len(paired))
+	for _, s := range paired {
+		list = append(list, pairedSite{Site: s.Name, URL: s.URL, KeyID: s.KeyID, Device: s.Device})
+	}
+	a.data = map[string]any{"sites": list}
+	if len(list) == 0 {
+		fmt.Fprintln(a.out(), "Keine Site gekoppelt – wpsync pair <url> <code>")
+		return nil
+	}
+	w := tabwriter.NewWriter(a.out(), 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "SITE\tURL\tGERÄT\tKENNUNG")
+	for _, s := range list {
+		device := s.Device
+		if device == "" {
+			device = "–" // pairings before CLI 0.5.0
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Site, s.URL, device, s.KeyID)
+	}
+	return w.Flush()
 }
 
 func (a *app) cmdUnpair(args []string) error {
@@ -1133,7 +1186,7 @@ func windowInfo(err error, site *sites.Site) error {
 	if err == nil || cliout.Classify(err).Exit != cliout.ExitPushWindowClosed {
 		return err
 	}
-	return &cliout.WindowError{Err: err, Device: site.Device, AdminURL: adminURL(site)}
+	return &cliout.WindowError{Err: err, Device: site.Device, AdminURL: adminURL(site), KeyID: site.KeyID}
 }
 
 // pushError turns push errors into the next step; the original error stays for the exit code.
@@ -1196,7 +1249,7 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.Is(err, push.ErrRollbackWindow):
 		return cliout.Hint(err, fmt.Sprintf("%v – ein Administrator muss das Push-Fenster unter %s/wp-admin/tools.php?page=wpsync öffnen oder den Push dort selbst zurückrollen", err, site.URL))
 	case errors.Is(err, push.ErrWindowClosed):
-		return cliout.Hint(err, fmt.Sprintf("das Push-Fenster ist geschlossen – öffnen unter %s/wp-admin/tools.php?page=wpsync", site.URL))
+		return cliout.Hint(err, fmt.Sprintf("das Push-Fenster ist geschlossen %s – öffnen unter %s", push.WindowOf(site.Device, site.KeyID), adminURL(site)))
 	case errors.Is(err, push.ErrConflict):
 		return cliout.Hint(err, fmt.Sprintf("die Site hat sich seit dem letzten Pull geändert – zuerst wpsync pull %s, lokal zusammenführen und erneut pushen (bewusst überschreiben: --force)", site.Name))
 	case errors.Is(err, push.ErrNotWritable):
@@ -1255,6 +1308,12 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.As(err, &apiErr) && apiErr.Code == "rest_no_route":
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgent, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kann noch nicht pushen – Agent %s installieren", site.URL, push.MinAgent))
+	case errors.As(err, &apiErr) && apiErr.Reason == "push_foreign_device":
+		// The agent names the device; where an administrator takes the push back, the CLI knows (Spec 0.9.1 F3).
+		return cliout.Hint(err, fmt.Sprintf("%s\n  Im WP-Admin zurückrollen: %s", agentText(apiErr.Message), adminURL(site)))
+	case errors.As(err, &apiErr) && apiErr.Reason == "content_pending":
+		// The agent does not know the local name of the site (Spec 0.9.1 H3).
+		return cliout.Hint(err, strings.Replace(agentText(apiErr.Message), "<site>", site.Name, 1))
 	case errors.As(err, &apiErr) && (strings.HasPrefix(apiErr.Code, "wpsync_push_") || strings.HasPrefix(apiErr.Code, "wpsync_staging_") || strings.HasPrefix(apiErr.Code, "wpsync_upload_") || strings.HasPrefix(apiErr.Code, "wpsync_content_") || strings.HasPrefix(apiErr.Code, agentapi.PluginsCodePrefix)):
 		return cliout.Hint(err, agentText(apiErr.Message))
 	}

@@ -3,7 +3,50 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unreleased] · CLI 0.9.0 · Agent 0.9.0
+## [0.9.1] – 2026-10-26 · Agent 0.9.1
+
+### Elementor-Cache gezielt, fremder Push, Gerätename, `confirm`
+
+**Agent und CLI ändern sich.** Keine neue Mindestversion: alle neuen Felder sind zusätzlich, CLI
+0.9.1 läuft gegen Agent 0.9.0 und umgekehrt wie bisher. Einzige strengere Stelle: `/push/confirm`
+lehnt einen Push mit unquittiertem Inhalts-Schritt ab.
+
+**Neu**
+- Nacharbeit `elementor_css` nur noch so weit, wie das Paket reicht: `scope: "posts"` mit
+  `count` – je berührtem Beitrag die Meta `_elementor_css`, `_elementor_element_cache`,
+  `_elementor_page_assets` und `uploads/elementor/css/post-<id>.css` –, `scope: "global"` bei
+  Template (`elementor_library`), Kit, Option `elementor_*`/`_elementor_*`, unbestimmbarem Typ
+  oder mehr als 200 Beiträgen; kein Schritt, wenn das Paket weder einen Beitrag noch eine Option
+  von Elementor berührt. Gilt für Anwenden und Rücknahme, auf Live und in der Staging-Kopie; nach
+  `rescue.php` holt der Agent die Nacharbeit mit demselben Umfang nach
+- `rollback` und `pushes --confirm` auf den Push eines anderen Geräts: weiter 404
+  `wpsync_push_unknown`, jetzt mit `reason: "push_foreign_device"` und `device`; die CLI nennt
+  Gerät und Admin-Seite, `--json` trägt `error.reason` und `error.device`. Eine Push-ID, die es
+  nicht gibt, bleibt „Unbekannter Push.“
+- WP-Admin: Feld „Gerätename (optional)“ beim Erzeugen eines Pairing-Codes; Tabelle „Gekoppelte
+  Geräte“ zeigt unter dem Namen die Kennung (`key_id`) und kann eine Kopplung umbenennen
+- `wpsync pair`: Vorrang `--device` > Name aus dem WP-Admin > Rechnername (`device_given` in der
+  Anfrage, `device` in der Antwort); die CLI speichert den Namen der Site und zeigt ihn samt
+  Kennung, `pair --json` nennt `device`
+- `wpsync sites [--json]`: gekoppelte Sites mit Gerätename und Kennung – rein lokal
+- `/push/begin` nennt immer `device: {name, key_id}` und `admin_url`; der Probelauf sagt bei
+  geschlossenem Fenster „Push-Fenster geschlossen für Gerät <Name> (Kennung <key_id>) – öffnen
+  unter <admin_url>“, der `plan` trägt beide Felder, Exit 40 zusätzlich `error.key_id`
+- `scripts/e2e-content-push.sh`, `e2e-rescue-db.sh` und `e2e-local.sh` prüfen die neuen Fälle
+
+**Geändert**
+- `/push/confirm` (und `wpsync pushes --confirm`) lehnt einen getauschten Push ab, dessen
+  Inhalts-Schritt nie quittiert wurde (`content.state: pending`): 409 `wpsync_push_state`,
+  `reason: "content_pending"`, CLI Exit 1 – erst `wpsync rollback`, dann neu pushen. Bisher wurde
+  ein solcher Push bestätigt (P4 Q8). Der Ausweg `content_kept` nach `rescue.php` bleibt
+- Der Probelauf schreibt bei geschlossenem Fenster die Zeile oben statt „Push-Fenster: geschlossen
+  – im WP-Admin unter Werkzeuge → wpsync öffnen“
+- `changes` im Nachher-Abbild eines Pushs trägt zusätzlich `elementor` (`posts`, `global`); die
+  bestehenden Felder behalten ihre Bedeutung
+
+**Behoben**
+- In der Staging-Kopie blieben beim Leeren des Elementor-Cache `_elementor_element_cache` und
+  `_elementor_page_assets` stehen
 
 ### Plugins im Push aktivieren und deaktivieren (Content-Push P4)
 

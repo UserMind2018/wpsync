@@ -64,7 +64,7 @@ final class ContentApplyPluginsTest extends ContentApplyCase
         $this->assertSame(0, $result['rows']);
         $this->assertSame([], $result['after'], 'content.after nennt active_plugins nie (§4.3)');
         $this->assertSame($delta, $result['plugins']);
-        $changes = ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => true, 'plugins' => $delta + ['h' => hash('sha256', $value)]];
+        $changes = ['posts' => [], 'revisions' => [], 'terms' => [], 'term_taxonomy' => [], 'options' => ['active_plugins'], 'rewrite' => true, 'elementor' => ['posts' => [], 'global' => false], 'plugins' => $delta + ['h' => hash('sha256', $value)]];
         $this->assertSame($changes, $result['changes']);
         $this->assertSame(['begin', 'write options:active_plugins', 'commit'], $this->store->log);
         $this->assertSame(['options:active_plugins'], $this->store->locked, 'gelesen unter Sperre');

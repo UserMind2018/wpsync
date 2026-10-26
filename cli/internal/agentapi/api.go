@@ -132,9 +132,15 @@ func Discover(hc *http.Client, rawURL string) (string, error) {
 	return final.Scheme + "://" + final.Host + strings.TrimRight(final.Path, "/"), nil
 }
 
-// Pair redeems a pairing code; the secret is returned exactly once.
-func Pair(hc *http.Client, baseURL, code, device string) (*PairResult, error) {
-	payload, _ := json.Marshal(map[string]string{"code": code, "device": device})
+// Pair redeems a pairing code; the secret is returned exactly once. given says that device was
+// named with --device: then it wins over a name the administrator gave the code, which in turn
+// wins over a host name (agent 0.9.1, Spec 0.9.1 G2). An older agent ignores the field.
+func Pair(hc *http.Client, baseURL, code, device string, given bool) (*PairResult, error) {
+	body := map[string]any{"code": code, "device": device}
+	if given {
+		body["device_given"] = true
+	}
+	payload, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(baseURL, "/")+"/?rest_route=/wpsync/v1/pair", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -153,6 +159,7 @@ func Pair(hc *http.Client, baseURL, code, device string) (*PairResult, error) {
 	if err := json.NewDecoder(&boundedReader{r: resp.Body, left: smallAnswerBytes}).Decode(&res); err != nil || res.KeyID == "" || res.Secret == "" {
 		return nil, fmt.Errorf("pair: invalid response")
 	}
+	res.Device = cleanDevice(res.Device)
 	return &res, nil
 }
 

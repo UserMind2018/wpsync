@@ -20,7 +20,7 @@ import (
 
 // Version is the CLI version, sent in the User-Agent. Release builds override it
 // via -ldflags "-X github.com/usermind/wpsync/internal/agentapi.Version=…".
-var Version = "0.8.0"
+var Version = "0.9.1"
 
 // UserAgent is fixed and documented so admins can allow it explicitly (Spike B23).
 func UserAgent() string { return "wpsync/" + Version }
@@ -51,6 +51,11 @@ type APIError struct {
 	// it is about, and – without a rescue envelope – why there is none. Never a value of the option.
 	Plugins []PluginRefusal
 	Detail  string
+	// Reason and Device: the case within Code the agent names in its error data (agent 0.9.1) –
+	// push_foreign_device with the name of the device that pushed, content_pending. Empty from an
+	// older agent.
+	Reason string
+	Device string
 }
 
 func (e *APIError) Error() string {
@@ -288,6 +293,18 @@ func (c *Client) wrapBody(resp *http.Response, route string) (*http.Response, er
 	return resp, nil
 }
 
+// maxDeviceRunes: the agent stores a device name with at most 100 characters (Pairing::device()).
+const maxDeviceRunes = 100
+
+// cleanDevice makes a device name from the site safe for the terminal: a name an administrator
+// chose stays readable, but never longer than the agent stores it.
+func cleanDevice(name string) string {
+	if device := []rune(CleanText(name)); len(device) > maxDeviceRunes {
+		return string(device[:maxDeviceRunes])
+	}
+	return CleanText(name)
+}
+
 // readAPIError reads a non-200 answer. Code and message come from the site; they are cleaned here,
 // once for every caller, so no error output can steer the terminal (M3).
 func readAPIError(resp *http.Response) error {
@@ -314,6 +331,8 @@ func readAPIError(resp *http.Response) error {
 			Tables     []string        `json:"tables"`
 			Plugins    []PluginRefusal `json:"plugins"`
 			Detail     string          `json:"detail"`
+			Reason     string          `json:"reason"`
+			Device     string          `json:"device"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(data, &wpErr) == nil && wpErr.Code != "" {
@@ -332,6 +351,10 @@ func readAPIError(resp *http.Response) error {
 					e.Detail = "unknown"
 				}
 			}
+		}
+		if stepRe.MatchString(wpErr.Data.Reason) {
+			e.Reason = wpErr.Data.Reason
+			e.Device = cleanDevice(wpErr.Data.Device)
 		}
 		return e
 	}

@@ -41,6 +41,9 @@ final class PushContentFlowTest extends PushContentFlowCase
         $this->assertSame([ContentFixtures::HOME . '/?p=219'], $content['health_urls'], 'nur veröffentlichte Seiten, die es schon gibt');
         $this->assertSame([], $dry->data['units']);
         $this->assertFalse($dry->data['window_open']);
+        // Spec 0.9.1 G6, AC-248: wessen Fenster geschlossen ist und wo es sich öffnen lässt – auch im Probelauf.
+        $this->assertSame(['name' => 'test-device', 'key_id' => self::KEY], $dry->data['device']);
+        $this->assertSame('https://example.test/wp-admin/tools.php?page=wpsync', $dry->data['admin_url']);
         $this->assertSame([], Store::$pushes);
         $this->assertSame([], $this->liveDb->log, 'der Probelauf schreibt nichts');
         $this->assertSame(['live'], array_values(array_unique($this->resolved)));
@@ -104,6 +107,7 @@ final class PushContentFlowTest extends PushContentFlowCase
         $sha   = $this->stage($this->rows());
         $begin = $this->begin($sha);
         $id    = (string) $begin->data['push_id'];
+        $this->assertSame(['name' => 'test-device', 'key_id' => self::KEY], $begin->data['device'], 'der echte Begin nennt das Gerät ebenso');
         Store::$until = 0;
         $this->assertRefused('wpsync_push_window', 403, Push::commit(['push_id' => $id], self::KEY));
         $this->assertSame([], $this->liveDb->log);

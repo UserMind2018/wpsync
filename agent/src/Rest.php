@@ -237,7 +237,8 @@ final class Rest
 
         $keyId  = Pairing::newKeyId();
         $secret = Pairing::newSecret();
-        $device = Pairing::device(sanitize_text_field(self::text($request, 'device')));
+        // Spec 0.9.1 G2: --device der CLI > Name, den der Administrator dem Code gab > Rechnername.
+        $device = Pairing::choose(sanitize_text_field(self::text($request, 'device')), self::param($request, 'device_given') === true, $stored);
         if (!Store::addPairing($keyId, $secret, $device)) {
             // Der Code bleibt gültig: der Client hat kein Pairing bekommen (CR-01).
             return new \WP_Error('wpsync_store', 'Pairing konnte nicht gespeichert werden.', ['status' => 500]);
@@ -250,6 +251,8 @@ final class Rest
             'secret'        => $secret,
             'home'          => home_url(),
             'agent_version' => WPSYNC_VERSION,
+            // Unter diesem Namen führt die Site das Gerät (G3) – die CLI merkt ihn sich.
+            'device'        => $device,
         ]);
     }
 

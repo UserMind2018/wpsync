@@ -2,6 +2,9 @@
 # E2E Inhalts-Push (Spec Content-Push P2b, §7; AC-147 Staging, AC-149–AC-155, AC-157; P3 AC-158): ein
 # Satz aus Code, Uploads und Inhalten gegen eine eigene Apache-Quelle – Probelauf ohne Fenster,
 # Staging, Live, Rücknahme über den Agent und über rescue.php, dazu die Ablehnungen.
+# Dazu Spec 0.9.1 E (AC-233–AC-237, AC-239, AC-240): die Nacharbeit elementor_css gezielt – gegen ein
+# mu-plugin, das die Klasse von Elementor stellt (Elementor selbst ist in der Quelle nicht installiert) –
+# und G6 (AC-248): der Probelauf nennt bei geschlossenem Fenster Gerät, Kennung und Admin-Seite.
 # Seit Agent 0.8.0 (P3) nimmt rescue.php auch die Inhalte zurück: der Fall „WordPress antwortet
 # nicht“ endet hier ganz zurückgerollt. Der Fall von davor – rescue.php lässt die Inhalte stehen
 # (content_not_rolled_back, der Push bleibt offen und blockiert mit Exit 42, wpsync rollback holt
@@ -245,7 +248,7 @@ finish() {
   local rc=$?
   trap - EXIT
   set +e
-  rm -f "$WPC/mu-plugins/e2e-fatal.php"
+  rm -f "$WPC/mu-plugins/e2e-fatal.php" "$WPC/mu-plugins/e2e-elementor.php"
   if [ -f "$SRC/.ddev/config.yaml" ]; then
     [ -z "$KEY_ID" ] || window 0 2>/dev/null
     (cd "$SRC" && ddev mysql -e "DROP TRIGGER IF EXISTS e2e_boom" >/dev/null 2>&1)
@@ -289,7 +292,7 @@ if ! ddev wp core is-installed >/dev/null 2>&1; then
 fi
 ddev wp config set DISABLE_WP_CRON true --raw --type=constant
 ddev wp config set WPSYNC_ALLOW_HTTP true --raw --type=constant
-rm -f "$WPC/mu-plugins/e2e-fatal.php"
+rm -f "$WPC/mu-plugins/e2e-fatal.php" "$WPC/mu-plugins/e2e-elementor.php"
 ddev mysql -e "DROP TRIGGER IF EXISTS e2e_boom"
 # Permalinks auf Apache: WP-CLI schreibt ohne apache_modules in seiner Konfiguration keine .htaccess,
 # und ohne sie antwortet /e2e-b/ mit 404 – der Health-Check sähe die geänderte Seite nie.
@@ -468,6 +471,11 @@ eq "Probelauf: keine Konflikte" "$(event dry plan | jq -c '.content.conflicts')"
 eq "Probelauf: Grenzen" "$(event dry plan | jq -c '[.content.limits.max_rows, .content.limits.max_bytes]')" '[5000,8388608]'
 eq "Probelauf: kein Messwert, nichts wurde angewandt" "$(last dry '.data | has("content")')" false
 eq "Probelauf: Fenster zu" "$(event dry plan | jq -r '.window_open')" false
+# Spec 0.9.1 G6, AC-248: wessen Fenster geschlossen ist und wo es sich öffnen lässt.
+eq "AC-248: plan.device nennt die Kennung dieser Kopplung" "$(event dry plan | jq -r '.device.key_id')" "$KEY_ID"
+eq "AC-248: plan.device.name ist der Name, unter dem die Site das Gerät führt" "$(event dry plan | jq -r '.device.name')" "$(src wp eval "echo WpSync\\Store::deviceFor('$KEY_ID');")"
+eq "AC-248: plan.admin_url" "$(event dry plan | jq -r '.admin_url')" "$SOURCE_URL/wp-admin/tools.php?page=wpsync"
+ok "AC-248: der Text nennt Gerät, Kennung und Admin-Seite" grep -Eq "Push-Fenster geschlossen für Gerät .+ \(Kennung $KEY_ID\) – öffnen unter $SOURCE_URL/wp-admin/tools.php\?page=wpsync" "$JSON/dry.err"
 eq "N3: ohne Fenster ist der Probelauf nur ein Teil – plan.content.partial" "$(event dry plan | jq -r '.content.partial')" true
 ok "N3: die CLI sagt es in einer Zeile" hasF "$JSON/dry.err" "nur teilweise geprüft"
 eq "M1/N1: die Grenzen nennen den ID-Abstand und die Summe der Vorher-Zustände" "$(event dry plan | jq -c '[.content.limits.id_headroom, .content.limits.max_state_bytes]')" '[2000000,67108864]'
@@ -484,6 +492,8 @@ eq "Probelauf: Live unverändert" "$(post src "$PAGE_A" post_title)" "E2E A"
 eq "Probelauf: die neue Option gibt es auf Live nicht" "$(opt src options_e2e_neu)" ""
 push_content no-window edit --yes
 eq "S3: echter Push ohne Fenster: Exit 40" "$RC" 40
+eq "G6: Exit 40 nennt die Kennung" "$(last no-window '.error.key_id')" "$KEY_ID"
+ok "G6: … auch im Text" hasF "$JSON/no-window.err" "(Kennung $KEY_ID)"
 eq "S3: ohne Fenster nichts auf Live" "$(post src "$PAGE_A" post_title)" "E2E A"
 
 echo "== §7.8: Push nach Staging – dieselben Abdrücke, die Adressen der Kopie"
@@ -595,6 +605,153 @@ eq "Rücknahme B: Titel auf Live wie vorher" "$(post src "$PAGE_B" post_title)" 
 eq "Rücknahme B: die Zeile Byte für Byte wie vorher (auch post_modified)" "$(rowsum "$PAGE_B")" "$SUM_B_BEFORE"
 eq "Rücknahme B: Manifest wie vor dem Push" "$(LC_ALL=C sort "$CONTENT/manifest.jsonl" | shasum | cut -d' ' -f1)" "$(LC_ALL=C sort "$E2E/manifest.before-b" | shasum | cut -d' ' -f1)"
 no "Rücknahme B: rescue.php wurde nicht gebraucht" hasF "$JSON/rollback-b.err" "rescue.php"
+
+echo "== Spec 0.9.1 E: Nacharbeit elementor_css nur so weit, wie das Paket reicht (AC-233–AC-237, AC-239, AC-240)"
+eq "AC-240: ohne Elementor kein Schritt elementor_css" "$(last push-b '.data.post_actions | map(select(.step == "elementor_css")) | length')" 0
+eq "AC-240: … auch nicht bei der Rücknahme" "$(last rollback-b '.data.post_actions | map(select(.step == "elementor_css")) | length')" 0
+# Elementor ist in der Quelle nicht installiert. Der Agent erkennt es an der Klasse \Elementor\Plugin – die
+# stellt hier ein mu-plugin; clear_cache() (der globale Weg) schreibt nur eine Zeile ins Protokoll. Das gezielte
+# Leeren geht ohne die API von Elementor und läuft damit echt: ContentSql gegen MariaDB, Dateien unter uploads.
+cat >"$WPC/mu-plugins/e2e-elementor.php" <<'PHP'
+<?php
+namespace Elementor {
+    class Plugin
+    {
+        public static $instance;
+    }
+}
+namespace {
+    \Elementor\Plugin::$instance = (object) ['files_manager' => new class {
+        public function clear_cache(): void
+        {
+            @file_put_contents(dirname(ABSPATH) . '/e2e-elementor.log', "clear_cache\n", FILE_APPEND);
+        }
+    }];
+}
+PHP
+EL_LOG="$SRC/e2e-elementor.log"
+EL_KEYS="'_elementor_css', '_elementor_element_cache', '_elementor_page_assets'"
+el_dir() { case "$1" in stg) echo "$PUB/$STG_DIR/wp-content/uploads/elementor/css" ;; *) echo "$WPC/uploads/elementor/css" ;; esac; }
+# el_seed <wo>: der Cache zweier Elementor-Seiten – X (Seite B, die das Paket ändert) und Y (Seite „voll“, unberührt):
+# die drei Meta und die CSS-Datei. Was schon da ist, bleibt (Wert, mtime).
+el_seed() {
+  wp_in "$1" eval "foreach ([$PAGE_B, $PAGE_FULL] as \$id) { foreach ([$EL_KEYS] as \$k) { update_post_meta(\$id, \$k, 'cache ' . \$k . ' ' . \$id); } }" --skip-plugins --skip-themes >/dev/null
+  mkdir -p "$(el_dir "$1")"
+  for id in "$PAGE_B" "$PAGE_FULL"; do
+    [ -f "$(el_dir "$1")/post-$id.css" ] || { echo ".elementor-$id{}" >"$(el_dir "$1")/post-$id.css"; touch -t 202601010000 "$(el_dir "$1")/post-$id.css"; }
+  done
+  [ -f "$(el_dir "$1")/global.css" ] || echo ".global{}" >"$(el_dir "$1")/global.css"
+}
+el_meta() { wp_in "$1" eval "global \$wpdb; echo \$wpdb->get_var(\"SELECT COUNT(*) FROM {\$wpdb->postmeta} WHERE post_id = $2 AND meta_key IN ($EL_KEYS)\");" --skip-plugins --skip-themes; } # el_meta <wo> <id>: wie viele der drei Meta
+el_clean() { # el_clean <wo>: der Cache wieder weg – die Seiten Byte für Byte wie vor diesem Abschnitt
+  wp_in "$1" eval "global \$wpdb; \$wpdb->query(\"DELETE FROM {\$wpdb->postmeta} WHERE post_id IN ($PAGE_B, $PAGE_FULL) AND meta_key IN ($EL_KEYS)\"); wp_cache_flush();" --skip-plugins --skip-themes >/dev/null
+  rm -rf "$(dirname "$(el_dir "$1")")"
+}
+el_step() { last "$1" '.data.post_actions // [] | map(select(.step == "elementor_css") | [.ok, .scope, .count] | map(tostring) | join(" ")) | join(",")'; } # „true posts 1“, „true global null“ oder leer
+el_calls() { wc -l <"$EL_LOG" | tr -d ' '; }
+el_y() { echo "$(el_meta "$1" "$PAGE_FULL") $(meta "$1" "$PAGE_FULL" _elementor_css) $(stat -f %m "$(el_dir "$1")/post-$PAGE_FULL.css" 2>/dev/null)"; } # Y: Zahl der Meta, ein Wert, mtime der Datei
+# Die Pakete: Seite B (wie oben), nur ein Term, eine Option von Elementor, ein Template.
+CAT_ID="$(jq -r '.cat' <<<"$IDS")"
+tgt wp term update category "$CAT_ID" --name="E2E Kategorie umbenannt" --skip-plugins --skip-themes >/dev/null
+tgt wp eval "update_option('elementor_cpt_support', ['page', 'post']);" --skip-plugins --skip-themes
+EL_TPL="$(tgt wp post create --post_type=elementor_library --post_status=publish --post_title="E2E Template" --post_name=e2e-template --porcelain --skip-plugins --skip-themes)"
+pkg el-term ".t == \"terms\" and .k == \"$CAT_ID\""
+eq "Paket el-term: nur der Term" "$ROWS" 1
+pkg el-option ".t == \"options\" and .k == \"elementor_cpt_support\""
+eq "Paket el-option: nur die Option" "$ROWS" 1
+pkg el-template ".t == \"posts\" and .k == \"$EL_TPL\""
+eq "Paket el-template: nur das Template" "$ROWS" 1
+el_seed src
+: >"$EL_LOG"
+EL_Y="$(el_y src)"
+eq "Fixture: Y hat seinen Cache" "${EL_Y%% *}" 3
+
+push_content el-push title-b --yes
+eq "AC-233: Exit 0" "$RC" 0
+eq "AC-233: Schritt {elementor_css, ok, scope: posts, count: 1}" "$(el_step el-push)" "true posts 1"
+eq "AC-233: die drei Meta von X sind weg" "$(el_meta src "$PAGE_B")" 0
+no "AC-233: die CSS-Datei von X ist weg" test -e "$(el_dir src)/post-$PAGE_B.css"
+ok "AC-233: _elementor_data von X bleibt" test -n "$(meta src "$PAGE_B" _elementor_data)"
+eq "AC-233: Y unverändert – Meta, Wert, mtime der Datei" "$(el_y src)" "$EL_Y"
+ok "AC-233: was nicht post-<id>.css heisst, bleibt" test -f "$(el_dir src)/global.css"
+eq "AC-233: nicht die ganze Site (clear_cache() lief nicht)" "$(el_calls)" 0
+eq "AC-233: so hat es der Agent geantwortet" "$(tap '.data.content.post_actions | map(select(.step == "elementor_css")) | .[0] | [.scope, .count] | @csv')" '"posts",1'
+el_seed src # X hat wieder einen Cache – wie nach dem nächsten Seitenaufruf
+jrun el-rollback "$WPSYNC" rollback "$TARGET" "$(last el-push '.data.push_id')" --json
+eq "AC-234: Rücknahme Exit 0" "$RC" 0
+eq "AC-234: derselbe Umfang bei der Rücknahme" "$(el_step el-rollback)" "true posts 1"
+eq "AC-234: wieder nur X geleert" "$(el_meta src "$PAGE_B") $(test -e "$(el_dir src)/post-$PAGE_B.css" && echo da || echo weg)" "0 weg"
+eq "AC-234: Y unverändert" "$(el_y src)" "$EL_Y"
+eq "AC-234: clear_cache() lief nicht" "$(el_calls)" 0
+eq "AC-234: Titel wie vor dem Push" "$(post src "$PAGE_B" post_title)" "E2E B"
+
+el_seed src
+push_content el-term-push el-term --yes
+eq "AC-237: Exit 0" "$RC" 0
+eq "AC-237: nur ein Term – kein Schritt elementor_css" "$(el_step el-term-push)" ""
+ok "AC-237: die übrigen Nacharbeiten laufen" test "$(last el-term-push '.data.post_actions | length')" -gt 0
+eq "AC-237: Cache unberührt – X, Y, kein clear_cache()" "$(el_meta src "$PAGE_B") $(el_y src) $(el_calls)" "3 $EL_Y 0"
+jrun el-term-rollback "$WPSYNC" rollback "$TARGET" "$(last el-term-push '.data.push_id')" --json
+eq "AC-237: auch die Rücknahme ohne den Schritt" "$RC $(el_step el-term-rollback)" "0 "
+
+push_content el-option-push el-option --yes
+eq "AC-236: Exit 0" "$RC" 0
+eq "AC-236: Option elementor_* – scope global" "$(el_step el-option-push)" "true global null"
+eq "AC-236: global geht über die API von Elementor" "$(el_calls)" 1
+jrun el-option-rollback "$WPSYNC" rollback "$TARGET" "$(last el-option-push '.data.push_id')" --json
+eq "AC-236: die Rücknahme ebenso global" "$RC $(el_step el-option-rollback) $(el_calls)" "0 true global null 2"
+
+src wp eval "update_option('elementor_active_kit', $PAGE_B);" >/dev/null # Seite B ist jetzt das Kit
+push_content el-kit-push title-b --yes
+eq "AC-236: das Kit – scope global" "$RC $(el_step el-kit-push) $(el_calls)" "0 true global null 3"
+jrun el-kit-rollback "$WPSYNC" rollback "$TARGET" "$(last el-kit-push '.data.push_id')" --json
+eq "AC-236: Rücknahme des Kits global" "$RC $(el_step el-kit-rollback) $(el_calls)" "0 true global null 4"
+src wp eval "delete_option('elementor_active_kit');" >/dev/null
+
+push_content el-template-push el-template --yes
+eq "AC-235: ein Template (elementor_library) – scope global" "$RC $(el_step el-template-push) $(el_calls)" "0 true global null 5"
+eq "AC-235: das Template steht auf Live" "$(post src "$EL_TPL" post_type)" "elementor_library"
+jrun el-template-rollback "$WPSYNC" rollback "$TARGET" "$(last el-template-push '.data.push_id')" --json
+eq "AC-235: Rücknahme global, das Template ist wieder weg" "$RC $(el_step el-template-rollback) $(el_calls) $(post src "$EL_TPL" post_type)" "0 true global null 6 "
+eq "E: X und Y tragen ihren Cache noch – global hat hier nur das Protokoll geschrieben" "$(el_meta src "$PAGE_B") $(el_y src)" "3 $EL_Y"
+
+# AC-239: dasselbe in der Staging-Kopie. Dort läuft kein WordPress der Kopie: alles über SQL und Dateien.
+el_seed stg
+EL_Y_STG="$(el_y stg)"
+ok "Staging: uploads der Kopie liegt in der Kopie (sonst fasst der Agent dort keine Datei an)" test -d "$PUB/$STG_DIR/wp-content/uploads" -a ! -L "$PUB/$STG_DIR/wp-content/uploads"
+push_content el-stg title-b --to staging --yes
+eq "AC-239: Staging Exit 0" "$RC" 0
+eq "AC-239: Staging – scope posts, count 1" "$(el_step el-stg)" "true posts 1"
+eq "AC-239: Staging – X geleert" "$(el_meta stg "$PAGE_B") $(test -e "$(el_dir stg)/post-$PAGE_B.css" && echo da || echo weg)" "0 weg"
+eq "AC-239: Staging – Y unverändert" "$(el_y stg)" "$EL_Y_STG"
+ok "AC-239: Staging – global.css bleibt" test -f "$(el_dir stg)/global.css"
+eq "AC-239: Live bleibt, wie es war" "$(el_meta src "$PAGE_B") $(el_y src) $(el_calls)" "3 $EL_Y 6"
+el_seed stg
+jrun el-stg-rollback "$WPSYNC" rollback "$TARGET" "$(last el-stg '.data.push_id')" --json
+eq "AC-239: Staging – Rücknahme mit demselben Umfang" "$RC $(el_step el-stg-rollback) $(el_meta stg "$PAGE_B") $(el_y stg)" "0 true posts 1 0 $EL_Y_STG"
+el_seed stg
+push_content el-stg-term el-term --to staging --yes
+eq "AC-239: Staging – nur ein Term, kein Schritt, Cache unberührt" "$RC $(el_step el-stg-term) $(el_meta stg "$PAGE_B") $(el_y stg)" "0  3 $EL_Y_STG"
+jrun el-stg-term-rollback "$WPSYNC" rollback "$TARGET" "$(last el-stg-term '.data.push_id')" --json
+eq "AC-239: Staging – Rücknahme des Terms" "$RC" 0
+push_content el-stg-option el-option --to staging --yes
+eq "AC-239: Staging – Option von Elementor: scope global" "$RC $(el_step el-stg-option)" "0 true global null"
+eq "E4: Staging global – alle drei Meta jeder Seite sind weg (auch _elementor_element_cache und _elementor_page_assets)" "$(el_meta stg "$PAGE_B") $(el_meta stg "$PAGE_FULL")" "0 0"
+eq "E4: Staging global – keine CSS-Datei bleibt" "$(find "$(el_dir stg)" -name '*.css' | wc -l | tr -d ' ')" 0
+eq "AC-239: die API von Elementor auf Live lief dafür nicht" "$(el_calls)" 6
+jrun el-stg-option-rollback "$WPSYNC" rollback "$TARGET" "$(last el-stg-option '.data.push_id')" --json
+eq "AC-239: Staging – Rücknahme der Option" "$RC $(el_step el-stg-option-rollback)" "0 true global null"
+
+# Wieder der Stand von vor diesem Abschnitt: ohne Elementor, ohne Cache, die Arbeitskopie ohne die drei Änderungen.
+rm -f "$WPC/mu-plugins/e2e-elementor.php" "$EL_LOG"
+el_clean src
+el_clean stg
+tgt wp term update category "$CAT_ID" --name="E2E Kategorie" --skip-plugins --skip-themes >/dev/null
+tgt wp eval "delete_option('elementor_cpt_support'); wp_delete_post($EL_TPL, true);" --skip-plugins --skip-themes
+pkg el-danach "(.t == \"terms\") or (.t == \"options\" and .k == \"elementor_cpt_support\") or (.t == \"posts\" and .k == \"$EL_TPL\")"
+eq "E: danach ist von den drei Änderungen nichts mehr zu pushen" "$ROWS" 0
+eq "E: Seite B Byte für Byte wie vor dem Abschnitt" "$(rowsum "$PAGE_B")" "$SUM_B_BEFORE"
+eq "E: Manifest wie vor dem Abschnitt" "$(msum "$CONTENT/manifest.jsonl")" "$(msum "$E2E/manifest.before-b")"
 
 echo "== AC-151: Konflikt – seit dem Pull auf Live geändert, alle Schlüssel genannt"
 src wp post update "$PAGE_B" --post_title="auf Live geändert" >/dev/null

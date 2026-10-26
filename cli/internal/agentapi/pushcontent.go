@@ -127,6 +127,10 @@ type ContentAfter struct {
 type PostAction struct {
 	Step string `json:"step"`
 	OK   bool   `json:"ok"`
+	// Scope and Count: on the step elementor_css (agent 0.9.1) how far the cache was cleared –
+	// "posts" with the number of posts, or "global". Empty from an older agent.
+	Scope string `json:"scope,omitempty"`
+	Count int    `json:"count,omitempty"`
 }
 
 // ContentApplied is the part "content" of the answer to /push/commit.
@@ -187,11 +191,18 @@ func CleanUnchecked(rows []ContentUnchecked) []ContentUnchecked {
 	return out
 }
 
-// CleanActions keeps at most 30 steps that look like the agent's names.
+// CleanActions keeps at most 30 steps that look like the agent's names, and of the scope of a step
+// only the two words the agent knows.
 func CleanActions(actions []PostAction) []PostAction {
 	var out []PostAction
 	for _, a := range actions {
 		if len(out) < 30 && stepRe.MatchString(a.Step) {
+			if a.Scope != "posts" && a.Scope != "global" {
+				a.Scope = ""
+			}
+			if a.Scope != "posts" || a.Count < 0 {
+				a.Count = 0
+			}
 			out = append(out, a)
 		}
 	}

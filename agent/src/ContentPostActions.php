@@ -20,23 +20,25 @@ final class ContentPostActions
      * @param array<string, mixed> $changes    aus ContentApply (posts, revisions, terms, term_taxonomy, options, rewrite)
      * @param object               $db         $wpdb
      * @param string               $indexables voller Name der Tabelle yoast_indexable; '' wenn es sie nicht gibt
-     * @return list<array{step: string, ok: bool}>
+     * @param ContentStore|null    $store      Store von Live – für das gezielte Leeren des Elementor-Cache; ohne ihn wird dort alles geleert
+     * @param string               $uploadsDir Ordner uploads von Live; '' wenn dort keine Datei anzufassen ist
+     * @return list<array{step: string, ok: bool, scope?: string, count?: int}>
      */
-    public static function live(array $changes, $db, string $indexables): array
+    public static function live(array $changes, $db, string $indexables, ?ContentStore $store = null, string $uploadsDir = ''): array
     {
         // Revisionen, Indexables, Caches: was hier durch $wpdb geht, trägt Werte des Pakets. Kein
         // Fehler daraus steht samt Abfrage im Fehlerprotokoll (ContentSql::silent()).
-        return ContentSql::silent($db, static function () use ($changes, $db, $indexables): array {
-            return self::liveSteps($changes, $db, $indexables);
+        return ContentSql::silent($db, static function () use ($changes, $db, $indexables, $store, $uploadsDir): array {
+            return self::liveSteps($changes, $db, $indexables, $store, $uploadsDir);
         });
     }
 
     /**
      * @param array<string, mixed> $changes
      * @param object               $db
-     * @return list<array{step: string, ok: bool}>
+     * @return list<array{step: string, ok: bool, scope?: string, count?: int}>
      */
-    private static function liveSteps(array $changes, $db, string $indexables): array
+    private static function liveSteps(array $changes, $db, string $indexables, ?ContentStore $store, string $uploadsDir): array
     {
         $posts   = self::ints($changes['posts'] ?? []);
         $terms   = self::ints($changes['terms'] ?? []);
@@ -82,9 +84,22 @@ final class ContentPostActions
             }
         }
         if (class_exists('\Elementor\Plugin', false)) {
-            self::step($steps, 'elementor_css', static function (): void {
-                \Elementor\Plugin::$instance->files_manager->clear_cache();
-            });
+            // Nur so weit, wie das Paket reicht (Spec 0.9.1 E): die berührten Beiträge, alles – oder nichts.
+            $elementor = ContentElementor::scope($changes);
+            if ($elementor['scope'] === ContentElementor::POSTS && $store !== null) {
+                $touched = $elementor['posts'];
+                self::step($steps, 'elementor_css', static function () use ($store, $uploadsDir, $touched): void {
+                    ContentElementor::clear($store, $uploadsDir, $touched);
+                    // Die Meta gingen per SQL: clean_post_cache() von object_cache lief davor.
+                    foreach ($touched as $id) {
+                        wp_cache_delete($id, 'post_meta');
+                    }
+                }, ['scope' => ContentElementor::POSTS, 'count' => count($touched)]);
+            } elseif ($elementor['scope'] !== ContentElementor::NONE) {
+                self::step($steps, 'elementor_css', static function (): void {
+                    \Elementor\Plugin::$instance->files_manager->clear_cache();
+                }, ['scope' => ContentElementor::ALL]);
+            }
         }
         if ($indexables !== '' && $posts !== []) {
             self::step($steps, 'seo_indexables', static function () use ($db, $indexables, $posts): bool {
@@ -156,7 +171,7 @@ final class ContentPostActions
      * @param string               $indexables voller, geprüfter Name der Tabelle der Kopie; '' wenn es sie nicht gibt
      * @param string               $uploadsDir Ordner uploads der Kopie; '' wenn er nicht in der Kopie liegt
      * @param bool                 $elementor  Elementor ist auf Live aktiv
-     * @return list<array{step: string, ok: bool}>
+     * @return list<array{step: string, ok: bool, scope?: string, count?: int}>
      */
     public static function staging(array $changes, ContentStore $store, $db, string $indexables, string $uploadsDir, bool $elementor): array
     {
@@ -168,18 +183,27 @@ final class ContentPostActions
     /**
      * @param array<string, mixed> $changes
      * @param object               $db
-     * @return list<array{step: string, ok: bool}>
+     * @return list<array{step: string, ok: bool, scope?: string, count?: int}>
      */
     private static function stagingSteps(array $changes, ContentStore $store, $db, string $indexables, string $uploadsDir, bool $elementor): array
     {
         $posts = self::ints($changes['posts'] ?? []);
         $tts   = self::ints($changes['term_taxonomy'] ?? []);
         $steps = [];
-        if ($elementor) {
-            // Was files_manager->clear_cache() täte: ohne diese Einträge erzeugt Elementor das CSS neu.
+        $scope = $elementor ? ContentElementor::scope($changes) : ['scope' => ContentElementor::NONE, 'posts' => []];
+        if ($scope['scope'] === ContentElementor::POSTS) {
+            // Dasselbe wie auf Live (Spec 0.9.1 E2): nur die berührten Beiträge.
+            $touched = $scope['posts'];
+            self::step($steps, 'elementor_css', static function () use ($store, $uploadsDir, $touched): void {
+                ContentElementor::clear($store, $uploadsDir, $touched);
+            }, ['scope' => ContentElementor::POSTS, 'count' => count($touched)]);
+        } elseif ($scope['scope'] === ContentElementor::ALL) {
+            // Was files_manager->clear_cache() täte: ohne diese Einträge erzeugt Elementor CSS und Assets neu.
             self::step($steps, 'elementor_css', static function () use ($store, $uploadsDir): void {
                 $store->transaction(static function () use ($store): void {
-                    $store->dropMeta('_elementor_css');
+                    foreach (ContentElementor::META as $meta) {
+                        $store->dropMeta($meta);
+                    }
                     $store->write('options', '_elementor_global_css', null);
                     $store->write('options', 'elementor-custom-breakpoints-files', null);
                 });
@@ -188,7 +212,7 @@ final class ContentPostActions
                         @unlink($file);
                     }
                 }
-            });
+            }, ['scope' => ContentElementor::ALL]);
         }
         if ($indexables !== '' && $posts !== []) {
             self::step($steps, 'seo_indexables', static function () use ($db, $indexables, $posts): bool {
@@ -271,17 +295,18 @@ final class ContentPostActions
     }
 
     /**
-     * @param list<array{step: string, ok: bool}> $steps
-     * @param callable(): mixed                   $do    false oder eine Exception heisst: nicht gelungen
+     * @param list<array<string, mixed>> $steps
+     * @param callable(): mixed          $do    false oder eine Exception heisst: nicht gelungen
+     * @param array<string, mixed>       $extra was der Schritt über sich sagt (elementor_css: scope, count)
      */
-    private static function step(array &$steps, string $name, callable $do): void
+    private static function step(array &$steps, string $name, callable $do, array $extra = []): void
     {
         try {
             $ok = $do() !== false;
         } catch (\Throwable $e) {
             $ok = false;
         }
-        $steps[] = ['step' => $name, 'ok' => $ok];
+        $steps[] = ['step' => $name, 'ok' => $ok] + $extra;
     }
 
     /**
