@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// trimChars are the edge characters both sides drop – PHP's trim() default.
+const trimChars = " \t\n\r\x00\x0b"
+
 // Limits of a pattern list (Spec 0.10.0 A4).
 const (
 	MaxEntries = 200
@@ -117,7 +120,9 @@ func (s *Set) Touches(unit string) bool {
 		if p.kind == namePattern {
 			return true
 		}
-		if len(p.segs) > len(us) && segsMatch(p.segs[:len(us)], us) {
+		// Below the unit, or a folder pattern that covers the unit or a folder above it.
+		n := min(len(p.segs), len(us))
+		if (len(p.segs) > len(us) || p.kind == dirPattern) && segsMatch(p.segs[:n], us[:n]) {
 			return true
 		}
 	}
@@ -135,7 +140,7 @@ func parse(p string) pattern {
 }
 
 func clean(raw string) (string, error) {
-	p := strings.TrimSpace(raw)
+	p := strings.Trim(raw, trimChars)
 	for strings.Contains(p, "//") {
 		p = strings.ReplaceAll(p, "//", "/")
 	}
@@ -166,16 +171,13 @@ func clean(raw string) (string, error) {
 			return "", bad("Ordner . und .. nicht erlaubt")
 		}
 	}
-	isDir := strings.HasSuffix(p, "/")
-	switch lower(segs[0]) {
-	case "plugins", "themes":
-		if len(segs) <= 2 {
-			return "", bad("ganze Plugins und Themes über --exclude-plugin abwählen; erlaubt sind Unterordner wie plugins/<slug>/cache/")
-		}
-	case "mu-plugins":
-		if len(segs) == 1 && isDir {
-			return "", bad("mu-plugins lassen sich nicht als Ganzes ausschliessen")
-		}
+	// A5 – auch per Platzhalter: *s/ oder plugin?/ träfen ganze Plugins und Themes.
+	isDir, top := strings.HasSuffix(p, "/"), lower(segs[0])
+	if len(segs) <= 2 && (glob(top, "plugins") || glob(top, "themes")) {
+		return "", bad("ganze Plugins und Themes über --exclude-plugin abwählen; erlaubt sind Unterordner wie plugins/<slug>/cache/")
+	}
+	if len(segs) == 1 && isDir && glob(top, "mu-plugins") {
+		return "", bad("mu-plugins lassen sich nicht als Ganzes ausschliessen")
 	}
 	return p, nil
 }

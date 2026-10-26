@@ -164,7 +164,12 @@ final class FileWalkerTest extends TestCase
         $content = $root . '/wp-content';
         $scope   = Scope::fromArray(['exclude_paths' => ['uploads/videos/', '*.mp4']]);
         $walker  = new FileWalker($root, $content, $content . '/plugins/wpsync-agent', $scope);
-        $paths   = array_column($walker->page(0, microtime(true) + 60)['files'], 'path');
+        FileWalker::$trace = true;
+        try {
+            $paths = array_column($walker->page(0, microtime(true) + 60)['files'], 'path');
+        } finally {
+            FileWalker::$trace = false;
+        }
         exec('rm -rf ' . escapeshellarg($root));
 
         $this->assertSame(['wp-content/uploads/2024/c.mp4.txt', 'wp-content/uploads/videosammlung/b.jpg'], $paths);

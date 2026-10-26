@@ -123,9 +123,10 @@ final class PathPatterns
                 throw new \InvalidArgumentException('invalid exclude path');
             }
         }
+        // A5 – auch per Platzhalter: *s/ oder plugin?/ träfen ganze Plugins und Themes.
         $top = strtolower($segs[0]);
-        if ((($top === 'plugins' || $top === 'themes') && count($segs) <= 2)
-            || ($top === 'mu-plugins' && count($segs) === 1 && substr($p, -1) === '/')) {
+        if ((count($segs) <= 2 && (self::wildcard($top, 'plugins') || self::wildcard($top, 'themes')))
+            || (count($segs) === 1 && substr($p, -1) === '/' && self::wildcard($top, 'mu-plugins'))) {
             throw new \InvalidArgumentException('whole plugins and themes are excluded with exclude_plugins');
         }
         return $p;

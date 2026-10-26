@@ -17,6 +17,8 @@ final class FileWalker
     private $skipDir;
     /** @var Scope|null */
     private $scope;
+    /** @var bool Nur Tests schalten das ein (AC-263) – im Betrieb wüchse die Liste mit jedem Ordner. */
+    public static $trace = false;
     /** @var list<string> */
     private $entered = [];
 
@@ -80,7 +82,9 @@ final class FileWalker
         if ($entries === false) {
             return;
         }
-        $this->entered[] = $dir;
+        if (self::$trace) {
+            $this->entered[] = $dir;
+        }
         foreach ($entries as $name) {
             if ($name === '.' || $name === '..') {
                 continue;
