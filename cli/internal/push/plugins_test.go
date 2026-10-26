@@ -66,7 +66,7 @@ func TestWithActivatedForcesUnitsIntoTheSet(t *testing.T) {
 	if err := os.Symlink(filepath.Join(docroot, "wp-content", "plugins", "x"), filepath.Join(docroot, "wp-content", "plugins", "link")); err != nil {
 		t.Fatal(err)
 	}
-	all, _, links, err := scan(docroot, base)
+	all, _, links, err := scan(docroot, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestWithActivatedForcesUnitsIntoTheSet(t *testing.T) {
 		t.Fatalf("named = %+v, err = %v", named, err)
 	}
 
-	got, err := withActivated(docroot, base, named, all, []string{"plugins/same", "plugins/neu", "plugins/x"}, links)
+	got, err := withActivated(docroot, base, named, all, []string{"plugins/same", "plugins/neu", "plugins/x"}, links, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,16 +94,16 @@ func TestWithActivatedForcesUnitsIntoTheSet(t *testing.T) {
 	}
 
 	for name, unit := range map[string]string{"missing": "plugins/fehlt", "empty": "plugins/leer", "symlink": "plugins/link"} {
-		_, err := withActivated(docroot, base, nil, all, []string{unit}, links)
+		_, err := withActivated(docroot, base, nil, all, []string{unit}, links, nil)
 		if !errors.Is(err, ErrPluginSwitch) || !strings.Contains(err.Error(), unit) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
-	if _, err := withActivated(docroot, base, nil, all, []string{"plugins/link"}, links); !errors.Is(err, ErrSymlink) {
+	if _, err := withActivated(docroot, base, nil, all, []string{"plugins/link"}, links, nil); !errors.Is(err, ErrSymlink) {
 		t.Errorf("a symlink is named as one: %v", err)
 	}
 	// Ohne --activate ändert sich nichts.
-	if got, err := withActivated(docroot, base, named, all, nil, links); err != nil || len(got) != 1 {
+	if got, err := withActivated(docroot, base, named, all, nil, links, nil); err != nil || len(got) != 1 {
 		t.Errorf("without switches: %+v, %v", got, err)
 	}
 }
@@ -118,7 +118,7 @@ func TestPluginHeadsReadsWhatTheAgentChecks(t *testing.T) {
 	write(t, docroot, "plugins/kunde/late.php", "<?php\n"+strings.Repeat("\n", 9000)+"/* Plugin Name: Zu spät */", 1800000000)
 	write(t, docroot, "plugins/kunde/inc/setup.php", "<?php\n/* Plugin Name: Im Unterordner */\nregister_activation_hook(__FILE__, 'kunde_on');", 1800000000)
 	write(t, docroot, "plugins/kunde/readme.txt", "Plugin Name: Kunde", 1800000000)
-	u, err := scanUnit(docroot, "plugins/kunde", nil)
+	u, err := scanUnit(docroot, "plugins/kunde", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestPluginHeadsReadsWhatTheAgentChecks(t *testing.T) {
 
 	// Kein Kopf: eine leere Menge (der Agent sagt dann schon im Probelauf no_plugin_file), kein Hinweis.
 	write(t, docroot, "plugins/ohne/ohne.php", "<?php // kein Kopf", 1800000000)
-	u, _ = scanUnit(docroot, "plugins/ohne", nil)
+	u, _ = scanUnit(docroot, "plugins/ohne", nil, nil)
 	if heads, hook, err := pluginHeads(docroot, &u); err != nil || heads == nil || len(heads) != 0 || hook {
 		t.Errorf("without a header: %v, %v, %v", heads, hook, err)
 	}
@@ -144,12 +144,12 @@ func TestPluginHeadsReadsWhatTheAgentChecks(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		write(t, docroot, fmt.Sprintf("plugins/viele/p%d.php", i), head, 1800000000)
 	}
-	u, _ = scanUnit(docroot, "plugins/viele", nil)
+	u, _ = scanUnit(docroot, "plugins/viele", nil, nil)
 	if heads, _, err := pluginHeads(docroot, &u); err != nil || heads != nil {
 		t.Errorf("six headers: %v, %v", keysOf(heads), err)
 	}
 	write(t, docroot, "plugins/name/mein plugin.php", head, 1800000000)
-	u, _ = scanUnit(docroot, "plugins/name", nil)
+	u, _ = scanUnit(docroot, "plugins/name", nil, nil)
 	if heads, _, err := pluginHeads(docroot, &u); err != nil || heads != nil {
 		t.Errorf("an odd file name: %v, %v", keysOf(heads), err)
 	}

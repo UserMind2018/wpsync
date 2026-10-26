@@ -17,6 +17,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/pathmatch"
 	"github.com/usermind/wpsync/internal/safefs"
 )
 
@@ -311,4 +312,15 @@ func (o Options) forgetStagingPush(siteDir, pushID string) error {
 		return nil
 	}
 	return saveStagingBase(siteDir, o.Secret, o.Site.URL, s)
+}
+
+// withoutExcluded drops the stamps an exclude path covers: the agent leaves those files out of
+// its own stamps, so they would count as removed (Spec 0.10.0 E3).
+func withoutExcluded(base map[string]agentapi.PushStamp, unit string, ex *pathmatch.Set) map[string]agentapi.PushStamp {
+	for rel := range base {
+		if ex.Match(unit+"/"+rel, false) {
+			delete(base, rel)
+		}
+	}
+	return base
 }

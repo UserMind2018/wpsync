@@ -16,6 +16,7 @@ import (
 
 	"github.com/usermind/wpsync/internal/agentapi"
 	"github.com/usermind/wpsync/internal/baseline"
+	"github.com/usermind/wpsync/internal/pathmatch"
 )
 
 const (
@@ -101,13 +102,13 @@ func Ignored(unit, rel string, size int64) bool {
 // Scan compares the code directories below docroot/wp-content with the baseline. It returns the
 // units with local changes and the units that exist in the baseline but no longer on disk.
 // A pull sets every file's mtime to the source's, so a differing size or mtime means a local edit.
-func Scan(docroot string, base *baseline.Baseline) (units []Unit, deleted []string, err error) {
-	units, deleted, _, err = scan(docroot, base)
+func Scan(docroot string, base *baseline.Baseline, ex *pathmatch.Set) (units []Unit, deleted []string, err error) {
+	units, deleted, _, err = scan(docroot, base, ex)
 	return units, deleted, err
 }
 
 // scan is Scan plus the units that are symlinks: they are never read and never pushed (U19).
-func scan(docroot string, base *baseline.Baseline) (units []Unit, deleted, links []string, err error) {
+func scan(docroot string, base *baseline.Baseline, ex *pathmatch.Set) (units []Unit, deleted, links []string, err error) {
 	known := map[string]map[string]baseline.FileStamp{}
 	for path, stamp := range base.Files {
 		if unit, rel, ok := UnitOf(path); ok {
@@ -161,7 +162,7 @@ func scan(docroot string, base *baseline.Baseline) (units []Unit, deleted, links
 	}
 
 	for unit := range local {
-		u, err := scanUnit(docroot, unit, known[unit])
+		u, err := scanUnit(docroot, unit, known[unit], ex)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -192,7 +193,7 @@ func sortedKeys(m map[string]map[string]baseline.FileStamp) []string {
 
 // scanUnit lists a unit's files through a root pinned to the unit directory and compares them
 // with the baseline.
-func scanUnit(docroot, unit string, base map[string]baseline.FileStamp) (Unit, error) {
+func scanUnit(docroot, unit string, base map[string]baseline.FileStamp, ex *pathmatch.Set) (Unit, error) {
 	root, dir, err := openUnit(docroot, unit, nil)
 	if err != nil {
 		return Unit{}, err
@@ -202,7 +203,23 @@ func scanUnit(docroot, unit string, base map[string]baseline.FileStamp) (Unit, e
 	if err != nil {
 		return Unit{}, err
 	}
-	u := Unit{Path: unit, Files: files, Base: base, New: len(base) == 0, Version: versionIn(root, unit), Unreadable: unreadable, dir: dir}
+	isNew := len(base) == 0
+	// Spec 0.10.0 E3: excluded paths are neither new nor deleted – the agent keeps them on the target.
+	if !ex.Empty() {
+		for rel := range files {
+			if ex.Match(unit+"/"+rel, false) {
+				delete(files, rel)
+			}
+		}
+		kept := make(map[string]baseline.FileStamp, len(base))
+		for rel, b := range base {
+			if !ex.Match(unit+"/"+rel, false) {
+				kept[rel] = b
+			}
+		}
+		base = kept
+	}
+	u := Unit{Path: unit, Files: files, Base: base, New: isNew, Version: versionIn(root, unit), Unreadable: unreadable, dir: dir}
 	for rel, f := range files {
 		if b, ok := u.Base[rel]; !ok || b.Size != f.Size || b.MTime != f.MTime {
 			u.Changed = append(u.Changed, rel)

@@ -21,6 +21,7 @@ import (
 	"github.com/usermind/wpsync/internal/baseline"
 	"github.com/usermind/wpsync/internal/localenv"
 	"github.com/usermind/wpsync/internal/localgit"
+	"github.com/usermind/wpsync/internal/pathmatch"
 	"github.com/usermind/wpsync/internal/sitelock"
 	"github.com/usermind/wpsync/internal/sites"
 	"github.com/usermind/wpsync/internal/staging"
@@ -225,6 +226,8 @@ var (
 	ErrNeedsYes = errors.New("ohne Terminal mit --yes bestätigen")
 	// ErrAgentNoStaging: the agent cannot push to staging (agent < 0.5.0).
 	ErrAgentNoStaging = errors.New("der Agent auf der Site kennt noch kein Staging")
+	// ErrAgentNoExcludePaths: the agent would lose excluded files of a unit it replaces (Spec 0.10.0 E).
+	ErrAgentNoExcludePaths = errors.New("der Agent auf der Site ist älter als 0.10.0 und kennt keine Ausschlüsse – ein Push würde ausgeschlossene Dateien der Einheit auf der Site löschen; erst den Agent aktualisieren")
 	// ErrTarget: --to names something else than live or staging. Nothing falls back to live.
 	ErrTarget = errors.New("unbekanntes Ziel – erlaubt sind live und staging")
 	// ErrTargetMismatch: the agent answers for another target than the one asked for, or a push
@@ -601,6 +604,10 @@ func Run(o Options) error {
 	if err != nil {
 		return err
 	}
+	ex, err := pathmatch.Compile(o.Site.Profile.ExcludePaths())
+	if err != nil {
+		return fmt.Errorf("gespeicherte Ausschlüsse ungültig – mit wpsync scan %s --preset … --exclude-path neu setzen: %w", o.Site.Name, err)
+	}
 	unlock, err := lock(o)
 	if err != nil {
 		return err
@@ -628,7 +635,7 @@ func Run(o Options) error {
 	var units []Unit
 	var deleted []string
 	if !o.NoCode {
-		all, gone, links, err := scan(docroot, base)
+		all, gone, links, err := scan(docroot, base, ex)
 		if err != nil {
 			return err
 		}
@@ -639,7 +646,7 @@ func Run(o Options) error {
 			return err
 		}
 		// A3: a unit to activate is part of the set, changed or not.
-		if units, err = withActivated(docroot, base, units, all, sw.Activate, links); err != nil {
+		if units, err = withActivated(docroot, base, units, all, sw.Activate, links, ex); err != nil {
 			return err
 		}
 		deleted = gone
@@ -666,7 +673,7 @@ func Run(o Options) error {
 	// The unit uploads comes from the list of --uploads, never from the scan (Spec Content-Push §8).
 	var up *Unit
 	if len(o.Uploads) > 0 {
-		u, err := uploadsUnit(docroot, o.Uploads)
+		u, err := uploadsUnit(docroot, o.Uploads, ex)
 		if err != nil {
 			return err
 		}
@@ -705,7 +712,7 @@ func Run(o Options) error {
 	if target == TargetStaging {
 		copied, known = o.stagingStamps(siteDir)
 	}
-	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true, RescueStub: !o.DryRun}
+	req := agentapi.PushBeginRequest{Target: target, Force: o.Force, Dry: true, RescueStub: !o.DryRun, ExcludePaths: o.Site.Profile.ExcludePaths()}
 	names := make([]string, len(units))
 	for i := range units {
 		if err := units[i].Hash(docroot); err != nil {
@@ -713,7 +720,7 @@ func Run(o Options) error {
 		}
 		unit := units[i].Request()
 		if base := known.unit(units[i].Path); base != nil {
-			unit.Base = base
+			unit.Base = withoutExcluded(base, units[i].Path, ex)
 		}
 		req.Units = append(req.Units, unit)
 		names[i] = units[i].Path
@@ -805,6 +812,15 @@ func Run(o Options) error {
 	// by the version and by the field plugins of the answer – after the dry run, before any write.
 	if sw.any() && (plan.Plugins == nil || !AtLeast(plan.AgentVersion, agentapi.MinAgentPlugins)) {
 		return ErrAgentNoPlugins
+	}
+	// An agent before 0.10.0 ignores exclude_paths and would drop the excluded files of a unit it
+	// replaces (Spec 0.10.0 E, Abweichung 6) – told after the dry run, before any write.
+	if !AtLeast(plan.AgentVersion, agentapi.MinAgentExcludePaths) {
+		for _, u := range units {
+			if ex.Touches(u.Path) {
+				return ErrAgentNoExcludePaths
+			}
+		}
 	}
 	if err := answeredFor(target, plan.Target); err != nil {
 		return err

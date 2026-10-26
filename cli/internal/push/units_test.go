@@ -136,7 +136,7 @@ func TestScanFindsChangedNewAndDeletedFiles(t *testing.T) {
 	write(t, docroot, "themes/t/.DS_Store", "finder", 1800000000)
 	os.Symlink("/etc/hosts", filepath.Join(docroot, "wp-content/plugins/edit/link.php"))
 
-	units, deleted, err := Scan(docroot, base)
+	units, deleted, err := Scan(docroot, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestHashAndRequest(t *testing.T) {
 	write(t, docroot, "plugins/x/a.php", "<?php // a", 1800000000)
 	base.PulledAt = time.Now()
 
-	units, _, err := Scan(docroot, base)
+	units, _, err := Scan(docroot, base, nil)
 	if err != nil || len(units) != 1 {
 		t.Fatalf("units = %v, %v", units, err)
 	}

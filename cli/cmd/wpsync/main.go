@@ -1243,6 +1243,11 @@ func pushHint(err error, site *sites.Site) error {
 	case errors.Is(err, push.ErrAgentNoUploads):
 		return cliout.Hint(&agentapi.OutdatedError{Required: push.MinAgentUploads, Err: err},
 			fmt.Sprintf("der wpsync-Agent auf %s kennt noch keine Uploads – Agent %s installieren", site.URL, push.MinAgentUploads))
+	case errors.Is(err, push.ErrAgentNoExcludePaths):
+		return cliout.Hint(&agentapi.OutdatedError{Required: agentapi.MinAgentExcludePaths, Err: err},
+			fmt.Sprintf("der wpsync-Agent auf %s kennt noch keine Ausschlüsse – Agent %s installieren", site.URL, agentapi.MinAgentExcludePaths))
+	case errors.Is(err, push.ErrUploadExcluded):
+		return cliout.Hint(cliout.Usage(err), fmt.Sprintf("%v – die Datei aus der Liste nehmen oder den Ausschluss ändern: wpsync scan %s --preset … --exclude-path", err, site.Name))
 	case errors.Is(err, push.ErrUploadsThere):
 		return err
 	case errors.Is(err, push.ErrUploadExists):

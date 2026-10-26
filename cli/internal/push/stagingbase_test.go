@@ -218,7 +218,7 @@ func TestPushToLiveNeverUsesStagingStamps(t *testing.T) {
 
 	// the scan still sees the unit as changed: the baseline decides, not the stamps
 	base, _ := baseline.Load(siteDir)
-	units, _, err := Scan(filepath.Join(siteDir, "public"), base)
+	units, _, err := Scan(filepath.Join(siteDir, "public"), base, nil)
 	if err != nil || find(units, "plugins/x") == nil {
 		t.Fatalf("scan after the push to staging = %+v, %v", units, err)
 	}
