@@ -3,6 +3,7 @@
 .vscode/
 cli/bin/
 cli/wpsync
+cli/cmd/wpsync/wpsync
 cli/*.tar.gz
 agent/vendor/
 agent/dist/
