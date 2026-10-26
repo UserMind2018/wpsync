@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,6 +82,8 @@ type Result struct {
 	Content *content.Summary `json:"content,omitempty"`
 	// Warnings name what failed without failing the pull; omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
+	// KeptExcluded: local files that an exclude path keeps although the site no longer lists them (Spec 0.10.0 C4).
+	KeptExcluded []string `json:"kept_excluded,omitempty"`
 }
 
 // Values of Result.Warnings.
@@ -199,6 +202,8 @@ var ErrPlainNeedsConfirmation = errors.New("--no-anonymize braucht eine Bestäti
 type plan struct {
 	scope agentapi.Scope
 	delta *agentapi.Delta
+	// keep is profile.Filter(scope): false for paths outside the scope.
+	keep func(string) bool
 }
 
 // prepare fetches infosheet and delta for the site's profile and tags every table with its mode
@@ -255,6 +260,13 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 	if delta.Files, vcs = dropVCSPaths(delta.Files); vcs > 0 {
 		fmt.Fprintf(o.Out, "  ! %d VCS-Pfade der Quelle übersprungen\n", vcs)
 	}
+	// Spec 0.10.0 C3: an agent before 0.10.0 ignores exclude_paths – the CLI filters itself.
+	keep := profile.Filter(scope)
+	delta.Files = slices.DeleteFunc(delta.Files, func(f agentapi.File) bool { return !keep(f.Path) })
+	delta.Skipped = slices.DeleteFunc(delta.Skipped, func(f agentapi.Skipped) bool { return !keep(f.Path) })
+	if len(scope.ExcludePaths) > 0 && !agentapi.VersionAtLeast(delta.Env.AgentVersion, agentapi.MinAgentExcludePaths) {
+		fmt.Fprintln(o.Out, "  ! Der Agent auf der Site ist älter als 0.10.0 – ausgeschlossene Ordner werden noch durchsucht, aber nicht übertragen.")
+	}
 	if !o.NoAnonymize && delta.Env.Anon == "" {
 		// An agent before 0.3.0 ignores the scope field and would send plain data (AC-36).
 		return nil, &agentapi.OutdatedError{Installed: delta.Env.AgentVersion, Required: agentapi.MinAgentVersion, Err: ErrAgentCannotAnonymize}
@@ -291,7 +303,7 @@ func prepare(c *agentapi.Client, o *Options, ask bool) (*plan, error) {
 		}
 		fmt.Fprintf(o.Out, "  ! Personenbezogene Tabellen im Klartext (%s): %s\n", reason, strings.Join(plain, ", "))
 	}
-	return &plan{scope: scope, delta: delta}, nil
+	return &plan{scope: scope, delta: delta, keep: keep}, nil
 }
 
 // Run pulls the site into its local environment (Options.Driver) within the profile's scope.
@@ -402,7 +414,11 @@ func run(o Options) error {
 		present = PresentLocally(docroot)
 	}
 	changed, deleted := DiffFiles(delta.Files, base, present)
-	deleted = inScope(deleted, p.scope)
+	var keptExcluded []string
+	deleted, keptExcluded = splitDeleted(deleted, p.scope, p.keep)
+	if len(keptExcluded) > 0 {
+		fmt.Fprintf(o.Out, "  Ausgeschlossen, lokal behalten (%d): %s\n", len(keptExcluded), strings.Join(firstN(keptExcluded, 10), ", "))
+	}
 	fmt.Fprintf(o.Out, "Dateien: %d neu/geändert, %d gelöscht\n", len(changed), len(deleted))
 	o.progressBytes(PhaseFiles, 0, len(changed), "", 0, fileBytes(changed))
 	fileProgress := func(done, total int, bytesDone, bytesTotal int64) {
@@ -545,7 +561,7 @@ func run(o Options) error {
 			TablesLoaded: len(tables), TablesTotal: len(delta.Tables),
 			Requests: client.Stats.Requests, BytesIn: client.Stats.BytesIn,
 			DurationMS: time.Since(started).Milliseconds(), LocalURL: localURL, AgentVersion: delta.Env.AgentVersion,
-			Content: summary, Warnings: warnings,
+			Content: summary, Warnings: warnings, KeptExcluded: keptExcluded,
 		}
 		if !o.NoAnonymize {
 			o.Report.LocalAdminUser, o.Report.LocalAdminPassword = LocalAdminUser, LocalAdminPassword
@@ -560,15 +576,28 @@ func run(o Options) error {
 	return nil
 }
 
-// inScope drops paths outside the scope: they stay untouched locally (e.g. uploads the proxy fetched).
-func inScope(paths []string, s agentapi.Scope) []string {
-	var out []string
+// splitDeleted drops paths outside the scope: they stay untouched locally (e.g. uploads the proxy
+// fetched). Those dropped only because of an exclude path are returned apart (Spec 0.10.0 C4).
+func splitDeleted(paths []string, s agentapi.Scope, keep func(string) bool) (gone, kept []string) {
+	plain := s
+	plain.ExcludePaths = nil
 	for _, p := range paths {
-		if profile.InScope(s, p) {
-			out = append(out, p)
+		switch {
+		case keep(p):
+			gone = append(gone, p)
+		case profile.InScope(plain, p):
+			kept = append(kept, p)
 		}
 	}
-	return out
+	return gone, kept
+}
+
+// firstN returns at most n entries of list, with "…" for the rest.
+func firstN(list []string, n int) []string {
+	if len(list) <= n {
+		return list
+	}
+	return append(slices.Clone(list[:n]), "…")
 }
 
 // IsSuspectedBan reports whether err means the server blocked us.
