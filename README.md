@@ -245,7 +245,8 @@ wpsync scan kunde --preset ohne-transaktionen --no-exclude-paths    # leert sie
   trifft, ist kein Fehler.
 - Exit 2, nichts gespeichert: leer, führender `/`, Ordner `.` oder `..`, Backslash, Steuerzeichen,
   mehr als 512 Zeichen, mehr als 200 Einträge, ein Muster nur aus `*` und `?` – und ganze Plugins
-  oder Themes (`plugins/`, `plugins/<slug>/`, `themes/<slug>/`, `mu-plugins/`): die wählt
+  oder Themes (`plugins/`, `plugins/<slug>/`, `themes/<slug>/`, `mu-plugins/`, auch per Platzhalter
+  wie `*s/` oder `*/<slug>/`): die wählt
   `--exclude-plugin` ab, damit die lokale Nacharbeit (`active_plugins`) stimmt. Ein Unterordner in
   einem Plugin (`plugins/<slug>/cache/`) ist erlaubt.
 
@@ -258,7 +259,9 @@ nächste Pull fehlende Dateien nach.
 
 **Push.** Ausgeschlossenes ist beim Push weder neu noch gelöscht: Die CLI schickt es nicht und
 nennt es nicht in der Baseline, der Agent übernimmt es beim Tausch einer Einheit aus dem alten
-Stand der Site (auch bei der Rücknahme unverändert) und lässt es aus den neuen Stempeln. Lässt
+Stand der Site (auch bei der Rücknahme unverändert) und lässt es aus den neuen Stempeln – auch
+was erst während des Uploads entsteht. Übernommen heisst kopiert: Grosse Datenmengen unter einem
+Ausschluss in einer Code-Einheit kosten jeden Push Zeit und vorübergehend doppelten Platz. Lässt
 sich eine solche Datei nicht kopieren, bricht der Push vor dem Tausch ab. Eine Datei aus
 `--uploads` unter einem Ausschluss bricht den Push vor dem ersten Request ab (Exit 2). Ein Agent
 vor 0.10.0 würde ausgeschlossene Dateien einer Einheit beim Tausch verlieren – die CLI bricht
@@ -275,7 +278,8 @@ wpsync sie ohnehin nie überträgt, `reason` (`excluded_dir`, `too_large` …). 
 tragen `transferred` und `reason`: Backup-Ordner und Dateien über 256 MB gehen nie mit,
 `advanced-cache.php` und `object-cache.php` entfernt die CLI lokal (`reason: drop_in`),
 `maintenance.php` wird übertragen. Der Scan zeigt die fünf grössten Ordner, die noch übertragen
-werden.
+werden. Eine Datei direkt in `wp-content/` lässt sich nicht als genauer Pfad ausschliessen: ohne
+`/` wird der Eintrag ein Namens-Muster und gilt in jeder Tiefe.
 
 ### Format
 

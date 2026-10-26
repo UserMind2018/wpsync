@@ -29,8 +29,8 @@ braucht Agent 0.10.0.
 
 **Geändert**
 - Ganze Plugins, Themes und `mu-plugins/` lassen sich nicht über Pfade ausschliessen (dafür
-  `--exclude-plugin`); Unterordner wie `plugins/<slug>/cache/` schon. Ein Muster nur aus `*`/`?`
-  wird abgelehnt
+  `--exclude-plugin`), auch nicht per Platzhalter (`*s/`, `*/<slug>/`); Unterordner wie
+  `plugins/<slug>/cache/` schon. Ein Muster nur aus `*`/`?` wird abgelehnt
 - Ein Push bricht nach dem Probelauf ab, wenn der Agent älter als 0.10.0 ist und ein Muster eine
   der Einheiten berühren kann (Exit `agent_outdated`); eine Datei aus `--uploads` unter einem
   Ausschluss bricht vor dem ersten Request ab (Exit 2)
