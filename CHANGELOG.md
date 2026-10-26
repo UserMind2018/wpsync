@@ -3,9 +3,9 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
-## [Unreleased] · CLI 0.9.0 · Agent 0.9.0
+## [0.9.1] – 2026-10-26 · Agent 0.9.1
 
-### Elementor-Cache gezielt, fremder Push, Gerätename, `confirm` (CLI 0.9.1 · Agent 0.9.1)
+### Elementor-Cache gezielt, fremder Push, Gerätename, `confirm`
 
 **Agent und CLI ändern sich.** Keine neue Mindestversion: alle neuen Felder sind zusätzlich, CLI
 0.9.1 läuft gegen Agent 0.9.0 und umgekehrt wie bisher. Einzige strengere Stelle: `/push/confirm`
