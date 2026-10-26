@@ -175,10 +175,13 @@ K3="$(site_json "$G3" key_id)"
 PAGE="$(admin_page)"
 for k in "$KEY_MAIN" "$K1" "$K2" "$K3"; do grep -qF "<code>$k</code>" <<<"$PAGE" || fail "AC-247 the table does not show the key id $k"; done
 grep -qF 'Gerätename (optional)' <<<"$PAGE" || fail "G1 the form has no field for the device name"
-admin_page wpsync_action=rename "key_id=$K1" 'device=Büro <b>Neu</b>' | grep -qF 'Gerät umbenannt.' || fail "AC-247 rename shows no success notice"
+# grep -q liest nicht zu Ende – bei vielen Kopplungen bekäme admin_page SIGPIPE (pipefail); erst die ganze Seite holen.
+PAGE="$(admin_page wpsync_action=rename "key_id=$K1" 'device=Büro <b>Neu</b>')"
+grep -qF 'Gerät umbenannt.' <<<"$PAGE" || fail "AC-247 rename shows no success notice"
 [ "$(db_device "$K1")" = "Büro Neu" ] || fail "AC-247 renamed device is '$(db_device "$K1")'"
 [ "$(db_device "$K2") / $(db_device "$K3") / $(db_device "$KEY_MAIN")" = "Laptop / $HOST_NAME / $HOST_NAME" ] || fail "AC-247 rename touched another row"
-admin_page wpsync_action=rename "key_id=$K1" 'device=   ' | grep -qF 'darf nicht leer sein' || fail "AC-247 an empty name is not refused"
+PAGE="$(admin_page wpsync_action=rename "key_id=$K1" 'device=   ')"
+grep -qF 'darf nicht leer sein' <<<"$PAGE" || fail "AC-247 an empty name is not refused"
 [ "$(db_device "$K1")" = "Büro Neu" ] || fail "AC-247 an empty name changed the device"
 if admin_page wpsync_action=rename "key_id=$K1" device=Ohne-Nonce nonce=no >"$E2E/admin-nonce.log" 2>&1; then
   if grep -qF 'Gerät umbenannt.' "$E2E/admin-nonce.log"; then fail "AC-247 rename without a nonce went through"; fi
@@ -297,6 +300,21 @@ echo "== Folge-Pull"
 requests="$(grep -o '– [0-9]* Requests' "$E2E/pull2.log" | grep -o '[0-9]*')"
 [ "$requests" -le 3 ] || fail "AC-12 follow-up pull used $requests requests"
 [ -f public/wp-content/uploads/2019/01/wpsync-proxy.txt ] || fail "follow-up pull deleted a proxied upload"
+
+echo "== AC-262/AC-271: Ausschluss-Pfade (0.10.0)"
+SRC_UP="$E2E/source/public/wp-content/uploads"
+mkdir -p "$SRC_UP/videos" "$SRC_UP/videosammlung"
+printf 'video' > "$SRC_UP/videos/e2e.mp4"
+printf 'jpg' > "$SRC_UP/videosammlung/e2e.jpg"
+rm -rf public/wp-content/uploads/videos
+"$WPSYNC" scan "$TARGET" --preset ohne-transaktionen --exclude-plugin e2e-excluded --uploads-since "$YEAR" --exclude-path uploads/videos/ >/dev/null
+"$WPSYNC" pull "$TARGET" | tee "$E2E/pull-exclude.log"
+[ ! -e public/wp-content/uploads/videos/e2e.mp4 ] || fail "AC-262 excluded file was pulled"
+[ -f public/wp-content/uploads/videosammlung/e2e.jpg ] || fail "AC-262 neighbour folder missing"
+if grep -q "älter als 0.10.0" "$E2E/pull-exclude.log"; then fail "AC-263 new agent reported as old"; fi
+"$WPSYNC" scan "$TARGET" --preset ohne-transaktionen --exclude-plugin e2e-excluded --uploads-since "$YEAR" --no-exclude-paths >/dev/null
+"$WPSYNC" pull "$TARGET" >/dev/null
+[ -f public/wp-content/uploads/videos/e2e.mp4 ] || fail "AC-271 file not pulled after the exclusion was removed"
 
 echo "== AC-29: status zeigt Änderungen ohne Transfer"
 (cd "$E2E/source" && ddev wp post create --post_type=page --post_title="Status $(date +%s)" --post_status=publish >/dev/null \
