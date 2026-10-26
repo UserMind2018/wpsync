@@ -60,5 +60,23 @@
     {"p": ["uploads/videos/"], "unit": "plugins/foo", "want": false},
     {"p": ["mu-plugins/sub/"], "unit": "mu-plugins", "want": true},
     {"p": ["uploads/videos/"], "unit": "mu-plugins", "want": false}
-  ]
+  ],
+  "scope": {
+    "scope": {"exclude_plugins": ["drop"], "exclude_themes": ["old"], "uploads_since": "2020", "exclude_paths": ["uploads/videos/", "*.mp4", "plugins/keep/cache/", "my-cache/"]},
+    "cases": [
+      {"path": "wp-content/plugins/keep/k.php", "in": true},
+      {"path": "wp-content/plugins/keep/cache/x.bin", "in": false},
+      {"path": "wp-content/plugins/drop/d.php", "in": false},
+      {"path": "wp-content/themes/old/style.css", "in": false},
+      {"path": "wp-content/themes/astra/a.mp4", "in": false},
+      {"path": "wp-content/uploads/2019/01/a.jpg", "in": false},
+      {"path": "wp-content/uploads/2021/01/a.jpg", "in": true},
+      {"path": "wp-content/uploads/videos/a.webm", "in": false},
+      {"path": "wp-content/uploads/videosammlung/a.webm", "in": true},
+      {"path": "wp-content/my-cache/a.html", "in": false},
+      {"path": "wp-content/uploads/my-cache/a.html", "in": true},
+      {"path": "wp-content/object-cache.php", "in": true},
+      {"path": "wp-content/uploads/2021/A.MP4", "in": false}
+    ]
+  }
 }

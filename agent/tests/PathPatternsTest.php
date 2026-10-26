@@ -48,4 +48,22 @@ final class PathPatternsTest extends TestCase
             $this->assertSame($c['want'], $set->matches($c['path'], $c['dir']), json_encode($c));
         }
     }
+
+    public function testScopeMirrorsCli(): void
+    {
+        $f     = self::fixture()['scope'];
+        $scope = \WpSync\Scope::fromArray($f['scope']);
+        foreach ($f['cases'] as $c) {
+            $rel   = substr($c['path'], strlen('wp-content/'));
+            $parts = explode('/', $rel);
+            $out   = false;
+            // wie FileWalker: jeder Elternordner wird vorher geprüft
+            for ($i = 1; $i <= count($parts); $i++) {
+                $sub   = implode('/', array_slice($parts, 0, $i));
+                $isDir = $i < count($parts);
+                $out   = $out || $scope->excludesPath($sub, $isDir) || $scope->excludesPattern($sub, $isDir);
+            }
+            $this->assertSame($c['in'], !$out, $c['path']);
+        }
+    }
 }

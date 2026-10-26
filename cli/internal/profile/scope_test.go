@@ -1,6 +1,8 @@
 package profile
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 
@@ -79,6 +81,34 @@ func TestInScopeExcludePaths(t *testing.T) {
 		}
 		if got := InScope(s, path); got != want {
 			t.Errorf("InScope(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// AC-266: InScope and the agent's Scope agree on the shared cases in pathmatch.json.
+func TestInScopeMirrorsAgent(t *testing.T) {
+	raw, err := os.ReadFile("../../../agent/tests/fixtures/pathmatch.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Scope struct {
+			Scope agentapi.Scope `json:"scope"`
+			Cases []struct {
+				Path string `json:"path"`
+				In   bool   `json:"in"`
+			} `json:"cases"`
+		} `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Scope.Cases) == 0 || len(f.Scope.Scope.ExcludePaths) == 0 {
+		t.Fatal("fixture has no scope cases")
+	}
+	for _, c := range f.Scope.Cases {
+		if got := InScope(f.Scope.Scope, c.Path); got != c.In {
+			t.Errorf("InScope(%q) = %v, want %v", c.Path, got, c.In)
 		}
 	}
 }
