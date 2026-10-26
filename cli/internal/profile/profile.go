@@ -42,6 +42,7 @@ type Profile struct {
 	Plugins   Choice  `yaml:"plugins,omitempty" json:"plugins"`
 	Themes    Choice  `yaml:"themes,omitempty" json:"themes"`
 	Uploads   Uploads `yaml:"uploads" json:"uploads"`
+	Paths     Paths   `yaml:"paths,omitempty" json:"paths"`
 	Seen      Seen    `yaml:"seen,omitempty" json:"seen"`
 }
 
@@ -60,6 +61,19 @@ type Choice struct {
 type Uploads struct {
 	Since string `yaml:"since,omitempty" json:"since"`
 	Proxy bool   `yaml:"proxy" json:"proxy"`
+}
+
+// Paths are patterns below wp-content that are neither pulled nor touched by a push (Spec 0.10.0).
+type Paths struct {
+	Exclude []string `yaml:"exclude,omitempty" json:"exclude"`
+}
+
+// ExcludePaths is the stored exclude list; nil-safe.
+func (p *Profile) ExcludePaths() []string {
+	if p == nil {
+		return nil
+	}
+	return p.Paths.Exclude
 }
 
 // Seen is what the profile was decided on – new entries are reported by scan and pull.

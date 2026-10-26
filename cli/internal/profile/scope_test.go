@@ -50,3 +50,35 @@ func TestInScope(t *testing.T) {
 		}
 	}
 }
+
+func TestScopeCarriesExcludePaths(t *testing.T) {
+	p := mustNew(t, PresetFull)
+	p.Paths.Exclude = []string{"*.mp4", "uploads/videos/"}
+	if got := p.Scope(testSheet()).ExcludePaths; !reflect.DeepEqual(got, []string{"*.mp4", "uploads/videos/"}) {
+		t.Fatalf("ExcludePaths = %q", got)
+	}
+	p.Paths.Exclude = []string{}
+	if got := p.Scope(testSheet()); !reflect.DeepEqual(got, agentapi.Scope{}) {
+		t.Fatalf("an empty list must keep the scope empty, got %+v", got)
+	}
+}
+
+func TestInScopeExcludePaths(t *testing.T) {
+	s := agentapi.Scope{ExcludePaths: []string{"uploads/videos/", "*.MP4"}}
+	cases := map[string]bool{
+		"wp-content/uploads/videos/a.webm":     false,
+		"wp-content/uploads/videosammlung/a.x": true,
+		"wp-content/uploads/2024/a.mp4":        false,
+		"wp-content/uploads/2024/a.mp4.txt":    true,
+		"wp-admin/a.mp4":                       true, // outside wp-content: no exclusions (A1)
+	}
+	keep := Filter(s)
+	for path, want := range cases {
+		if got := keep(path); got != want {
+			t.Errorf("Filter(%q) = %v, want %v", path, got, want)
+		}
+		if got := InScope(s, path); got != want {
+			t.Errorf("InScope(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
