@@ -973,6 +973,100 @@ eq "M1: zurück geht er über den Agent (Exit 0)" "$RC $(last m1-rollback '.data
 state_clean "M1"
 arm
 
+echo "== Spec 0.9.1 H: confirm bei unquittiertem Inhalts-Schritt (AC-250–AC-252)"
+disarm
+# AC-250: getauscht, aber die Transaktion des Inhalts-Schritts kam nie an – die Zeile steht wie vor dem Push,
+# rescue.json sagt pending. So bleibt es zurück, wenn PHP im Commit stirbt, bevor die Datenbank festschreibt.
+# Der Vermerk in rescue.json wird im Container zurückgesetzt – dort liest ihn der Agent ohne Verzug.
+cat >"$SRC/e2e-ctl/pending.php" <<'PHP'
+<?php
+$record = json_decode((string) file_get_contents($argv[1]), true);
+$record['content']['state'] = 'pending';
+file_put_contents($argv[1], json_encode($record));
+PHP
+sql -e "SET SESSION sql_mode = ''; DROP TABLE IF EXISTS e2e_h_keep; CREATE TABLE e2e_h_keep AS SELECT * FROM ${PREFIX}posts WHERE ID = $PAGE_B"
+hold h-pending --no-code --content "$PKG/bestaetigt.jsonl"
+D="$(work)/$HELD"
+eq "AC-251 Fixture: nach dem Commit ist der Inhalts-Schritt quittiert" "$(jq -r '.status + " " + .content.state' "$D/rescue.json")" "committed applied"
+sql -e "SET SESSION sql_mode = ''; REPLACE INTO ${PREFIX}posts SELECT * FROM e2e_h_keep; DROP TABLE e2e_h_keep"
+src exec php /var/www/html/e2e-ctl/pending.php "/var/www/html/public/wp-content/${D#"$WPC"/}/rescue.json"
+eq "AC-250 Fixture: rescue.json sagt pending, die Datenbank steht wie vor dem Push" "$(jq -r '.status + " " + .content.state' "$D/rescue.json") $(dbsum)" "committed pending $DB_PULLED"
+jrun h-confirm "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+eq "AC-250: confirm → Exit 1 mit error.reason content_pending" "$RC $(last h-confirm '.error.reason')" "1 content_pending"
+ok "AC-250: die Meldung nennt den Weg – mit dem Namen der Site" contains "$(last h-confirm '.error.message')" "wpsync rollback $TARGET $HELD"
+eq "AC-250: der Push bleibt getauscht – rescue.json, Protokoll, offen" "$(jq -r .status "$D/rescue.json") $(record "$HELD" .status) $(pending | jq -r .push_id)" "committed committed $HELD"
+ok "AC-250: der Umschlag bleibt für die Rücknahme liegen" test -s "$D/rescue.sealed"
+jrun h-confirm2 "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+eq "AC-250: auch ein zweiter Versuch bestätigt nichts" "$RC $(last h-confirm2 '.error.reason') $(record "$HELD" .status)" "1 content_pending committed"
+jrun h-rollback "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "AC-250: die Rücknahme danach gelingt (über den Agent, Exit 0)" "$RC $(last h-rollback '.data.via + " " + .data.status')" "0 agent rolled_back"
+state_clean "AC-250"
+eq "AC-250: kein offener Push" "$(pending)" "null"
+rm -f "$SRC/e2e-ctl/pending.php"
+# AC-251 belegen die Fälle AC-165 und M1 oben: ein Push mit quittierten Inhalten wird bestätigt wie bisher.
+
+# AC-252, H2: hat rescue.php Code und Uploads schon zurückgenommen und stehen die Inhalte noch (hier: seit dem
+# Push geändert), nimmt confirm sie weiter an – content_kept. Kein Zustand ohne Ausgang.
+sql -e "SET SESSION sql_mode = ''; DROP TABLE IF EXISTS e2e_h_keep; CREATE TABLE e2e_h_keep AS SELECT * FROM ${PREFIX}posts WHERE ID = $PAGE_B"
+hold h-kept --no-code --content "$PKG/bestaetigt.jsonl"
+D="$(work)/$HELD"
+sql -e "UPDATE ${PREFIX}posts SET post_title = 'nach dem Push geändert' WHERE ID = $PAGE_B"
+rpost h-kept "$HELD" "$(rkey "$HELD")" action=rollback content=1
+eq "AC-252 Fixture: rescue.php lässt die Inhalte stehen (changed_since_push)" "$RCODE $(ans h-kept '[.status, .content.state, .content.error.code] | @csv')" '200 "rolled_back","kept","changed_since_push"'
+eq "AC-252 Fixture: der DB-Anteil ist offen" "$(jq -c '[.status, .content.state]' "$D/rescue.json")" '["rolled_back","applied"]'
+jrun h-kept-confirm "$WPSYNC" pushes "$TARGET" --confirm "$HELD" --json
+eq "AC-252: confirm schliesst den Push ab – rolled_back mit content_kept" "$RC $(last h-kept-confirm '.data.status + " " + (.data.warnings | index("content_kept") != null | tostring)')" "0 rolled_back true"
+eq "AC-252: die Inhalte stehen, kein offener Push" "$(lpost "$PAGE_B" post_title) $(pending)" "nach dem Push geändert null"
+no "AC-252: der Ordner des Pushs ist weg" test -e "$D"
+# Die Inhalte bleiben nach content_kept, wie sie sind – für die folgenden Fälle wieder der Stand des Pulls.
+sql -e "SET SESSION sql_mode = ''; REPLACE INTO ${PREFIX}posts SELECT * FROM e2e_h_keep; DROP TABLE e2e_h_keep"
+state_clean "AC-252 (Inhalte von Hand zurückgesetzt)"
+
+echo "== Spec 0.9.1 F: der Push eines anderen Geräts (AC-241–AC-243)"
+hold f-fremd --no-code --content "$PKG/bestaetigt.jsonl"
+DEV_A="$(src wp eval "echo WpSync\\Store::deviceFor('$KEY_ID');")"
+TARGET_B="${TARGET}-b"
+"$WPSYNC" unpair "$TARGET_B" >/dev/null 2>&1 || true
+sleep 2 # der Agent nimmt einen Kopplungsversuch pro Sekunde an
+# Das zweite Gerät speichert sein Secret nirgends: es steht nur in dieser Variablen und geht über stdin an die CLI.
+PAIR_B="$("$WPSYNC" pair "$SOURCE_URL" "$(src wp wpsync pair-code | tail -1)" --name "$TARGET_B" --device "E2E Gerät B" --insecure --json --secret-out 2>/dev/null | tail -n 1)"
+SECRET_B="$(jq -r '.data.secret // empty' <<<"$PAIR_B")"
+KEY_B="$(jq -r '.data.key_id // empty' <<<"$PAIR_B")"
+ok "F: das zweite Gerät ist gekoppelt" test -n "$SECRET_B" -a -n "$KEY_B"
+eq "G3/AC-245: pair nennt den Namen aus --device, die Site führt ihn so" "$(jq -r '.data.device' <<<"$PAIR_B") / $(src wp eval "echo WpSync\\Store::deviceFor('$KEY_B');")" "E2E Gerät B / E2E Gerät B"
+PAIR_B=""
+brun() { # brun <name> <befehl…>: wie jrun, als Gerät B – Secret über stdin
+  local name="$1"
+  shift
+  set +e
+  printf '%s\n' "$SECRET_B" | "$@" --secret-stdin --json >"$JSON/$name.jsonl" 2>"$JSON/$name.err"
+  RC=$?
+  set -e
+}
+ADMIN_URL="$SOURCE_URL/wp-admin/tools.php?page=wpsync"
+brun f-rollback "$WPSYNC" rollback "$TARGET_B" "$HELD"
+eq "AC-241: rollback eines fremden Pushs – Exit 1, error.reason, error.device" "$RC $(last f-rollback '.error.reason + " / " + .error.device')" "1 push_foreign_device / $DEV_A"
+ok "AC-241: der Text nennt das Gerät" contains "$(last f-rollback '.error.message')" "von einem anderen Gerät ($DEV_A)"
+ok "AC-241: … und die Admin-Seite" contains "$(last f-rollback '.error.message')" "$ADMIN_URL"
+no "AC-241: nie am Agent vorbei über rescue.php" hasF "$JSON/f-rollback.err" "rescue.php"
+eq "AC-241: der Push steht noch" "$(record "$HELD" .status) $(pending | jq -r .push_id)" "committed $HELD"
+brun f-confirm "$WPSYNC" pushes "$TARGET_B" --confirm "$HELD"
+eq "AC-243: pushes --confirm auf einen fremden Push – dasselbe" "$RC $(last f-confirm '.error.reason + " / " + .error.device')" "1 push_foreign_device / $DEV_A"
+eq "AC-243: nichts ist bestätigt" "$(record "$HELD" .status) $(jq -r .status "$(work)/$HELD/rescue.json")" "committed committed"
+for who in b a; do
+  if [ "$who" = b ]; then brun f-erfunden-b "$WPSYNC" rollback "$TARGET_B" p_20200101_0123456789ab; else jrun f-erfunden-a "$WPSYNC" rollback "$TARGET" p_20200101_0123456789ab --json; fi
+  eq "AC-242: eine erfundene ID (Gerät $who) – Exit 1 ohne reason und ohne device" "$RC $(last "f-erfunden-$who" '.error | [has("reason"), has("device")] | @csv')" "1 false,false"
+  ok "AC-242: … „Unbekannter Push.“" contains "$(last "f-erfunden-$who" '.error.message')" "Unbekannter Push."
+done
+no "F: das Secret des zweiten Geräts steht in keiner Ausgabe" grep -rqF -- "$SECRET_B" "$JSON"
+jrun f-eigen "$WPSYNC" rollback "$TARGET" "$HELD" --json
+eq "F: das eigene Gerät nimmt seinen Push zurück" "$RC $(last f-eigen '.data.via')" "0 agent"
+state_clean "F"
+"$WPSYNC" unpair "$TARGET_B" >/dev/null 2>&1 || true
+src wp eval "WpSync\\Store::deletePairing('$KEY_B');"
+SECRET_B=""
+arm
+
 echo "== NR-1: confirm wartet auf die Sperre, während der Agent den Push zurücknimmt – danach wird nichts bestätigt"
 disarm
 hold nr1 --no-code --content "$PKG/klein.jsonl"

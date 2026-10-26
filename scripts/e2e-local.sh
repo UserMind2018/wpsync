@@ -92,10 +92,108 @@ if "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "${TARGET}0" 2>/dev/null; then fa
 
 echo "== pair"
 "$WPSYNC" unpair "$TARGET" >/dev/null 2>&1 || true
-"$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "$TARGET" --insecure
+"$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "$TARGET" --insecure | tee "$E2E/pair.log"
 
 echo "== AC-3: Code ist verbraucht"
 if "$WPSYNC" pair "$SOURCE_URL" "$CODE" --name "${TARGET}2" --insecure 2>/dev/null; then fail "code reused"; fi
+
+echo "== Spec 0.9.1 G: Gerätename und Kennung (AC-244–AC-247, AC-249)"
+# Die Admin-Seite läuft echt: Werkzeuge → wpsync als Administrator gerendert, Formulare als POST mit der
+# Nonce der Seite (nonce=no: ohne). Die Kopplungen dieses Abschnitts speichern kein Secret (--secret-out
+# nach /dev/null) und werden am Ende wieder entfernt.
+admin_page() {
+  local fields=() field
+  for field in "$@"; do fields+=("${field%%=*}=$(printf %s "${field#*=}" | openssl base64 -A)"); done # Werte mit Leerzeichen und < > unversehrt durch ddev
+  ddev wp eval-file - ${fields[@]+"${fields[@]}"} <<'PHP'
+<?php
+wp_set_current_user(1);
+$nonce = true;
+foreach ($args as $pair) {
+    list($name, $value) = explode('=', $pair, 2);
+    $value = (string) base64_decode($value);
+    if ($name === 'nonce') {
+        $nonce = $value !== 'no';
+        continue;
+    }
+    $_POST[$name] = wp_slash($value);
+}
+if ($_POST !== [] && $nonce) {
+    $_REQUEST['_wpnonce'] = $_POST['_wpnonce'] = wp_create_nonce('wpsync_admin');
+}
+WpSync\Admin::render();
+PHP
+}
+new_code() { admin_page wpsync_action=new_code "device=$1" | sed -n 's/.*letter-spacing:.15em">\([A-Z0-9]\{8\}\)<.*/\1/p' | head -1; } # new_code <name>: „Pairing-Code erzeugen“ mit Gerätename
+site_json() { # site_json <site> <feld>: aus wpsync sites --json
+  "$WPSYNC" sites --json | python3 -c 'import json,sys; d=[s for s in json.loads(sys.stdin.read().strip().splitlines()[-1])["data"]["sites"] if s["site"]==sys.argv[1]]; print(d[0][sys.argv[2]] if d else "")' "$1" "$2"
+}
+db_device() { ddev wp eval "echo WpSync\\Store::deviceFor('$1');"; }
+code_name() { ddev wp eval 'echo WpSync\Pairing::named(WpSync\Store::getState("pairing_code"));'; } # der Name, der beim offenen Code liegt
+pair_g() { # pair_g <site> <code> [--device n]: koppelt, ohne ein Secret zu speichern oder zu zeigen
+  local name="$1" code="$2"
+  shift 2
+  sleep 2 # der Agent nimmt einen Kopplungsversuch pro Sekunde an
+  "$WPSYNC" pair "$SOURCE_URL" "$code" --name "$name" --insecure --json --secret-out "$@" >/dev/null 2>"$E2E/pair-g.err"
+}
+HOST_NAME="$(hostname)"
+G1="${TARGET}-g1"; G2="${TARGET}-g2"; G3="${TARGET}-g3"
+for g in "$G1" "$G2" "$G3"; do "$WPSYNC" unpair "$g" >/dev/null 2>&1 || true; done
+KEY_MAIN="$(site_json "$TARGET" key_id)"
+# AC-246: Code ohne Name (wp wpsync pair-code), pair ohne --device – der Rechnername, wie bisher.
+[ "$(site_json "$TARGET" device)" = "$HOST_NAME" ] || fail "AC-246 sites.json device is '$(site_json "$TARGET" device)', want the host name '$HOST_NAME'"
+[ "$(db_device "$KEY_MAIN")" = "$HOST_NAME" ] || fail "AC-246 the site lists the device as '$(db_device "$KEY_MAIN")'"
+grep -qF "Gerät: $HOST_NAME (Kennung $KEY_MAIN)" "$E2E/pair.log" || fail "G3 pair does not show device and key id"
+"$WPSYNC" sites | grep -F "$TARGET" | grep -qF "$KEY_MAIN" || fail "G7 wpsync sites does not list the key id"
+# AC-244: Code mit Name aus dem WP-Admin, pair ohne --device.
+C="$(new_code 'Studio Büro')"
+[ -n "$C" ] || fail "AC-244 the admin page shows no pairing code"
+[ "$(code_name)" = "Studio Büro" ] || fail "G1 the name is not stored with the code ('$(code_name)')"
+pair_g "$G1" "$C" || fail "AC-244 pair failed: $(cat "$E2E/pair-g.err")"
+K1="$(site_json "$G1" key_id)"
+[ "$(site_json "$G1" device)" = "Studio Büro" ] || fail "AC-244 sites.json device is '$(site_json "$G1" device)'"
+[ "$(db_device "$K1")" = "Studio Büro" ] || fail "AC-244 the site lists the device as '$(db_device "$K1")'"
+[ -z "$(code_name)" ] || fail "AC-249 a redeemed code left its name behind"
+# AC-245: derselbe Fall mit --device.
+C="$(new_code 'Studio Büro')"
+pair_g "$G2" "$C" --device Laptop || fail "AC-245 pair failed: $(cat "$E2E/pair-g.err")"
+K2="$(site_json "$G2" key_id)"
+[ "$(site_json "$G2" device) $(db_device "$K2")" = "Laptop Laptop" ] || fail "AC-245 device is '$(site_json "$G2" device)' / '$(db_device "$K2")'"
+# AC-249: ein neuer Code ersetzt den alten samt Namen; ein abgelaufener nimmt seinen Namen mit.
+new_code 'Bleibt nicht' >/dev/null
+[ "$(code_name)" = "Bleibt nicht" ] || fail "AC-249 fixture"
+new_code '' >/dev/null
+[ -z "$(code_name)" ] || fail "AC-249 the next code kept the name of the one before ('$(code_name)')"
+C="$(new_code 'Verfällt')"
+ddev wp eval '$s = WpSync\Store::getState("pairing_code"); $s["expires"] = time() - 1; WpSync\Store::setState("pairing_code", $s);'
+if pair_g "$G3" "$C"; then fail "AC-249 an expired code was redeemed"; fi
+[ "$(ddev wp eval 'echo json_encode(WpSync\Store::getState("pairing_code"));')" = "null" ] || fail "AC-249 the expired code is still stored"
+C="$(ddev wp wpsync pair-code | tail -1)"
+pair_g "$G3" "$C" || fail "AC-249 pair with the next code failed: $(cat "$E2E/pair-g.err")"
+K3="$(site_json "$G3" key_id)"
+[ "$(site_json "$G3" device) / $(db_device "$K3")" = "$HOST_NAME / $HOST_NAME" ] || fail "AC-249 the next pairing got the name '$(db_device "$K3")'"
+# AC-247: die Tabelle zeigt die Kennung jeder Zeile; „Umbenennen“ ändert nur diese Zeile.
+PAGE="$(admin_page)"
+for k in "$KEY_MAIN" "$K1" "$K2" "$K3"; do grep -qF "<code>$k</code>" <<<"$PAGE" || fail "AC-247 the table does not show the key id $k"; done
+grep -qF 'Gerätename (optional)' <<<"$PAGE" || fail "G1 the form has no field for the device name"
+admin_page wpsync_action=rename "key_id=$K1" 'device=Büro <b>Neu</b>' | grep -qF 'Gerät umbenannt.' || fail "AC-247 rename shows no success notice"
+[ "$(db_device "$K1")" = "Büro Neu" ] || fail "AC-247 renamed device is '$(db_device "$K1")'"
+[ "$(db_device "$K2") / $(db_device "$K3") / $(db_device "$KEY_MAIN")" = "Laptop / $HOST_NAME / $HOST_NAME" ] || fail "AC-247 rename touched another row"
+admin_page wpsync_action=rename "key_id=$K1" 'device=   ' | grep -qF 'darf nicht leer sein' || fail "AC-247 an empty name is not refused"
+[ "$(db_device "$K1")" = "Büro Neu" ] || fail "AC-247 an empty name changed the device"
+if admin_page wpsync_action=rename "key_id=$K1" device=Ohne-Nonce nonce=no >"$E2E/admin-nonce.log" 2>&1; then
+  if grep -qF 'Gerät umbenannt.' "$E2E/admin-nonce.log"; then fail "AC-247 rename without a nonce went through"; fi
+fi
+[ "$(db_device "$K1")" = "Büro Neu" ] || fail "AC-247 rename without a nonce changed the device"
+if admin_page wpsync_action=new_code device=Ohne-Nonce nonce=no >/dev/null 2>&1 && [ "$(code_name)" = "Ohne-Nonce" ]; then fail "G1 a code without a nonce was issued"; fi
+# Escaping: ein Name mit HTML – wie er nur an der Bereinigung vorbei in die Datenbank käme – erscheint nie als Markup.
+ddev wp eval "global \$wpdb; \$wpdb->update(WpSync\\Store::table('pairings'), ['device' => '<img src=x onerror=alert(1)>'], ['key_id' => '$K2']);"
+PAGE="$(admin_page)"
+grep -qF '&lt;img src=x onerror=alert(1)&gt;' <<<"$PAGE" || fail "AC-247 the device name is not escaped in the table"
+if grep -qF '<img src=x' <<<"$PAGE"; then fail "AC-247 HTML of a device name reaches the page"; fi
+# Aufräumen: nur die Kopplung des Ziels bleibt.
+for g in "$G1" "$G2" "$G3"; do "$WPSYNC" unpair "$g" >/dev/null; done
+ddev wp eval "global \$wpdb; foreach (['$K1', '$K2', '$K3'] as \$k) { WpSync\\Store::deletePairing(\$k); } WpSync\\Store::setState('pairing_code', null);"
+[ "$(db_device "$K1")$(db_device "$K2")$(db_device "$K3")" = "" ] || fail "G cleanup left pairings behind"
 
 echo "== AC-9: scan --refresh ohne WP-Cron"
 "$WPSYNC" scan "$TARGET" --refresh --preset ohne-transaktionen --exclude-plugin e2e-excluded --uploads-since "$YEAR" | tee "$E2E/scan1.log"
