@@ -21,7 +21,7 @@ if (defined('WPSYNC_STAGING')) {
 const WPSYNC_VERSION = '0.9.1';
 
 foreach ([
-    'Signature', 'Budget', 'Excludes', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
+    'Signature', 'Budget', 'Excludes', 'PathPatterns', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
     'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'RescueSeal', 'RescueLink', 'MysqliLink', 'RescueDb', 'RescueContent', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'ContentException', 'ContentStore', 'ContentState', 'ContentPackage', 'ContentSql', 'ContentTarget', 'ContentRepair', 'ContentPlugins', 'ContentCheck', 'ContentImage', 'ContentApply', 'ContentRollback', 'ContentElementor', 'ContentPostActions', 'StagingConfig', 'StagingAccess', 'StagingHosts',

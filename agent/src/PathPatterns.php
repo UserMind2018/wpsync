@@ -96,7 +96,7 @@ final class PathPatterns
                 if (!$isDir && count($segs) === $n && self::segs($pat, $segs)) {
                     return true;
                 }
-            } elseif (!$isDir && self::glob($pat[0], $segs[count($segs) - 1])) {
+            } elseif (!$isDir && self::wildcard($pat[0], $segs[count($segs) - 1])) {
                 return true;
             }
         }
@@ -138,7 +138,7 @@ final class PathPatterns
     private static function segs(array $pat, array $segs): bool
     {
         foreach ($pat as $i => $p) {
-            if (!self::glob($p, $segs[$i])) {
+            if (!self::wildcard($p, $segs[$i])) {
                 return false;
             }
         }
@@ -146,7 +146,7 @@ final class PathPatterns
     }
 
     /** Ein Segment: * beliebig viele Bytes, ? genau eins, alles andere wörtlich. */
-    private static function glob(string $pat, string $s): bool
+    private static function wildcard(string $pat, string $s): bool
     {
         $px = 0;
         $sx = 0;
