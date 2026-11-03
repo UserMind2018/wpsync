@@ -365,8 +365,8 @@ func markerMatches(dir *os.Root, t agentapi.Table) bool {
 	return err == nil && strings.TrimSpace(string(data)) == markerValue(t)
 }
 
-// ImportReader concatenates header, all table files and footer for one `ddev mysql` import.
-// The table files are unchecked server content; importTables feeds them to a hardened client.
+// ImportReader concatenates header, all table files (structure-only first, each after its marker)
+// and footer for one `ddev mysql` import. The table files are unchecked server content; importTables feeds them to a hardened client.
 func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error, error) {
 	if err := checkTableFiles(tables); err != nil {
 		return nil, nil, err
@@ -375,7 +375,7 @@ func ImportReader(dir string, tables []agentapi.Table) (io.Reader, func() error,
 	if err != nil {
 		return nil, nil, err
 	}
-	r, closeAll, err := importReader(root, tables)
+	r, closeAll, err := importReader(root, importOrder(tables))
 	if err != nil {
 		root.Close()
 		return nil, nil, err
@@ -406,7 +406,7 @@ func importReader(dir *os.Root, tables []agentapi.Table) (io.Reader, func() erro
 			return nil, nil, fmt.Errorf("table %s not downloaded: %w", t.Name, err)
 		}
 		files = append(files, f)
-		readers = append(readers, f)
+		readers = append(readers, strings.NewReader(importMarker(t.Name)), f)
 	}
 	readers = append(readers, strings.NewReader(importFooter))
 	return io.MultiReader(readers...), closeAll, nil

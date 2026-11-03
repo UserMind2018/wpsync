@@ -424,3 +424,11 @@ func (f *failingImport) RunStdin(stdin io.Reader, args ...string) error {
 	f.freshAtImport = content.Fresh(f.siteDir)
 	return errors.New("import failed")
 }
+
+// Stream: the import goes through the client's Streamer since the table markers (see runImport).
+func (f *failingImport) Stream(stdin io.Reader, _ io.Writer, args ...string) error {
+	if len(args) > 0 && args[0] == "mysql" {
+		return f.RunStdin(stdin, args...)
+	}
+	return f.streamRunner.Stream(stdin, io.Discard, args...)
+}
