@@ -365,7 +365,8 @@ einmal) und legt sie lokal ab.
 5. **Dateien:** nur neue und geänderte. Ein abgebrochener Download wird fortgesetzt.
 6. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
    eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
-   pseudonymisiert an.
+   pseudonymisiert an. Tabellen, deren Inhalt nicht auf die Maschine soll (Modus `structure`),
+   stehen im Import vorn: Bricht er später ab, sind sie trotzdem schon geleert.
 7. **Post-Setup:**
    - Search-Replace der Live-URL (Klartext, JSON-escaped `https:\/\/…` und doppelt escaped
      `https:\\\/\\\/…`, JSON in JSON), danach ein zweiter Durchlauf
@@ -1779,7 +1780,7 @@ Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per
 | „Der Server antwortet nicht mehr – vermutlich eine IP-Sperre“ | fail2ban/WAF hat gesperrt. Genannte IP entsperren und whitelisten, `User-Agent: wpsync/*` freigeben, ggf. `rps` senken |
 | Infosheet veraltet / fehlt | WP-Cron ist auf der Site aus → `wpsync scan <site> --refresh` |
 | Pull bricht mit Mailguard-Fehler ab | `wpsync doctor` zeigt, welche Datei gesucht wird – meist zeigt `WPSYNC_MAILGUARD` ins Leere. Hat die Site eigene Mail-Wege außerhalb von `wp_mail`, greift der Riegel dort nicht |
-| „Datenbank-Import abgebrochen“ | Der lokale Client hat eine Zeile des Dumps abgelehnt – die Meldung darüber nennt sie. Ein Client-Kommando (`\!`, `source`) oder ein Dateizugriff im Dump deutet auf eine manipulierte Site hin; ein Rechtefehler auf eine Tabelle mit Optionen, die mehr als den Nutzer `db` brauchen. Die lokale Datenbank kann unvollständig sein. Der Fehler wiederholt sich bei jedem Pull, bis sich die Tabelle auf der Site ändert |
+| „Datenbank-Import abgebrochen“ | Der lokale Client hat eine Zeile des Dumps abgelehnt – die Meldung darüber nennt sie. Ein Client-Kommando (`\!`, `source`) oder ein Dateizugriff im Dump deutet auf eine manipulierte Site hin; ein Rechtefehler auf eine Tabelle mit Optionen, die mehr als den Nutzer `db` brauchen. Die Meldung nennt die Tabelle, in der der Import abbrach, und die Tabellen danach: Sie haben lokal noch den Stand vor diesem Pull. Die lokale Datenbank kann unvollständig sein. Der Fehler wiederholt sich bei jedem Pull, bis sich die Tabelle auf der Site ändert |
 | „die Site liefert Tabellennamen mit unzulässigen Zeichen“ | Ein Tabellenname enthält etwas anderes als Buchstaben, Ziffern, `_` oder `$`. Gehört die Tabelle zur Site: im Profil `tables.overrides: <name>: skip` setzen und erneut ziehen (die Tabelle fehlt dann lokal; ist sie neuer als der letzte Scan, vorher `wpsync scan <site> --refresh`). Auf einer sonst unauffälligen Site ist so ein Name ein Grund, auf dem Server nachzusehen |
 | „die Site meldet Angaben in unzulässiger Form“ | Die Site meldet einen unzulässigen Tabellenpräfix (anderes als Buchstaben, Ziffern, `_`, auch: leer) oder eine Adresse, die keine `http(s)`-URL ist – die Meldung nennt das Feld. Auf der Site `$table_prefix` in `wp-config.php` bzw. WordPress- und Website-Adresse unter Einstellungen → Allgemein prüfen. Ist dort alles unauffällig, ist das ein Grund, die Site zu untersuchen |
 | „.ddev von … weicht vom geprüften Stand ab“ | Eine Datei, die DDEV auf dem Mac auswertet, ist neu, geändert oder fehlt – die Meldung nennt sie. Es wurde kein ddev-Befehl ausgeführt. Stammt die Änderung von dir (eigene `config.local.yaml`, Add-on, Compose-Datei): `wpsync trust <site>` zeigt sie mit Hooks und Mounts an und gibt sie frei. Kennst du sie nicht, Datei ansehen und entfernen – die Site könnte manipuliert sein |

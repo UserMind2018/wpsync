@@ -3,6 +3,21 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.10.1] – 2026-11-03 · Agent 0.10.0
+
+### Datenbank-Import robust
+
+**Nur die CLI ändert sich.** Der Agent bleibt bei 0.10.0; CLI 0.10.1 läuft gegen jeden Agent, gegen
+den 0.10.0 lief.
+
+**Behoben**
+- Pull: Der Import lief als ein Client-Strom in der Reihenfolge der Site und brach bei der ersten
+  abgelehnten Zeile ab. Tabellen im Modus `structure` (Personendaten, Buchungen), die danach
+  standen, wurden nie geleert und behielten ihre alten Zeilen lokal. Sie stehen jetzt am Anfang
+  des Imports; ein späterer Abbruch lässt sie leer statt voll
+- Pull: Ein abgebrochener Import nennt die Tabelle, in der er abbrach, und die Tabellen danach, die
+  lokal noch den Stand vor dem Pull haben. Exit-Code und `ErrDBImport` bleiben gleich
+
 ## [0.10.0] – 2026-10-26 · Agent 0.10.0
 
 ### Ordner und Dateien ausschliessen
