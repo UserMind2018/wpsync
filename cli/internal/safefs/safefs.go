@@ -35,6 +35,9 @@ func hook() {
 	}
 }
 
+// ErrShortBody: the body of WriteFile ended before size bytes – the transfer was cut off.
+var ErrShortBody = errors.New("body ended early")
+
 // TmpSuffix marks the temporary file of WriteFile; the snapshot ignores it.
 const TmpSuffix = ".wpsync-tmp"
 
@@ -171,7 +174,7 @@ func WriteFile(r *os.Root, rel string, src io.Reader, size int64, mtime time.Tim
 		if err := errors.Join(copyErr, closeErr); err != nil {
 			return fmt.Errorf("write %s: %d/%d bytes: %w", rel, n, size, err)
 		}
-		return fmt.Errorf("write %s: %d/%d bytes", rel, n, size)
+		return fmt.Errorf("write %s: %d/%d bytes: %w", rel, n, size, ErrShortBody)
 	}
 	if !mtime.IsZero() {
 		if err := r.Chtimes(tmp, mtime, mtime); err != nil {

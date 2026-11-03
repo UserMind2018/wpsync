@@ -11,6 +11,29 @@ import (
 
 func sp(s string) *string { return &s }
 
+// U-40: A pull that broke off saved no baseline. Files it had already written carry the new size
+// and mtime of the source, the baseline still the old ones – they are present, not "changed" again.
+func TestDiffFilesSkipsChangedFilesAlreadyWrittenByAnAbortedPull(t *testing.T) {
+	b := baseline.New("x")
+	b.Files["wp-content/done"] = baseline.FileStamp{Size: 1, MTime: 1}
+	b.Files["wp-content/open"] = baseline.FileStamp{Size: 1, MTime: 1}
+	files := []agentapi.File{
+		{Path: "wp-content/done", Size: 7, MTime: 9},
+		{Path: "wp-content/open", Size: 7, MTime: 9},
+	}
+	present := func(f agentapi.File) bool { return f.Path == "wp-content/done" }
+
+	changed, deleted := DiffFiles(files, b, present)
+
+	if len(changed) != 1 || changed[0].Path != "wp-content/open" || len(deleted) != 0 {
+		t.Fatalf("changed = %v, deleted = %v", changed, deleted)
+	}
+	// --full passes no present function: everything is fetched again.
+	if changed, _ := DiffFiles(files, b, nil); len(changed) != 2 {
+		t.Fatalf("without present: changed = %v", changed)
+	}
+}
+
 func TestDiffFiles(t *testing.T) {
 	b := baseline.New("x")
 	b.Files["wp-content/same"] = baseline.FileStamp{Size: 1, MTime: 1}

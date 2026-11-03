@@ -20,7 +20,7 @@ import (
 
 // Version is the CLI version, sent in the User-Agent. Release builds override it
 // via -ldflags "-X github.com/usermind/wpsync/internal/agentapi.Version=…".
-var Version = "0.10.1"
+var Version = "0.10.2"
 
 // UserAgent is fixed and documented so admins can allow it explicitly (Spike B23).
 func UserAgent() string { return "wpsync/" + Version }
@@ -253,6 +253,10 @@ func (c *Client) pause(d time.Duration) error {
 		return nil
 	}
 }
+
+// Pause waits for d like a backoff of the client: with Ctx it ends early on cancellation (returns its
+// error).
+func (c *Client) Pause(d time.Duration) error { return c.pause(d) }
 
 func (c *Client) throttle() {
 	if !c.last.IsZero() {

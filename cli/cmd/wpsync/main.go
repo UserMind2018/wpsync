@@ -750,11 +750,15 @@ func (a *app) cmdPull(args []string) error {
 	withContent := fs.Bool("content", false, "auch das Inhalts-Manifest holen und die Baseline für einen Inhalts-Push bauen (lädt die Inhaltstabellen neu, sobald sich eine geändert hat)")
 	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
+	retries := fs.Int("retries", pull.DefaultFileRetries, "Wiederholungen, wenn ein Datei-Download abreisst (0 = keine)")
 	secretStdin := secretStdinFlag(fs)
 	df := addDriverFlags(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--json] [--secret-stdin] [--driver container …]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--retries n] [--json] [--secret-stdin] [--driver container …]")
 	if err != nil {
 		return err
+	}
+	if *retries < 0 || *retries > pull.MaxFileRetries {
+		return cliout.Usage(fmt.Errorf("--retries: 0 bis %d", pull.MaxFileRetries))
 	}
 	if err := df.needsSecretStdin(*secretStdin); err != nil {
 		return err
@@ -791,6 +795,7 @@ func (a *app) cmdPull(args []string) error {
 		RowsPerChunk:    2000,
 		FileBundleBytes: 16 << 20,
 		DBBundleBytes:   8 << 20,
+		FileRetries:     *retries,
 		Ctx:             a.ctx,
 		Report:          &report,
 	}
@@ -799,6 +804,10 @@ func (a *app) cmdPull(args []string) error {
 	}
 	if a.json {
 		opts.Progress = func(p pull.Progress) {
+			if p.Retry != nil {
+				a.jw.Event("retry", p.Retry)
+				return
+			}
 			if p.Bytes {
 				a.jw.PhaseBytes(p.Phase, p.Done, p.Total, p.Table, p.BytesDone, p.BytesTotal)
 				return

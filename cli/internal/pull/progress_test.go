@@ -273,7 +273,7 @@ func TestDownloadFilesReportsBytes(t *testing.T) {
 	progress := func(done, total int, bytesDone, bytesTotal int64) {
 		events = append(events, fmt.Sprintf("%d/%d %d/%d", done, total, bytesDone, bytesTotal))
 	}
-	if _, err := DownloadFiles(quickClient(srv.URL), t.TempDir()+"/public", files, 8, &bytes.Buffer{}, progress); err != nil {
+	if _, err := DownloadFiles(quickClient(srv.URL), t.TempDir()+"/public", files, DownloadOptions{BundleBytes: 8, Out: &bytes.Buffer{}, Progress: progress}); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"2/3 8/12", "3/3 12/12"}; !reflect.DeepEqual(events, want) {
