@@ -454,18 +454,28 @@ final class Rest
             }
             $sql  = '';
             $rows = 0;
+            $ok   = true;
             if ($mode === Scope::STRUCTURE) {
-                $sql = self::structureSql($table); // Schema ohne Daten (Spec 5.2)
+                $structure = self::dump($scope)->structure($table); // Schema ohne Daten (Spec 5.2)
+                $ok        = $structure !== null;
+                $sql       = (string) $structure;
             } else {
                 $after  = null;
                 $offset = 0;
                 do {
-                    $chunk   = self::tableSql($table, $after, $offset, $limit, $scope);
+                    $chunk = self::tableSql($table, $after, $offset, $limit, $scope);
+                    if ($chunk === null) {
+                        $ok = false;
+                        break;
+                    }
                     $sql    .= $chunk['sql'];
                     $rows   += $chunk['rows'];
                     $after   = $chunk['next'];
                     $offset += $chunk['rows'];
                 } while ($chunk['rows'] === $limit);
+            }
+            if (!$ok) {
+                break; // Lesefehler: lieber keine Tabelle als eine leere
             }
             echo Frames::table($table, $rows, strlen($sql)) . $sql . "\n"; // phpcs:ignore WordPress.Security.EscapeOutput
             flush();
@@ -494,14 +504,16 @@ final class Rest
         $after  = is_scalar($after) ? (string) $after : null;
         $offset = max(0, (int) self::param($request, 'offset'));
         if ($mode === Scope::STRUCTURE) {
-            $chunk = [
-                'sql'    => ($after === null && $offset === 0) ? self::structureSql($table) : '',
-                'rows'   => 0,
-                'next'   => null,
-                'keyset' => false,
-            ];
+            $structure = ($after === null && $offset === 0) ? self::dump($scope)->structure($table) : '';
+            $chunk     = $structure === null ? null : ['sql' => $structure, 'rows' => 0, 'next' => null, 'keyset' => false];
         } else {
             $chunk = self::tableSql($table, $after, $offset, self::limit($request), $scope);
+        }
+        if ($chunk === null) {
+            return new \WP_Error('wpsync_db_read', 'table read failed', ['status' => 500]);
+        }
+        if (defined('WPSYNC_TEST_HOOKS') && WPSYNC_TEST_HOOKS) {
+            do_action('wpsync_db_chunk', $table); // nur E2E
         }
 
         header('X-Wpsync-Rows: ' . $chunk['rows']);
@@ -661,44 +673,33 @@ final class Rest
     }
 
     /**
-     * @return array{sql: string, rows: int, next: string|null, keyset: bool}
+     * Kerntabellen für den Post-Typ-Filter (Scope::rowFilter).
+     *
+     * @return array{posts: string, postmeta: string, term_relationships: string, comments: string}
      */
-    private static function tableSql(string $table, ?string $after, int $offset, int $limit, Scope $scope): array
+    public static function core(): array
     {
         global $wpdb;
-        $pk     = self::singlePrimaryKey($table);
-        $dbh    = $wpdb->dbh;
-        $escape = static function (string $value) use ($dbh): string {
-            return mysqli_real_escape_string($dbh, $value);
-        };
-        // Abgewählte Post-Typen bleiben samt Metadaten auf dem Server (Spec 5.2, AC-14).
-        $filter = $scope->rowFilter($table, [
-            'posts'              => $wpdb->posts,
-            'postmeta'           => $wpdb->postmeta,
-            'term_relationships' => $wpdb->term_relationships,
-            'comments'           => $wpdb->comments,
-        ], $escape);
-        // Eigene Optionen (Altlast Spike) verlassen den Server nie (AC-27).
-        $where = implode(' AND ', array_filter([
-            $table === $wpdb->options ? "option_name NOT LIKE 'wpsync\\_%'" : '',
-            $filter['where'],
-        ]));
-        $rows = (array) $wpdb->get_results(SqlBuilder::select($table, $where, $pk, $after, $offset, $limit, $escape, $filter['join']), ARRAY_A);
-        $last = end($rows); // Cursor aus den echten Werten, bevor Spalten ersetzt werden
-        if ($scope->anonymize()) {
-            // Personenbezogene Werte verlassen den Server nur als Pseudonym (Spec 11, AC-32).
-            $rows = self::anonymizer()->rows($table, $rows);
-        }
-
-        $sql  = ($after === null && $offset === 0) ? self::structureSql($table) : '';
-        $sql .= SqlBuilder::inserts($table, array_map('array_values', $rows), $escape);
-
         return [
-            'sql'    => $sql,
-            'rows'   => count($rows),
-            'next'   => ($pk !== null && is_array($last)) ? (string) $last[$pk] : null,
-            'keyset' => $pk !== null,
+            'posts'              => (string) $wpdb->posts,
+            'postmeta'           => (string) $wpdb->postmeta,
+            'term_relationships' => (string) $wpdb->term_relationships,
+            'comments'           => (string) $wpdb->comments,
         ];
+    }
+
+    private static function dump(Scope $scope): TableDump
+    {
+        global $wpdb;
+        return new TableDump(new WpdbLink($wpdb), $scope, self::core(), (string) $wpdb->options, $scope->anonymize() ? self::anonymizer() : null);
+    }
+
+    /**
+     * @return array{sql: string, rows: int, next: string|null, keyset: bool}|null null bei einem Lesefehler
+     */
+    private static function tableSql(string $table, ?string $after, int $offset, int $limit, Scope $scope): ?array
+    {
+        return self::dump($scope)->chunk($table, self::singlePrimaryKey($table), $after, $offset, $limit);
     }
 
     private static function anonymizer(): Anonymizer
@@ -736,13 +737,6 @@ final class Rest
         } catch (\InvalidArgumentException $e) {
             return new \WP_Error('wpsync_scope', 'invalid scope: ' . $e->getMessage(), ['status' => 400]);
         }
-    }
-
-    private static function structureSql(string $table): string
-    {
-        global $wpdb;
-        $create = (array) $wpdb->get_row('SHOW CREATE TABLE `' . $table . '`', ARRAY_N);
-        return SqlBuilder::preamble($table, (string) $create[1]);
     }
 
     private static function limit(\WP_REST_Request $request): int
