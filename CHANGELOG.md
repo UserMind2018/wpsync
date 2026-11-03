@@ -3,6 +3,37 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.10.2] – 2026-11-03 · Agent 0.10.0
+
+### Datei-Download mit Wiederholung
+
+**Nur die CLI ändert sich.** Der Agent bleibt bei 0.10.0; CLI 0.10.2 läuft gegen jeden Agent, gegen
+den 0.10.1 lief.
+
+**Neu**
+- Pull: Reisst die Verbindung mitten in einem Datei-Download ab (`unexpected EOF`, Connection reset,
+  Timeout, HTTP 502/503/504), wiederholt `wpsync` die Anfrage für die Dateien, die noch fehlen –
+  höchstens dreimal, mit Wartezeit 2/4/8 s. Fertig geschriebene Dateien bleiben. Reisst ein Bündel
+  nach seiner Wiederholung wieder ab, wird es aufgeteilt und Datei für Datei geholt (jede mit eigenen
+  Wiederholungen). Der Agent kennt keinen Range-Abruf, eine abgerissene Datei beginnt von vorn
+- `pull --retries <n>`: Zahl der Wiederholungen, 0 bis 20, Standard 3 (`0` = wie bisher)
+- `pull --json`: Ereignis `{"event":"retry","data":{"phase":"files","attempt":2,"max":3,"files":1,
+  "path":…,"reason":…,"wait_ms":4000}}` vor jeder Wartezeit; ohne `--json` die Zeile
+  „↻ Wiederholung 2/3 …“. `attempt` zählt von vorn, sobald eine Wiederholung Dateien gebracht hat
+
+**Behoben**
+- Pull: Nach einem abgebrochenen Pull holte der nächste alle Dateien erneut, die sich seit dem letzten
+  *erfolgreichen* Pull geändert hatten – auch die, die der Abbruch schon fertig geschrieben hatte. Eine
+  Datei zählt jetzt als vorhanden, wenn Grösse und mtime lokal denen der Site entsprechen, auch wenn
+  die Baseline noch den alten Stand kennt. `--full` lädt weiterhin alles
+- Pull: Ein Datei-Download, dessen Strom ohne Fehler zu früh endet, wird als abgerissen erkannt und
+  wie oben wiederholt
+
+**Unverändert**
+- Eine verweigerte Datei (403, verbotener Pfad), ein falscher Rahmen, ein volles Laufwerk und der
+  Verdacht auf eine IP-Sperre beenden den Pull sofort; es wird nichts wiederholt. Halbe Dateien bleiben
+  nie stehen (`<name>.wpsync-tmp`, dann umbenannt)
+
 ## [0.10.1] – 2026-11-03 · Agent 0.10.0
 
 ### Datenbank-Import robust
