@@ -136,7 +136,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
 | `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ] [--table <tabelle>=structure\|skip]… [--exclude-path <muster>]… [--no-exclude-paths]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. Nur mit `--preset`: `--uploads-since`, `--exclude-plugin <slug>`, `--exclude-post-type <typ>`, `--table` und `--exclude-path <muster>` (alle vier mehrfach) sowie `--no-exclude-paths`, siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage) und [Ordner und Dateien ausschliessen](#ordner-und-dateien-ausschliessen). |
-| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). |
+| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--retries n]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). `--retries n` (0–20, Standard 3): wie oft ein abgerissener Datei-Download wiederholt wird. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
@@ -362,7 +362,11 @@ einmal) und legt sie lokal ab.
    Version der Site, `wp-config.php` von der Site, local-mailguard eingebunden, `.ddev` in den
    Containern schreibgeschützt.
 4. **Delta-Check** gegen die Baseline – seitenweise, nur für den Profil-Umfang.
-5. **Dateien:** nur neue und geänderte. Ein abgebrochener Download wird fortgesetzt.
+5. **Dateien:** nur neue und geänderte. Ein abgebrochener Pull wird fortgesetzt: Was lokal schon
+   mit Grösse und mtime der Site steht, wird nicht noch einmal geholt, auch wenn die Baseline den
+   alten Stand kennt. Reisst die Verbindung mitten in einem Download ab, wiederholt `wpsync` ihn
+   (siehe [Serverschonung](#serverschonung-und-ip-sperren)); jede Datei wird atomar geschrieben, nie
+   bleibt eine halbe stehen.
 6. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
    eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
    pseudonymisiert an. Tabellen, deren Inhalt nicht auf die Maschine soll (Modus `structure`),
@@ -1705,6 +1709,15 @@ welche Datei genutzt wird.
 - Standard: 1 Request/s, eine Verbindung; pro Site über `rps` in der Site-Datei änderbar.
 - Die Site arbeitet in Häppchen mit Zeitbudget, damit kein Request in ein PHP-Timeout läuft.
 - `429`/`502`/`503`/`504`: Backoff 10/20/40 s, `Retry-After` wird beachtet, höchstens 3 Versuche.
+- **Abgerissener Datei-Download:** Reisst die Verbindung *mitten im Body* ab (`unexpected EOF`,
+  Connection reset, Timeout) oder bleibt es nach dem Backoff oben bei `502`/`503`/`504`, fragt `wpsync`
+  die Dateien an, die noch fehlen, erneut an – `--retries n` mal (Standard 3, Wartezeit 2/4/8 s;
+  `0` schaltet es aus). Fertige Dateien bleiben. Reisst ein Bündel nach seiner Wiederholung wieder ab,
+  wird es aufgeteilt und Datei für Datei geholt, jede mit eigenen Wiederholungen. Ein Range-Abruf
+  fehlt im Agent: eine abgerissene Datei beginnt von vorn. Nach der letzten Wiederholung endet der
+  Pull mit einer Meldung, die Datei und Zahl der Versuche nennt; der nächste Pull holt nur, was
+  fehlt. `403`, ein verbotener Pfad, ein volles Laufwerk und der Verdacht auf eine IP-Sperre (nächster
+  Punkt) werden nie wiederholt.
 - **Verbindungsabbruch nach vorherigem Erfolg:** sofortiger Abbruch ohne Retry – weitere
   Versuche würden eine fail2ban-Sperre nur verlängern. `wpsync` nennt dann deine öffentliche
   IP, damit du sie auf dem Server entsperren und whitelisten kannst.
@@ -1835,6 +1848,11 @@ auch im Container.
 `pull --json` meldet Fortschritt als Zeilen, z. B. `{"event":"phase","name":"files","done":120,"total":17210}`.
 Phasen: `delta`, `setup`, `files`, `db_download`, `db_import`, `postsetup`, `mailguard`, mit
 `--content` zusätzlich `content`.
+
+Reisst ein Datei-Download ab und wird wiederholt, kommt vor der Wartezeit eine Zeile
+`{"event":"retry","data":{"phase":"files","attempt":1,"max":3,"files":2,"path":"wp-content/uploads/…","reason":"…","wait_ms":2000}}`
+(`files`: Dateien, die noch fehlen; `path`: die erste davon; `attempt` zählt von vorn, sobald eine
+Wiederholung Dateien gebracht hat). Ein Konsument, der das Ereignis nicht kennt, überspringt es.
 
 `files` und `db_download` tragen zusätzlich Bytes, `db_download` auch die Tabelle. Die drei Felder
 fehlen in allen anderen Phasen; `name`, `done` und `total` bedeuten, was sie immer bedeutet haben:

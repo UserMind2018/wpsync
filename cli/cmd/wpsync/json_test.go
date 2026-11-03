@@ -124,3 +124,14 @@ func TestDoctorServerJSON(t *testing.T) {
 		t.Fatalf("checks = %d, want 4", n)
 	}
 }
+
+// U-40: --retries nimmt nur 0 bis 20; die Prüfung kommt vor jedem Netz- und Schlüsselbund-Zugriff.
+func TestPullRetriesFlagIsBounded(t *testing.T) {
+	env(t)
+	for _, v := range []string{"-1", "21", "x"} {
+		r := run(t, context.Background(), "", "pull", "kunde", "--json", "--retries", v)
+		if r.code != 2 {
+			t.Errorf("--retries %s: exit = %d, want 2 (usage)\n%s", v, r.code, r.stdout)
+		}
+	}
+}

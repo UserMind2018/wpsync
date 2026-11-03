@@ -254,6 +254,10 @@ func (c *Client) pause(d time.Duration) error {
 	}
 }
 
+// Pause waits for d like a backoff of the client: with Ctx it ends early on cancellation (returns its
+// error).
+func (c *Client) Pause(d time.Duration) error { return c.pause(d) }
+
 func (c *Client) throttle() {
 	if !c.last.IsZero() {
 		if wait := c.MinInterval - c.Now().Sub(c.last); wait > 0 {

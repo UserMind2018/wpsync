@@ -43,6 +43,10 @@ type Options struct {
 	RowsPerChunk    int
 	FileBundleBytes int64
 	DBBundleBytes   int64
+	// FileRetries: how often a cut file request is repeated (pull --retries); 0 = never.
+	FileRetries int
+	// Sleep replaces the wait of the client between requests and repetitions (tests); nil = time.Sleep.
+	Sleep func(time.Duration)
 	// Ctx ends the pull resumably (SIGTERM in the server mode); nil = never.
 	Ctx context.Context
 	// Progress reports phase progress for pull --json; nil = none.
@@ -106,6 +110,9 @@ type Progress struct {
 	// Bytes: BytesDone and BytesTotal are known (files, db_download) – also when both are 0.
 	Bytes                 bool
 	BytesDone, BytesTotal int64
+	// Retry: set when this report announces a repetition of a file request (Phase files); the
+	// other fields are 0 then.
+	Retry *Retry
 }
 
 func (o *Options) progress(phase string, done, total int) {
@@ -347,6 +354,9 @@ func run(o Options) error {
 	}
 	client := agentapi.New(o.Site.URL, o.Site.KeyID, o.Secret, o.Site.RPS)
 	client.Ctx = o.Ctx
+	if o.Sleep != nil {
+		client.Sleep = o.Sleep
+	}
 	drv, name := o.Driver, o.Site.Name
 	timer := newPhaseTimer(client, o.Out)
 	started := time.Now()
@@ -425,7 +435,13 @@ func run(o Options) error {
 		o.progressBytes(PhaseFiles, done, total, "", bytesDone, bytesTotal)
 	}
 	var warnings []string
-	skipped, err := DownloadFiles(client, docroot, changed, o.FileBundleBytes, o.Out, fileProgress)
+	dl := DownloadOptions{BundleBytes: o.FileBundleBytes, Retries: o.FileRetries, Out: o.Out, Progress: fileProgress,
+		OnRetry: func(r Retry) {
+			if o.Progress != nil {
+				o.Progress(Progress{Phase: PhaseFiles, Retry: &r})
+			}
+		}}
+	skipped, err := DownloadFiles(client, docroot, changed, dl)
 	if err != nil {
 		return err
 	}

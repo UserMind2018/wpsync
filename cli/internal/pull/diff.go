@@ -11,16 +11,15 @@ import (
 )
 
 // DiffFiles returns files that are new or changed since the baseline and baseline files
-// that disappeared (never a VCS path). Files unknown to the baseline but already present locally (same size
-// and mtime) are skipped – that resumes an aborted pull (Spike B20, AC-17). present may be nil.
+// that disappeared (never a VCS path). Files already present locally with the size and mtime the
+// source names are skipped, whether the baseline knows them or not – that resumes an aborted pull
+// (Spike B20, AC-17), which saved no baseline: a file it wrote has the new stamp locally, the old one
+// in the baseline (U-40). present may be nil.
 func DiffFiles(files []agentapi.File, b *baseline.Baseline, present func(agentapi.File) bool) (changed []agentapi.File, deleted []string) {
 	current := make(map[string]struct{}, len(files))
 	for _, f := range files {
 		current[f.Path] = struct{}{}
-		if old, ok := b.Files[f.Path]; ok {
-			if old.Size != f.Size || old.MTime != f.MTime {
-				changed = append(changed, f)
-			}
+		if old, ok := b.Files[f.Path]; ok && old.Size == f.Size && old.MTime == f.MTime {
 			continue
 		}
 		if present == nil || !present(f) {
