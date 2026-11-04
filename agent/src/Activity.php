@@ -250,8 +250,13 @@ final class Activity
         try {
             ContentSql::silent($wpdb, static function () use ($work): void {
                 // Nach einem ZIP-Update ohne erneute Aktivierung fehlt die Tabelle, bis eine Kopplung
-                // sich meldet; ein Hook davor würde sonst ins Leere schreiben.
-                Store::install();
+                // sich meldet; ein Hook davor würde sonst ins Leere schreiben. Nur bei einer älteren
+                // Marke: nach dem Deaktivieren ist sie gelöscht, und WordPress schreibt active_plugins
+                // erst danach – dort darf nichts wieder angelegt werden.
+                $schema = get_option(Store::SCHEMA_OPTION);
+                if (is_string($schema) && $schema !== WPSYNC_VERSION) {
+                    Store::install();
+                }
                 $work();
             });
         } catch (\Throwable $e) {

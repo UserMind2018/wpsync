@@ -194,7 +194,8 @@ final class ActivityTest extends TestCase
     /** Das Update des Plugins per ZIP aktiviert es nicht neu: die Tabelle muss der erste Hook anlegen. */
     public function testAHookCreatesTheMissingTableBeforeLogging(): void
     {
-        $db  = $this->boot();
+        $db = $this->boot();
+        update_option('wpsync_schema', '0.11.0'); // Stand vor dem ZIP-Update
         $log = tempnam(sys_get_temp_dir(), 'wpsync-log');
         ini_set('error_log', (string) $log); // die Sonde braucht WordPress: der Hook meldet "übersprungen", nur die Tabelle zählt
         Activity::onChange();
@@ -240,5 +241,18 @@ final class ActivityTest extends TestCase
             $this->assertSame($boom, $e);
         }
         $this->assertSame(['other', null, ''], Activity::source());
+    }
+
+    /** Nach dem Deaktivieren (Marke gelöscht) legt ein später feuernder Hook nichts wieder an. */
+    public function testAHookAfterDeactivationCreatesNothing(): void
+    {
+        $db  = $this->boot();
+        $log = tempnam(sys_get_temp_dir(), 'wpsync-log');
+        ini_set('error_log', (string) $log);
+        Activity::onChange();
+        unlink((string) $log);
+        $this->assertSame([], array_values(array_filter($db->writes(), static function (string $sql): bool {
+            return strpos($sql, 'CREATE TABLE') !== false;
+        })));
     }
 }
