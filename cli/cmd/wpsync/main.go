@@ -54,7 +54,8 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync scan <site> [--refresh]       zeigen, was auf der Site liegt, und auswählen, was gezogen wird
   wpsync pull <site> [--full] [--yes]  Site nach ~/wpsync-sites/<site> ziehen (--dry-run: nur anzeigen,
                                        --no-anonymize: personenbezogene Daten im Klartext,
-                                       --content: Manifest und Baseline für den Inhalts-Push)
+                                       --content: Manifest und Baseline für den Inhalts-Push,
+                                       --snapshot auto|require|off: Datenbank als ein Schnappschuss der Site, Standard auto)
   wpsync status <site>                 was sich seit dem letzten Pull geändert hat, ohne Transfer
   wpsync content export <site>         normalisierte Zeilen und Fingerabdrücke der Arbeitskopie als
                                        JSON-Lines auf stdout (braucht einen Pull mit --content)
@@ -749,16 +750,21 @@ func (a *app) cmdPull(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "nur anzeigen, was sich geändert hat (wie wpsync status)")
 	withContent := fs.Bool("content", false, "auch das Inhalts-Manifest holen und die Baseline für einen Inhalts-Push bauen (lädt die Inhaltstabellen neu, sobald sich eine geändert hat)")
 	noAnon := fs.Bool("no-anonymize", false, "personenbezogene Daten im Klartext ziehen (fragt nach; ohne Terminal zusätzlich --yes)")
+	snapshotFlag := fs.String("snapshot", "auto", "Datenbank als ein Schnappschuss der Site: auto (Rückfall auf Häppchen), require, off")
 	rps := fs.Float64("rps", 0, "max. Requests pro Sekunde (Standard aus der Site-Konfiguration)")
 	retries := fs.Int("retries", pull.DefaultFileRetries, "Wiederholungen, wenn ein Datei-Download abreisst (0 = keine)")
 	secretStdin := secretStdinFlag(fs)
 	df := addDriverFlags(fs)
-	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--retries n] [--json] [--secret-stdin] [--driver container …]")
+	positional, err := a.parse(fs, args, exactly(1), "wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--snapshot auto|require|off] [--retries n] [--json] [--secret-stdin] [--driver container …]")
 	if err != nil {
 		return err
 	}
 	if *retries < 0 || *retries > pull.MaxFileRetries {
 		return cliout.Usage(fmt.Errorf("--retries: 0 bis %d", pull.MaxFileRetries))
+	}
+	snapshotMode, err := pull.ParseSnapshotMode(*snapshotFlag)
+	if err != nil {
+		return cliout.Usage(err)
 	}
 	if err := df.needsSecretStdin(*secretStdin); err != nil {
 		return err
@@ -789,6 +795,7 @@ func (a *app) cmdPull(args []string) error {
 		Full:            *full,
 		Yes:             *yes,
 		NoAnonymize:     *noAnon,
+		Snapshot:        snapshotMode,
 		Content:         *withContent,
 		SaveSite:        saveProfile,
 		Out:             a.out(),

@@ -2,11 +2,13 @@ package pull
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -101,6 +103,8 @@ func pullOptions(t *testing.T, url string, drv localenv.Driver) Options {
 		RowsPerChunk:    2000,
 		FileBundleBytes: 16 << 20,
 		DBBundleBytes:   8 << 20,
+		// The fake agent is 0.3.x and cannot snapshot; the tests below load in chunks on purpose.
+		Snapshot: SnapshotOff,
 	}
 }
 
@@ -186,5 +190,45 @@ func TestRunUsesGivenDocroot(t *testing.T) {
 	o.Docroot = filepath.Join(t.TempDir(), "docroot")
 	if err := Run(o); err == nil || !strings.Contains(err.Error(), "directly below") {
 		t.Fatalf("docroot outside the site dir: err = %v", err)
+	}
+}
+
+// Spec 0.11.0 E1/E7: ein Agent ohne Schnappschuss – auto lädt in Häppchen mit Warnung, off ohne Warnung, require bricht ab.
+func TestRunSnapshotModesWithAnAgentThatCannotSnapshot(t *testing.T) {
+	cases := []struct {
+		mode     SnapshotMode
+		wantErr  bool
+		fallback string
+		warnings []string
+	}{
+		{mode: SnapshotAuto, fallback: "agent_outdated", warnings: []string{WarningSnapshotFallback}},
+		{mode: SnapshotOff, fallback: "off"},
+		{mode: SnapshotRequire, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(string(c.mode), func(t *testing.T) {
+			srv := agentServer(t, nil)
+			defer srv.Close()
+			o := pullOptions(t, srv.URL, newFakeDriver(false))
+			o.Snapshot = c.mode
+			var res Result
+			o.Report = &res
+			err := Run(o)
+			if c.wantErr {
+				if !errors.Is(err, ErrSnapshot) {
+					t.Fatalf("err = %v, want ErrSnapshot", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.Snapshot == nil || res.Snapshot.Used || res.Snapshot.Fallback != c.fallback {
+				t.Fatalf("snapshot = %+v, want fallback %q", res.Snapshot, c.fallback)
+			}
+			if !slices.Equal(res.Warnings, c.warnings) {
+				t.Fatalf("warnings = %v, want %v", res.Warnings, c.warnings)
+			}
+		})
 	}
 }
