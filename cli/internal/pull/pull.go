@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,6 +35,8 @@ type Options struct {
 	Full        bool
 	Yes         bool // accept profile deviations without asking
 	NoAnonymize bool // pull personal data in plain text (needs confirmation)
+	// Snapshot: how the tables are read on the site (Spec 0.11.0 E1); "" = auto.
+	Snapshot SnapshotMode
 	// Content: also fetch the row manifest of the content tables and build the baseline for a
 	// content push (Spec Content-Push §4); reloads all seven content tables when one changed.
 	Content         bool
@@ -88,6 +91,8 @@ type Result struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// KeptExcluded: local files that an exclude path keeps although the site no longer lists them (Spec 0.10.0 C4).
 	KeptExcluded []string `json:"kept_excluded,omitempty"`
+	// Snapshot: how the tables of this pull were read (Spec 0.11.0 E7); nil without tables to load.
+	Snapshot *SnapshotReport `json:"snapshot,omitempty"`
 }
 
 // Values of Result.Warnings.
@@ -99,6 +104,8 @@ const (
 	WarningSnapshotIncomplete = "snapshot_incomplete"
 	// WarningSymlinkSkipped: files below a symlinked folder of the docroot were not written.
 	WarningSymlinkSkipped = "symlink_skipped"
+	// WarningSnapshotFallback: the tables were loaded in chunks, not as one snapshot (Spec 0.11.0 E7).
+	WarningSnapshotFallback = "db_snapshot_fallback"
 )
 
 // Progress is one progress report of a phase.
@@ -462,6 +469,7 @@ func run(o Options) error {
 		tables, refreshContent = withContent(tables, delta.Tables, contentNames, content.Fresh(siteDir))
 	}
 	fmt.Fprintf(o.Out, "Tabellen: %d von %d neu zu laden\n", len(tables), len(delta.Tables))
+	var snapshot *SnapshotReport
 	if len(tables) > 0 {
 		dir, err := openTables(siteDir)
 		if err != nil {
@@ -472,9 +480,26 @@ func run(o Options) error {
 			Progress: func(p DBProgress) {
 				o.progressBytes(PhaseDBDownload, p.Done, p.Total, p.Table, p.BytesDone, p.BytesTotal)
 			}}
-		if err := downloadTables(client, dir, tables, opts); err != nil {
-			return err
+		report := SnapshotReport{}
+		if need := uncached(dir, tables); len(need) > 0 {
+			if report, err = snapshotTables(client, dir, need, SnapshotOptions{
+				Mode: o.Snapshot, AgentVersion: delta.Env.AgentVersion, Limit: o.RowsPerChunk, Scope: p.scope,
+				Out: o.Out, Progress: opts.Progress, Now: o.Now,
+			}); err != nil {
+				return err
+			}
 		}
+		if report.Used {
+			fmt.Fprintf(o.Out, "  Datenbank als Schnappschuss der Site (ein Zeitpunkt, %.1f s)\n", report.Seconds)
+		} else {
+			if err := downloadTables(client, dir, tables, opts); err != nil {
+				return err
+			}
+			if report.Fallback != "" && report.Fallback != string(SnapshotOff) {
+				warnings = append(warnings, WarningSnapshotFallback)
+			}
+		}
+		snapshot = &report
 		timer.done("DB-Download")
 		if err := o.interrupted(); err != nil {
 			return err
@@ -577,7 +602,7 @@ func run(o Options) error {
 			TablesLoaded: len(tables), TablesTotal: len(delta.Tables),
 			Requests: client.Stats.Requests, BytesIn: client.Stats.BytesIn,
 			DurationMS: time.Since(started).Milliseconds(), LocalURL: localURL, AgentVersion: delta.Env.AgentVersion,
-			Content: summary, Warnings: warnings, KeptExcluded: keptExcluded,
+			Content: summary, Warnings: warnings, KeptExcluded: keptExcluded, Snapshot: snapshot,
 		}
 		if !o.NoAnonymize {
 			o.Report.LocalAdminUser, o.Report.LocalAdminPassword = LocalAdminUser, LocalAdminPassword
@@ -606,6 +631,18 @@ func splitDeleted(paths []string, s agentapi.Scope, keep func(string) bool) (gon
 		}
 	}
 	return gone, kept
+}
+
+// uncached drops the tables an interrupted pull already stored with the same mode and checksum
+// (Spec 0.11.0 E8); they need neither chunks nor a snapshot.
+func uncached(dir *os.Root, tables []agentapi.Table) []agentapi.Table {
+	var out []agentapi.Table
+	for _, t := range tables {
+		if !markerMatches(dir, t) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // firstN returns at most n entries of list, with "…" for the rest.

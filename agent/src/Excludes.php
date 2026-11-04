@@ -29,6 +29,9 @@ final class Excludes
     /** Ordner einer Staging-Kopie (StagingGuard::DIR_PREFIX) – in jeder Tiefe ausgeschlossen. */
     public const STAGING_DIR_PREFIX = 'wpsync-staging-';
 
+    /** Ordner der Datenbank-Schnappschüsse – direkt unter wp-content ausgeschlossen. */
+    public const SNAPSHOT_DIR_PREFIX = 'wpsync-snap-';
+
     /** Dateien mit Zugangsdaten – überall ausgeschlossen, zusätzlich alles, was mit „.env.“ beginnt. */
     public const SECRET_FILES = ['.htpasswd', '.env'];
 
@@ -49,8 +52,10 @@ final class Excludes
         if (in_array($name, self::ANY_DIRS, true) || strpos($name, self::STAGING_DIR_PREFIX) === 0) {
             return true;
         }
-        // wpsync-push-<zufall>: Arbeitsordner mit Snapshots und Rollback-Datensätzen (Spec Stufe 2, AC-71)
-        return $isTop && (in_array($name, self::TOP_DIRS, true) || strpos($name, 'backup-') === 0 || strpos($name, 'wpsync-push-') === 0);
+        // wpsync-push-<zufall>: Arbeitsordner mit Snapshots und Rollback-Datensätzen (Spec Stufe 2, AC-71);
+        // wpsync-snap-<zufall>: verschlüsselte Datenbank-Schnappschüsse
+        return $isTop && (in_array($name, self::TOP_DIRS, true) || strpos($name, 'backup-') === 0
+            || strpos($name, 'wpsync-push-') === 0 || strpos($name, self::SNAPSHOT_DIR_PREFIX) === 0);
     }
 
     /**

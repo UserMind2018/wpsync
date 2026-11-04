@@ -35,6 +35,20 @@ final class RestRoutesTest extends TestCase
         return $GLOBALS['wpsync_calls']['routes'];
     }
 
+    public function testSnapshotRoutesAreSignedPosts(): void
+    {
+        $this->boot();
+        $routes = $this->routes();
+        $signed = $routes['wpsync/v1/push/begin']['permission_callback'];
+        foreach (['begin' => 'snapshotBegin', 'status' => 'snapshotStatus', 'blocks' => 'snapshotBlocks', 'delete' => 'snapshotDelete'] as $route => $method) {
+            $key = 'wpsync/v1/db-snapshot/' . $route;
+            $this->assertArrayHasKey($key, $routes);
+            $this->assertSame('POST', $routes[$key]['methods']);
+            $this->assertSame([Rest::class, $method], $routes[$key]['callback']);
+            $this->assertSame($signed, $routes[$key]['permission_callback']);
+        }
+    }
+
     public function testStagingRoutesAreRegistered(): void
     {
         $this->boot();

@@ -348,6 +348,9 @@ final class PushTargetTest extends TestCase
         $this->assertTrue(Push::running('staging', time()));
         $this->assertFalse(Push::running('live', time()));
         $this->assertFalse(Push::running('staging', time() + Push::LOCK_TTL));
+        // Der Schnappschuss startet bei jedem Push, gleich mit welchem Ziel – bis die Sperre verfallen ist.
+        $this->assertTrue(Push::anyRunning(time()));
+        $this->assertFalse(Push::anyRunning(time() + Push::LOCK_TTL));
         $this->assertError('wpsync_push_locked', 423, $this->begin('live', 'other'));
 
         $this->upload($id, 'new');

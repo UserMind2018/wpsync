@@ -3,6 +3,36 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.11.0] – 2026-11-04 · Agent 0.11.0
+
+### Datenbank als ein Schnappschuss
+
+**Neu**
+- Pull: Die Site liest alle Tabellen eines Pulls in **einem** Zeitpunkt (Agent und CLI 0.11.0,
+  `pull --snapshot auto|require|off`, Standard `auto`). Das behebt den Abbruch mit
+  `ERROR 1062 (doppelter Schlüssel)`, wenn WordPress zwischen zwei Häppchen Zeilen erneuert
+  (typisch ein Transient in `options`). Das Pull-Profil gilt unverändert: Tabellen-Modi, Post-Typen,
+  Pseudonymisierung
+- Agent: Endpunkte `db-snapshot/begin|status|blocks|delete`. Der Dump läuft auf einer eigenen Verbindung
+  in einer Lese-Transaktion, wird gzip-komprimiert und blockweise mit XChaCha20-Poly1305 verschlüsselt
+  in eine Datei ausserhalb des Webroots geschrieben (sonst `wp-content/wpsync-snap-<zufall>/`). Ein Job
+  pro Site; fertige Schnappschüsse leben höchstens eine Stunde und werden nach dem Download gelöscht
+- Agent: `define('WPSYNC_NO_SNAPSHOT', true);` schaltet den Schnappschuss auf einer Site ab
+- `pull --json`: `data.snapshot` (`used`, `fallback`, `inconsistent_tables`, `seconds`) und die Warnung
+  `db_snapshot_fallback`
+- Agent: Der Ordner `wp-content/wpsync-snap-*` wird nie ausgeliefert (Pull, Staging, Push)
+
+**Geändert**
+- Import: Tabellen ohne Daten (Modus `structure`) stehen zuerst. Bricht ein Import ab, sind sie trotzdem
+  schon geleert und behalten keine Zeilen eines früheren Pulls
+- Ein abgebrochener Import nennt die Tabelle und die Tabellen, die noch den Stand vor diesem Pull haben
+- `/db` und `/db-bundle`: Ein Lesefehler liefert keine leere Tabelle mehr aus, sondern einen Fehler
+- Alter Agent, abgeschalteter oder gescheiterter Schnappschuss: Rückfall auf die Häppchen wie bisher, mit
+  Hinweis (`--snapshot require` bricht stattdessen ab)
+
+**Kompatibilität.** CLI 0.11.0 läuft gegen jeden Agent, gegen den 0.10.x lief (dann Häppchen). Agent 0.11.0
+läuft mit jeder CLI; den Schnappschuss nutzt erst CLI 0.11.0.
+
 ## [0.10.2] – 2026-11-03 · Agent 0.10.0
 
 ### Datei-Download mit Wiederholung
