@@ -21,6 +21,56 @@ final class Activity
     /** @var string|null Push, dessen Commit oder Rücknahme gerade läuft ('' = ID unbrauchbar) */
     private static $push = null;
 
+    public static function register(): void
+    {
+        add_action('pre_auto_update', [self::class, 'markAuto'], 1, 0);
+        foreach (['upgrader_process_complete', 'update_option_active_plugins', 'deleted_plugin', 'deleted_theme', 'switch_theme'] as $hook) {
+            add_action($hook, [self::class, 'onChange'], 99, 0);
+        }
+        // Vor _redirect_to_about_wordpress (Priorität 10), das im WP-Admin mit exit endet.
+        add_action('_core_updated_successfully', [self::class, 'onChange'], 1, 0);
+        add_action('automatic_updates_complete', [self::class, 'onAutoUpdates'], 99, 1);
+        add_action(self::CRON, [self::class, 'onCron']);
+        // Auch nach einem ZIP-Update ohne erneute Aktivierung planen (wie Infosheet).
+        add_action('init', static function (): void {
+            if (!wp_next_scheduled(self::CRON)) {
+                wp_schedule_event(time() + 300, 'hourly', self::CRON);
+            }
+        });
+    }
+
+    public static function unschedule(): void
+    {
+        wp_clear_scheduled_hook(self::CRON);
+    }
+
+    public static function markAuto(): void
+    {
+        self::$auto = true;
+    }
+
+    /** @param mixed $results */
+    public static function onAutoUpdates($results): void
+    {
+        self::safely(static function () use ($results): void {
+            $now = time();
+            self::reconcile(new WpActivityProbe(), ['auto', null, ''], $now);
+            $events = ActivityDiff::results(self::normalize($results));
+            if ($events !== []) {
+                ActivityLog::add($events, $now, 'auto', null, '');
+            }
+        });
+    }
+
+    public static function onCron(): void
+    {
+        self::safely(static function (): void {
+            $now = time();
+            self::reconcile(new WpActivityProbe(), ['detected', null, ''], $now);
+            ActivityLog::prune($now - ActivityLog::KEEP_DAYS * 86400);
+        });
+    }
+
     /**
      * @param array{0: string, 1: int|null, 2: string} $source Auslöser, Benutzer, Detail
      * @return int geschriebene Ereignisse; 0 auch, wenn die Sperre nicht frei wurde

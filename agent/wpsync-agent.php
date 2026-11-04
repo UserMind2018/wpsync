@@ -25,13 +25,14 @@ foreach ([
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
     'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'RescueSeal', 'RescueLink', 'MysqliLink', 'RescueDb', 'RescueContent', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'ContentException', 'ContentStore', 'ContentState', 'ContentPackage', 'ContentSql', 'ContentTarget', 'ContentRepair', 'ContentPlugins', 'ContentCheck', 'ContentImage', 'ContentApply', 'ContentRollback', 'ContentElementor', 'ContentPostActions', 'StagingConfig', 'StagingAccess', 'StagingHosts',
-    'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'PushPlugins', 'WpdbLink', 'TableDump', 'SnapshotSink', 'SnapshotFile', 'SnapshotException', 'SnapshotDump', 'SnapshotJob', 'Snapshot', 'ActivityDiff', 'ActivityLog', 'Rest', 'Admin',
+    'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'PushPlugins', 'WpdbLink', 'TableDump', 'SnapshotSink', 'SnapshotFile', 'SnapshotException', 'SnapshotDump', 'SnapshotJob', 'Snapshot', 'ActivityDiff', 'ActivityLog', 'ActivityProbe', 'WpActivityProbe', 'Activity', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }
 
 register_activation_hook(__FILE__, [\WpSync\Store::class, 'activate']);
 register_deactivation_hook(__FILE__, static function (): void {
+    \WpSync\Activity::unschedule();
     \WpSync\Infosheet::unschedule();
     \WpSync\Push::unschedule();
     \WpSync\Staging::unschedule();
@@ -52,6 +53,7 @@ register_deactivation_hook(__FILE__, static function (): void {
 \WpSync\Push::register(__DIR__);
 \WpSync\Staging::register(__DIR__);
 \WpSync\Snapshot::register();
+\WpSync\Activity::register();
 
 if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command('wpsync pair-code', static function (): void {

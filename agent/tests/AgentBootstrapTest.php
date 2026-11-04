@@ -34,9 +34,18 @@ final class AgentBootstrapTest extends TestCase
         }
         $this->assertContains(\WpSync\Staging::CRON, $GLOBALS['wpsync_calls']['actions']);
         $this->assertContains(\WpSync\Snapshot::CRON, $GLOBALS['wpsync_calls']['actions']);
+        $this->assertContains(\WpSync\Activity::CRON, $GLOBALS['wpsync_calls']['actions']);
+        foreach (['pre_auto_update', 'upgrader_process_complete', '_core_updated_successfully', 'update_option_active_plugins', 'deleted_plugin', 'deleted_theme', 'switch_theme', 'automatic_updates_complete'] as $hook) {
+            $this->assertContains($hook, $GLOBALS['wpsync_calls']['actions'], $hook);
+        }
         $this->assertContains('rest_api_init', $GLOBALS['wpsync_calls']['actions']);
         $this->assertSame(1, $GLOBALS['wpsync_calls']['activation']);
         $this->assertCount(1, $GLOBALS['wpsync_calls']['deactivation']);
+    }
+
+    public function testDeactivationUnschedulesTheActivityCheck(): void
+    {
+        $this->assertNotFalse(strpos($this->source(), '\WpSync\Activity::unschedule()'));
     }
 
     /** Spec 2b 5.10: auch wenn active_plugins den Agent in der Kopie doch enthält. */

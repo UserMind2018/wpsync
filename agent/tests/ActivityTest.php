@@ -179,4 +179,15 @@ final class ActivityTest extends TestCase
             return Activity::source();
         }));
     }
+
+    public function testOnAutoUpdatesLogsFailuresAsAuto(): void
+    {
+        $db = $this->boot(false); // Abgleich übersprungen, Fehlschläge trotzdem ins Protokoll
+        Activity::onAutoUpdates(['plugin' => [(object) ['item' => (object) ['slug' => 'woo'], 'result' => false, 'name' => 'Woo']]]);
+        $inserts = array_values(array_filter($db->writes(), static function (string $sql): bool {
+            return strpos($sql, 'INSERT') === 0;
+        }));
+        $this->assertCount(1, $inserts);
+        $this->assertStringContainsString("'update_failed', 'plugin', 'woo', 'Woo', NULL, NULL, 'auto', NULL, 'failed')", $inserts[0]);
+    }
 }
