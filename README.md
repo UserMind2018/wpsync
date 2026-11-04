@@ -136,7 +136,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync list` | Alle lokalen wpsync-Umgebungen (DDEV-Projekte unter `~/wpsync-sites`) und gekoppelten Sites: Status (`läuft`, `pausiert`, `gestoppt`, `nicht angelegt`), lokale URL der laufenden, Live-URL. Andere DDEV-Projekte erscheinen nicht. |
 | `wpsync stop <site>… \| --all` | Stoppt einzelne Umgebungen oder mit `--all` alle laufenden – per `ddev stop`, Datenbank und Dateien bleiben erhalten. Weicht `.ddev` einer Site vom geprüften Stand ab, hält `wpsync` sie ohne ddev per `docker stop` an, meldet das und endet mit Exit-Code ≠ 0; die übrigen werden normal gestoppt. Wieder starten: `ddev start` im Site-Ordner oder der nächste `wpsync pull`. |
 | `wpsync scan <site> [--refresh] [--preset p] [--uploads-since JJJJ] [--table <tabelle>=structure\|skip]… [--exclude-path <muster>]… [--no-exclude-paths]` | Holt das Infosheet (Plugins, Tabellen mit Einstufung, Post-Typen, Uploads pro Jahr, Auffälligkeiten) und fragt im Terminal Preset und Checkliste ab. Ohne Terminal: `--preset`. `--refresh` lässt die Site das Infosheet neu erstellen (nötig, wenn WP-Cron aus ist). Speichert das Profil. Nur mit `--preset`: `--uploads-since`, `--exclude-plugin <slug>`, `--exclude-post-type <typ>`, `--table` und `--exclude-path <muster>` (alle vier mehrfach) sowie `--no-exclude-paths`, siehe [Scan ohne Rückfrage](#scan-ohne-rückfrage) und [Ordner und Dateien ausschliessen](#ordner-und-dateien-ausschliessen). |
-| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--retries n]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). `--retries n` (0–20, Standard 3): wie oft ein abgerissener Datei-Download wiederholt wird. |
+| `wpsync pull <site> [--full] [--yes] [--dry-run] [--no-anonymize] [--content] [--snapshot auto\|require\|off] [--retries n]` | Zieht nach Profil. Ohne Profil Abbruch mit Hinweis auf `scan`. `--full` ignoriert die Baseline, `--yes` behandelt neue Tabellen/Plugins nach der Preset-Regel ohne Rückfrage, `--dry-run` zeigt nur an (wie `status`); mit `--json` steht in `data` `status: "dry_run"` und `pulled: false` – es wurde nichts gezogen, `last_pull` nennt den letzten echten Pull. `--no-anonymize` zieht personenbezogene Daten im Klartext – fragt nach, ohne Terminal zusätzlich `--yes`. `--content` holt zusätzlich das Inhalts-Manifest und baut die Baseline der Inhalte (ab Agent 0.7.0); lädt dafür alle sieben Inhaltstabellen neu, sobald sich eine geändert hat. Details: [Inhalte](#inhalte-manifest-baseline-export). `--snapshot` wählt, wie die Tabellen auf der Site gelesen werden ([Datenbank als Schnappschuss](#datenbank-als-schnappschuss-ab-0110)). `--retries n` (0–20, Standard 3): wie oft ein abgerissener Datei-Download wiederholt wird. |
 | `wpsync status <site>` | Was sich seit dem letzten Pull auf der Site geändert hat – Dateien und Tabellen, ohne Inhalte zu übertragen. |
 | `wpsync content export <site>` | Schreibt die normalisierten Zeilen und Fingerabdrücke der Inhaltstabellen der Arbeitskopie als JSON-Lines auf stdout – ohne Request an die Site, ohne etwas zu ändern. Braucht einen aktuellen Inhaltsstand aus `pull --content`. Details: [Inhalte](#inhalte-manifest-baseline-export). |
 | `wpsync trust <site> [--fingerprint fp]` | Zeigt, wie `.ddev` der Site vom geprüften Stand abweicht (Hooks, Host-Kommandos, zusätzliche Mounts hervorgehoben), und gibt den angezeigten Stand nach Rückfrage frei. Ohne Terminal nur mit dem angezeigten `--fingerprint`; `--yes` gibt nie frei. Siehe [Sicherheit](#sicherheit). |
@@ -367,8 +367,10 @@ einmal) und legt sie lokal ab.
    alten Stand kennt. Reisst die Verbindung mitten in einem Download ab, wiederholt `wpsync` ihn
    (siehe [Serverschonung](#serverschonung-und-ip-sperren)); jede Datei wird atomar geschrieben, nie
    bleibt eine halbe stehen.
-6. **Datenbank:** nur geänderte Tabellen. Kleine gebündelt, große per Keyset-Cursor – alles in
-   eine SQL-Datei, ein Import. Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
+6. **Datenbank:** nur geänderte Tabellen. Ab Agent 0.11.0 liest die Site sie in einem Zeitpunkt
+   und liefert sie als Schnappschuss ([Datenbank als Schnappschuss](#datenbank-als-schnappschuss-ab-0110));
+   sonst kleine Tabellen gebündelt, große per Keyset-Cursor – alles in eine SQL-Datei, ein Import.
+   Fortsetzbar pro Tabelle. Personenbezogene Werte kommen
    pseudonymisiert an. Tabellen, deren Inhalt nicht auf die Maschine soll (Modus `structure`),
    stehen im Import vorn: Bricht er später ab, sind sie trotzdem schon geleert.
 7. **Post-Setup:**
@@ -387,6 +389,59 @@ einmal) und legt sie lokal ab.
 10. **Baseline** speichern und Schnappschuss ins interne Git neben dem Site-Ordner.
 
 Ein Folge-Pull ohne Änderungen auf der Site kostet wenige Requests.
+
+### Datenbank als Schnappschuss (ab 0.11.0)
+
+Ohne Schnappschuss liest der Pull die Tabellen nacheinander und in Häppchen, während die Site
+weiterläuft. Ändert WordPress dazwischen Zeilen (typisch: ein erneuerter Transient in `options`),
+passen die Häppchen nicht mehr zusammen und der Import bricht mit `ERROR 1062` (doppelter Schlüssel)
+ab. Ab Agent und CLI 0.11.0 liest die Site alle Tabellen des Pulls in **einem** Zeitpunkt, wie ein
+Commit:
+
+1. Das CLI startet auf der Site einen Job (`db-snapshot/begin`) und fragt seinen Stand ab. Die Site
+   antwortet sofort und dumpt danach auf einer eigenen Datenbankverbindung in einer einzigen
+   Lese-Transaktion (`START TRANSACTION WITH CONSISTENT SNAPSHOT`). Es gilt dasselbe Profil wie
+   sonst: Tabellen-Modi, Post-Typen, Pseudonymisierung. Die Transaktion liest nur und endet mit
+   `ROLLBACK`.
+2. Die Datei wird gzip-komprimiert, in Blöcke zu 1 MiB geteilt und blockweise mit
+   XChaCha20-Poly1305 verschlüsselt. Sie liegt ausserhalb des Webroots (`dirname(ABSPATH)`), sonst
+   in `wp-content/wpsync-snap-<zufall>/` mit Zugriffssperre, Rechte 0600. Der Schlüssel steht nur
+   in `wpsync_state` und verlässt die Site nicht.
+3. Das CLI lädt die Blöcke (bei einem Abbruch ab dem letzten vollständigen), prüft die SHA-256,
+   entpackt in den Tabellen-Cache und importiert wie bisher. Danach löscht es den Job samt Datei.
+
+| `--snapshot` | Verhalten |
+|---|---|
+| `auto` (Standard) | Schnappschuss; geht das nicht (Agent vor 0.11.0, abgeschaltet, gescheitert, Prüfsumme falsch, Site beschäftigt), laden die Häppchen wie vor 0.11.0, mit Hinweis |
+| `require` | Schnappschuss oder Abbruch |
+| `off` | Häppchen wie vor 0.11.0 |
+
+`pull --json` nennt das Ergebnis in `data.snapshot`: `used`, bei Rückfall `fallback`
+(`off`, `agent_outdated`, `unsupported:<grund>`, `busy`, `failed:<code>`, `checksum`),
+`inconsistent_tables` und `seconds`. Ein Rückfall ausser `off` steht zusätzlich als
+`db_snapshot_fallback` in `warnings`.
+
+- **Abschalten auf einer Site:** `define('WPSYNC_NO_SNAPSHOT', true);` in `wp-config.php`
+  (Rückfall-Grund `unsupported:disabled`).
+- **Voraussetzungen auf der Site:** PHP-Erweiterung `mysqli` und `zlib`, libsodium (oder
+  sodium_compat aus WordPress), eine beschreibbare Ablage, genug freier Platz für die vollen Tabellen.
+  Fehlt etwas, nennt die Site den Grund und der Pull fällt zurück.
+- **Lebensdauer:** Ein fertiger Schnappschuss bleibt höchstens eine Stunde abrufbar, jede Datei
+  höchstens sechs Stunden. Aufgeräumt wird bei jedem Start, stündlich per Cron, nach dem Download und
+  beim Deaktivieren des Plugins. Ein Job, dessen Prozess endete, gilt nach 60 Sekunden als
+  gestorben. Ein Dump dauert höchstens 15 Minuten.
+- **Ein Job pro Site:** Läuft schon einer oder ein Push, antwortet die Site mit „beschäftigt“; im
+  Modus `auto` laden die Häppchen.
+- **Tabellen ohne Transaktionen:** Liegt eine volle Tabelle in einer Engine ohne Transaktionen
+  (z. B. MyISAM), ist sie nicht Teil des gemeinsamen Zeitpunkts. Die CLI nennt sie
+  (`inconsistent_tables`).
+- **Ein Push sperrt den Start:** Während eines Pushs startet kein Schnappschuss.
+- **Nie im Pull:** Die Ablage `wp-content/wpsync-snap-*` liefert kein Pull aus (auch nicht
+  Staging oder Push).
+
+Der Import lädt Tabellen ohne Daten (Modus `structure`) zuerst. Bricht er trotzdem ab, nennt
+wpsync die Tabelle und die Tabellen, die noch den Stand vor diesem Pull haben (siehe
+[Fehlerbehebung](#fehlerbehebung)). Tabellen mit `structure` sind dann schon geleert.
 
 ---
 
@@ -1514,6 +1569,14 @@ abbilden lässt, sofern das Profil sie kopiert.
     kein `WPSYNC_KEY` gesetzt, speichert der Agent das Secret wie bisher im Klartext und warnt
     auf der Admin-Seite. Die Spalte „Secret“ in der Geräteliste zeigt pro Pairing
     „verschlüsselt“, „Klartext“ oder „nicht entschlüsselbar“.
+- **Datenbank-Schnappschuss (ab 0.11.0):** Die Datei mit dem Dump ist nie über HTTP erreichbar: Ablage
+  ausserhalb des Webroots, sonst Ordner mit Zufallsname, `.htaccess`-Sperre und `index.php`; zusätzlich
+  ist jeder Block mit XChaCha20-Poly1305 verschlüsselt, der Schlüssel (32 Zufallsbytes je Job) steht nur in
+  `wpsync_state`, das nie ausgeliefert wird. Eine kopierte Datei (Backup, Directory-Listing) ist ohne die
+  Datenbank wertlos. Status und Fehler nennen nie Pfad, Dateiname, Datenbank-Host oder -Benutzer. Die
+  Verbindung des Dumps liest nur (`LOCAL INFILE` aus, am Ende `ROLLBACK`). Das CLI begrenzt
+  Antwortgrösse und entpackte Menge auf die Angaben des Status, prüft die SHA-256 und schreibt nur in
+  den Tabellen-Cache. Siehe [Datenbank als Schnappschuss](#datenbank-als-schnappschuss-ab-0110).
 - **Signatur:** jeder Request ist per HMAC signiert, mit Zeitstempel und Nonce gegen Replays.
   Nicht signierte Requests bekommen `401`.
 - **Antworten der Site:** Die Signatur schützt den Request, nicht die Antwort. Das CLI prüft
@@ -1804,6 +1867,8 @@ Selbst eingetragene `health_urls` dürfen bewusst auch auf andere Hosts oder per
 | „… hat ein eigenes .git – der Ordner fehlt im Schnappschuss“ | Ein Ordner unterhalb des Site-Ordners (meist ein Plugin oder Theme) enthält ein `.git`. wpsync lässt ihn im internen Git aus und führt darin nichts aus; der Pull läuft weiter, WordPress nutzt den Ordner normal. Stammt das `.git` nicht von dir, nicht mit git öffnen, sondern löschen – beim nächsten Pull ist der Ordner wieder im Schnappschuss |
 | „Bisheriges Site-Git verschoben nach …“ | Einmalig beim ersten Pull nach dem Update: Das alte Repo aus dem Site-Ordner liegt jetzt unter `.wpsync-git/<site>.alt-<datum>.git`. Es wird nicht mehr gebraucht und darf gelöscht werden; nicht mit git öffnen, die Site konnte es verändern |
 | „bisheriges Git-Repo … ließ sich nicht aus dem Site-Ordner verschieben“ | Meist liegt der Site-Ordner auf einem anderen Volume als `.wpsync-git` oder es fehlen Rechte. Es wurde kein git ausgeführt. `.git` im Site-Ordner von Hand löschen oder wegräumen und erneut ziehen |
+| „kein konsistenter Schnappschuss der Datenbank“ | Nur mit `--snapshot require`: Die Site konnte ihn nicht liefern (Agent vor 0.11.0, abgeschaltet mit `WPSYNC_NO_SNAPSHOT`, keine beschreibbare Ablage, zu wenig Platz, anderer Job oder Push läuft, Prüfsumme falsch). Die Meldung nennt den Grund. Ohne `require` laden die Häppchen |
+| „Tabellen werden in Häppchen geladen (nicht konsistent)“ | Der Schnappschuss ging nicht, der Pull ist trotzdem durchgelaufen (`warnings: ["db_snapshot_fallback"]`). Ändert sich die Site dabei, kann `ERROR 1062` wiederkehren – dann den Grund beheben (Agent aktualisieren, `WPSYNC_NO_SNAPSHOT` entfernen) und erneut ziehen |
 | Bilder fehlen lokal | Jahr liegt vor `uploads.since`; der Proxy lädt beim ersten Aufruf nach. Dauerhaft: `since` im Profil anpassen und erneut ziehen |
 | „das Push-Fenster ist geschlossen“ | Im WP-Admin unter Werkzeuge → wpsync beim eigenen Gerät öffnen |
 | „die Site hat sich seit dem letzten Pull geändert“ | `wpsync pull <site>`, lokal zusammenführen, erneut pushen – oder bewusst `--force` |
