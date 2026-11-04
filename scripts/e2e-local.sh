@@ -22,6 +22,16 @@ trust_ddev() {
   "$WPSYNC" trust "$TARGET" --fingerprint "$fp" </dev/null >/dev/null
 }
 
+# U-38 räumt die Quelle am Ende auf; ein abgebrochener Lauf lässt Füll-Optionen (options würde dann in
+# jedem Folge-Pull in Häppchen geladen, AC-12), das Test-mu-plugin und die Test-Tabelle zurück.
+u38_cleanup() {
+  (cd "$E2E/source" \
+    && ddev mysql -e "DELETE FROM e2e_options WHERE option_name LIKE '\\_transient\\_e2e\\_churn\\_%' OR option_name IN ('e2e_churn_on', 'e2e_tick'); DROP TABLE IF EXISTS e2e_personen" \
+    && rm -f public/wp-content/mu-plugins/e2e-churn.php && rm -rf public/wp-content/wpsync-snap-e2e \
+    && { ddev wp config delete WPSYNC_TEST_HOOKS >/dev/null 2>&1 || true; } \
+    && { ddev wp config delete WPSYNC_NO_SNAPSHOT >/dev/null 2>&1 || true; })
+}
+
 (cd "$ROOT/agent" && ./build.sh)
 (cd "$ROOT/cli" && go build -o bin/wpsync ./cmd/wpsync)
 
@@ -62,6 +72,7 @@ mkdir -p public/wp-content/uploads/2019/01
 printf 'wpsync-proxy-ok' > public/wp-content/uploads/2019/01/wpsync-proxy.txt
 
 echo "== 1c-Fixtures in der Quelle"
+u38_cleanup
 if ! ddev wp user get erika --field=ID >/dev/null 2>&1; then
   ddev wp user create erika erika.mustermann@kunde-echt.example --role=subscriber \
     --first_name=Erika --last_name=Mustermann --display_name="Erika Mustermann" --user_pass=geheim-e2e >/dev/null
@@ -337,6 +348,95 @@ again="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID
 [ "$again" = "$ERIKA_PSEUDO" ] || fail "AC-33 pseudonym changed from '$ERIKA_PSEUDO' to '$again'"
 if grep -rqi "kunde-echt" .wpsync/db; then fail "AC-38 plain dump still on disk after the anonymized pull"; fi
 ddev wp user check-password wpsync wpsync || fail "AC-34 local admin lost after re-anonymizing"
+
+echo "== U-38: Pull als konsistenter Schnappschuss (0.11.0)"
+ssrc() { (cd "$E2E/source" && "$@"); }
+last_json() { python3 -c 'import json,sys; lines=[l for l in open(sys.argv[1]) if l.strip().startswith("{")]; print(json.dumps(json.loads(lines[-1])["data"]))' "$1"; }
+ssrc ddev wp config set WPSYNC_TEST_HOOKS true --raw >/dev/null
+mkdir -p "$E2E/source/public/wp-content/mu-plugins"
+cat > "$E2E/source/public/wp-content/mu-plugins/e2e-churn.php" <<'PHP'
+<?php
+// E2E (AC-300): nach jedem Häppchen von options die Füll-Option mit der kleinsten option_id löschen
+// und neu anlegen – sie bekommt eine neue option_id hinter allen anderen, wie ein erneuerter Transient.
+$e2e_churn = static function (string $table): void {
+    global $wpdb;
+    if ($table !== $wpdb->options || $wpdb->get_var("SELECT option_value FROM {$wpdb->options} WHERE option_name = 'e2e_churn_on'") !== '1') {
+        return;
+    }
+    $name = $wpdb->get_var("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_e2e\\_churn\\_%' ORDER BY option_id LIMIT 1");
+    if (!is_string($name)) {
+        return;
+    }
+    $wpdb->delete($wpdb->options, ['option_name' => $name]);
+    $wpdb->insert($wpdb->options, ['option_name' => $name, 'option_value' => (string) microtime(true), 'autoload' => 'no']);
+};
+add_action('wpsync_db_chunk', $e2e_churn);
+add_action('wpsync_snapshot_chunk', $e2e_churn);
+PHP
+ssrc ddev wp option update e2e_churn_on 0 >/dev/null
+# Mehr als 2000 Zeilen: options kommt im Häppchen-Weg über /db, nicht im Bundle.
+ssrc ddev wp eval 'for ($i = 0; $i < 2500; $i++) { update_option(sprintf("_transient_e2e_churn_%04d", $i), str_repeat("x", 40), false); }' >/dev/null
+ssrc ddev mysql -e "CREATE TABLE IF NOT EXISTS e2e_personen (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80)) ENGINE=InnoDB; DELETE FROM e2e_personen; INSERT INTO e2e_personen (name) VALUES ('Person A'), ('Person B'); UPDATE e2e_personen SET name = CONCAT(name, ' ', UNIX_TIMESTAMP());"
+mkdir -p "$E2E/source/public/wp-content/wpsync-snap-e2e"
+printf 'nie' > "$E2E/source/public/wp-content/wpsync-snap-e2e/x.txt"
+SCAN=("$WPSYNC" scan "$TARGET" --preset ohne-transaktionen --exclude-plugin e2e-excluded --uploads-since "$YEAR" --no-exclude-paths)
+
+# Ausgangslage: e2e_personen lokal voll (ohne --table gilt das Preset).
+"${SCAN[@]}" --refresh >/dev/null
+"$WPSYNC" pull "$TARGET" --yes >/dev/null
+[ "$(ddev mysql -N -e 'SELECT COUNT(*) FROM e2e_personen')" = "2" ] || fail "U-38 setup: e2e_personen not pulled"
+[ ! -e public/wp-content/wpsync-snap-e2e/x.txt ] || fail "AC-306 snapshot folder delivered by the pull"
+
+echo "== AC-300/AC-301/AC-302: Häppchen scheitern am erneuerten Transient, Struktur-Tabellen sind trotzdem leer"
+"${SCAN[@]}" --table e2e_personen=structure >/dev/null
+ssrc ddev wp option update e2e_churn_on 1 >/dev/null
+# e2e_posts ändert sich, damit der Import es nach options noch zu laden hätte (AC-302: „Nicht ersetzt“).
+ssrc ddev wp post create --post_type=page --post_title="U-38 $(date +%s)" --post_status=publish >/dev/null
+if "$WPSYNC" pull "$TARGET" --yes --snapshot off >"$E2E/pull-u38-off.log" 2>&1; then fail "AC-300 chunked pull survived the churn"; fi
+grep -q "1062" "$E2E/pull-u38-off.log" || fail "AC-300 no duplicate key error"
+grep -q "in Tabelle e2e_options" "$E2E/pull-u38-off.log" || fail "AC-302 abort does not name e2e_options"
+grep -q "Nicht ersetzt" "$E2E/pull-u38-off.log" || fail "AC-302 no list of unreplaced tables"
+grep -q "e2e_posts" "$E2E/pull-u38-off.log" || fail "AC-302 e2e_posts not listed as unreplaced"
+[ "$(ddev mysql -N -e 'SELECT COUNT(*) FROM e2e_personen')" = "0" ] || fail "AC-301 structure table kept its rows after the abort"
+
+echo "== AC-300/AC-301: derselbe Pull als Schnappschuss gelingt"
+"$WPSYNC" pull "$TARGET" --yes --json >"$E2E/pull-u38-snap.json" 2>"$E2E/pull-u38-snap.err" || { cat "$E2E/pull-u38-snap.err"; fail "AC-300 snapshot pull failed"; }
+[ "$(last_json "$E2E/pull-u38-snap.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["snapshot"]["used"])')" = "True" ] || fail "AC-300 snapshot not used"
+[ "$(ddev mysql -N -e "SELECT COUNT(*) FROM e2e_options WHERE option_name LIKE '\\_transient\\_e2e\\_churn\\_%'")" = "2500" ] || fail "AC-300 churned options not complete"
+[ "$(ddev mysql -N -e 'SELECT COUNT(*) FROM e2e_personen')" = "0" ] || fail "AC-301 structure table not empty after the snapshot pull"
+ssrc ddev wp option update e2e_churn_on 0 >/dev/null
+
+echo "== AC-305: keine Schnappschuss-Datei bleibt auf der Quelle"
+[ -z "$(find "$E2E/source" -maxdepth 4 -name 'wpsync-snap-*.bin' -print -quit)" ] || fail "AC-305 snapshot file left on the source"
+
+echo "== AC-308: Schnappschuss und Häppchen liefern dasselbe"
+# Nur Tabellen, die zwischen zwei Pulls stabil sind: options ändert WordPress bei jedem Request (Cron,
+# Transients), users bekommt im Post-Setup den lokalen Admin mit neuem Zeitstempel. Für users zählt das Pseudonym.
+"$WPSYNC" pull "$TARGET" --yes --full --snapshot off >/dev/null
+sum_off="$(ddev mysql -N -e 'CHECKSUM TABLE e2e_posts, e2e_postmeta, e2e_terms' | awk '{print $2}' | tr '\n' ' ')"
+mail_off="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID")"
+"$WPSYNC" pull "$TARGET" --yes --full >/dev/null
+sum_snap="$(ddev mysql -N -e 'CHECKSUM TABLE e2e_posts, e2e_postmeta, e2e_terms' | awk '{print $2}' | tr '\n' ' ')"
+mail_snap="$(ddev mysql -N -e "SELECT user_email FROM e2e_users WHERE ID = $ERIKA_ID")"
+[ "$sum_off" = "$sum_snap" ] || fail "AC-308 snapshot ($sum_snap) differs from chunks ($sum_off)"
+[ "$mail_off" = "$mail_snap" ] && [ "$mail_snap" = "$ERIKA_PSEUDO" ] || fail "AC-308 pseudonym differs: chunks '$mail_off', snapshot '$mail_snap'"
+
+echo "== AC-304: abgeschalteter Schnappschuss fällt auf Häppchen zurück"
+ssrc ddev wp config set WPSYNC_NO_SNAPSHOT true --raw >/dev/null
+ssrc ddev wp option update e2e_tick "$(date +%s)" >/dev/null
+"$WPSYNC" pull "$TARGET" --yes --json >"$E2E/pull-u38-disabled.json" 2>"$E2E/pull-u38-disabled.err" || fail "AC-304 pull failed"
+last_json "$E2E/pull-u38-disabled.json" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["snapshot"]["used"] is False and d["snapshot"]["fallback"]=="unsupported:disabled" and "db_snapshot_fallback" in d["warnings"], d' || fail "AC-304 fallback not reported"
+ssrc ddev wp config delete WPSYNC_NO_SNAPSHOT >/dev/null
+
+echo "== AC-313: begin mit derselben id ist ein Job"
+probe="$(ssrc ddev wp eval '$p = ["id" => str_repeat("b", 32), "tables" => ["e2e_posts"], "scope" => []];
+$a = WpSync\Snapshot::begin($p, "probe"); $b = WpSync\Snapshot::begin($p, "probe");
+echo $a->get_data()["state"], " ", $b->get_data()["state"]; WpSync\Snapshot::delete(["id" => str_repeat("b", 32)]);')"
+[ "$probe" = "done done" ] || fail "AC-313 begin twice: $probe"
+
+# Aufräumen: Profil wieder ohne Ausnahme für e2e_personen, Tabelle weg.
+"${SCAN[@]}" >/dev/null
+u38_cleanup
 
 echo "== 2a: Push Code"
 KEY_ID="$(awk '/^key_id:/ { print $2 }' "$WPSYNC_CONFIG_DIR/sites/$TARGET.yaml")"
