@@ -12,7 +12,7 @@ defined('ABSPATH') || exit;
  */
 final class TableList
 {
-    private const OWN = '/wpsync_(pairings|nonces|state|pushes)\z/';
+    private const OWN = '/wpsync_(pairings|nonces|state|pushes|activity)\z/';
 
     /** Tabellen einer Staging-Kopie: stg<6 Hex>_ (StagingGuard::PREFIX_RE). */
     private const STAGING = '/^stg[0-9a-f]{6}_/';
