@@ -74,12 +74,14 @@ const usage = `wpsync – WordPress Live ↔ Lokal
   wpsync staging status <site>         Zustand, Alter, letzte Nutzung, Pushes nach Staging
   wpsync staging delete <site>         Kopie löschen (Tabellen und Ordner)
                                        (alle ausser status brauchen ein offenes Push-Fenster)
+  wpsync activity <site>               was auf der Site passiert ist: Updates, Fehlschläge, Installieren,
+                                       Löschen, Aktivieren (--since 24h, --until, --limit; Agent 0.12.0)
   wpsync version
 
   Server-Modus: --json (pair, scan, pull, status, unpair, doctor, version, staging, push, pushes,
-  rollback, content) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach;
+  rollback, content, activity) schreibt JSON auf stdout, Meldungen auf stderr, und fragt nie nach;
   --secret-stdin liest das Secret von stdin (scan, pull, status, staging, push, pushes, rollback,
-  content). content export schreibt seine Zeilen immer auf stdout, Meldungen immer auf stderr.
+  content, activity). content export schreibt seine Zeilen immer auf stdout, Meldungen immer auf stderr.
   pull/status/list/stop/content export --driver container --container c --docroot d --db-host h --db-name n
   --db-user u --local-url url [--cli-image i]: vorhandener WordPress-Container statt DDEV
   (DB-Passwort als zweite Zeile von stdin).
@@ -91,7 +93,7 @@ const usage = `wpsync – WordPress Live ↔ Lokal
 // text-only.
 var jsonCommands = map[string]bool{
 	"pair": true, "scan": true, "pull": true, "status": true, "unpair": true, "doctor": true, "version": true,
-	"staging": true, "push": true, "pushes": true, "rollback": true, "content": true, "sites": true,
+	"staging": true, "push": true, "pushes": true, "rollback": true, "content": true, "sites": true, "activity": true,
 }
 
 // stagingCommands are the subcommands of wpsync staging (Spec 2b 6.1).
@@ -190,6 +192,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.cmdPush(args)
 	case "pushes":
 		return a.cmdPushes(args)
+	case "activity":
+		return a.cmdActivity(args)
 	case "rollback":
 		return a.cmdRollback(args)
 	case "staging":
