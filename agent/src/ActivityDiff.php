@@ -99,10 +99,21 @@ final class ActivityDiff
         return $out;
     }
 
-    /** Steuerzeichen raus, höchstens TEXT Byte, kein halbes UTF-8-Zeichen am Ende (). */
+    /**
+     * Steuerzeichen raus, ungültiges UTF-8 ersetzt, höchstens TEXT Byte, kein halbes UTF-8-Zeichen am Ende.
+     * Ein Plugin-Header mit kaputten Bytes liesse sonst den INSERT scheitern (Ereignis verloren).
+     */
     public static function clip(string $text): string
     {
         $text = (string) preg_replace('/[\x00-\x1F\x7F]+/', ' ', $text);
+        if (preg_match('//u', $text) !== 1) {
+            if (function_exists('mb_scrub')) {
+                $text = mb_scrub($text, 'UTF-8');
+            } else {
+                $fixed = function_exists('iconv') ? @iconv('UTF-8', 'UTF-8//IGNORE', $text) : false;
+                $text  = is_string($fixed) ? $fixed : (string) preg_replace('/[^\x20-\x7E]/', '?', $text);
+            }
+        }
         if (strlen($text) <= self::TEXT) {
             return $text;
         }

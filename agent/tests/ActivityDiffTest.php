@@ -90,4 +90,15 @@ final class ActivityDiffTest extends TestCase
         $this->assertLessThanOrEqual(ActivityDiff::TEXT, strlen($cut));
         $this->assertSame(1, preg_match('//u', $cut), 'gültiges UTF-8');
     }
+
+    /** Ungültiges UTF-8 aus einem Plugin-Header darf weder INSERT noch JSON-Antwort scheitern lassen. */
+    public function testClipRepairsInvalidUtf8AndStaysWithinTheLimit(): void
+    {
+        $text = ActivityDiff::clip("Caf\xE9 \xC3 Plugin");
+        $this->assertSame(1, preg_match('//u', $text));
+        $this->assertStringStartsWith('Caf', $text);
+        $long = ActivityDiff::clip(str_repeat("a\xFF", 200));
+        $this->assertSame(1, preg_match('//u', $long));
+        $this->assertLessThanOrEqual(ActivityDiff::TEXT, strlen($long));
+    }
 }
