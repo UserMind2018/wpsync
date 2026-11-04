@@ -27,7 +27,7 @@ final class Store
     /** @return list<string> */
     public static function ownTables(): array
     {
-        return [self::table('pairings'), self::table('nonces'), self::table('state'), self::table('pushes')];
+        return [self::table('pairings'), self::table('nonces'), self::table('state'), self::table('pushes'), self::table('activity')];
     }
 
     /** @var list<string>|null */
@@ -98,6 +98,21 @@ final class Store
             finished INT UNSIGNED NULL,
             opened_by BIGINT UNSIGNED NULL,
             KEY created (created)
+        ) ' . $collate);
+        // Protokoll des Nachtberichts (Aktivität auf der Site). Nie exportiert (TableList::OWN).
+        $wpdb->query('CREATE TABLE IF NOT EXISTS `' . self::table('activity') . '` (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            at INT UNSIGNED NOT NULL,
+            kind VARCHAR(24) NOT NULL,
+            type VARCHAR(16) NOT NULL,
+            slug VARCHAR(191) NOT NULL,
+            name VARCHAR(191) NOT NULL,
+            from_version VARCHAR(191) NULL,
+            to_version VARCHAR(191) NULL,
+            source VARCHAR(16) NOT NULL,
+            user_id BIGINT UNSIGNED NULL,
+            detail VARCHAR(191) NULL,
+            KEY at (at)
         ) ' . $collate);
         // Update von einem Agent vor 0.4.0: die Tabelle existiert schon ohne die Spalte.
         $columns = self::pairingColumns();

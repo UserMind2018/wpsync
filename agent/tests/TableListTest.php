@@ -31,6 +31,12 @@ final class TableListTest extends TestCase
         $this->assertSame(['wp_options', 'wp_wpsync_statements'], TableList::filter($rows, 'wp_'));
     }
 
+    public function testDropsTheActivityLog(): void
+    {
+        $rows = $this->base(['wp_options', 'wp_wpsync_activity', 'wp_wpsync_activity_old']);
+        $this->assertSame(['wp_options', 'wp_wpsync_activity_old'], TableList::filter($rows, 'wp_'));
+    }
+
     public function testDropsNestedInstallations(): void
     {
         $rows = $this->base([
