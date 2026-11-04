@@ -164,7 +164,7 @@ func snapshotTables(c *agentapi.Client, dir *os.Root, tables []agentapi.Table, o
 		_ = c.SnapshotDelete(id)
 		return o.fallback("failed:"+reasonToken(st.Code), "Schnappschuss auf der Site gescheitert ("+agentapi.Printable(st.Code+": "+st.Error)+")")
 	}
-	if !plausibleSnapshot(st) {
+	if !plausibleSnapshot(st, bytesTotal) {
 		_ = c.SnapshotDelete(id)
 		return SnapshotReport{}, fmt.Errorf("%w: unplausible Angaben der Site (%d Blöcke, %d Bytes)", ErrSnapshot, st.Blocks, st.Size)
 	}
@@ -204,11 +204,21 @@ func reasonToken(s string) string {
 	return strings.TrimSuffix(q, `"`)
 }
 
-func plausibleSnapshot(st *agentapi.SnapshotStatus) bool {
+// Limits for what a site may announce: gzip does not beat about 1000:1, and the dump of tables of
+// bytesTotal bytes is far from 8 times that. A hostile site cannot fill the disk with a bomb.
+const (
+	snapshotMaxRatio    = 1100
+	snapshotMinPlainCap = int64(2) << 30
+)
+
+func plausibleSnapshot(st *agentapi.SnapshotStatus, bytesTotal int64) bool {
 	if st.BlockSize != agentapi.SnapshotBlockSize || st.Blocks < 1 || len(st.SHA256) != 64 || st.BytesPlain < 1 {
 		return false
 	}
-	return st.Size > int64(st.Blocks-1)*st.BlockSize && st.Size <= int64(st.Blocks)*st.BlockSize
+	if st.Size > int64(st.Blocks)*st.BlockSize || st.Size <= int64(st.Blocks-1)*st.BlockSize {
+		return false
+	}
+	return st.BytesPlain/snapshotMaxRatio <= st.Size && st.BytesPlain <= max(8*bytesTotal, snapshotMinPlainCap)
 }
 
 var errSnapshotChecksum = errors.New("snapshot checksum mismatch")

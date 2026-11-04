@@ -70,7 +70,7 @@ final class Snapshot
         if (is_array(Store::getState(self::STATE))) {
             return new \WP_Error('wpsync_snapshot_busy', 'another snapshot is running', ['status' => 409]);
         }
-        if (!self::lockFree(Store::lockName('push'))) {
+        if (Push::anyRunning(time()) || !self::lockFree(Store::lockName('push'))) {
             return new \WP_Error('wpsync_snapshot_busy', 'a push is running', ['status' => 409]); // C9
         }
         $reason = self::unsupported();

@@ -68,3 +68,10 @@ func TestReadTableFramesEarlyEnd(t *testing.T) {
 		t.Fatalf("received = %v, err = %v", received, err)
 	}
 }
+
+func TestReadTableFramesRefusesEndlessLine(t *testing.T) {
+	_, err := ReadTableFrames(strings.NewReader(strings.Repeat("x", 3<<20)), func(string, int, io.Reader) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("expected a line-too-long error, got %v", err)
+	}
+}

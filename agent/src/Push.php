@@ -1806,6 +1806,13 @@ final class Push
         return null;
     }
 
+    /** Läuft gerade ein Push (Upload oder Tausch), gleich mit welchem Ziel? Der Schnappschuss startet dann nicht. */
+    public static function anyRunning(int $now): bool
+    {
+        $lock = Store::getState('push_lock');
+        return is_array($lock) && $now - (int) ($lock['touched'] ?? 0) < self::LOCK_TTL;
+    }
+
     /** Läuft gerade ein Push (Upload oder Tausch) mit diesem Ziel? Eine Sperre pro Site (V9). */
     public static function running(string $target, int $now): bool
     {
