@@ -48,6 +48,11 @@ final class Rest
             'delta'             => 'delta',
             'db-bundle'         => 'dbBundle',
             'db'                => 'dbChunk',
+            // Datenbank-Schnappschuss (Spec 0.11.0 B): liest nur, wie /db – kein Push-Fenster.
+            'db-snapshot/begin'  => 'snapshotBegin',
+            'db-snapshot/status' => 'snapshotStatus',
+            'db-snapshot/blocks' => 'snapshotBlocks',
+            'db-snapshot/delete' => 'snapshotDelete',
             'files'             => 'files',
             // Inhalts-Manifest (Spec Content-Push §4.2): nur Fingerabdrücke, im Umfang des Pull-Scopes.
             'content/manifest'  => 'contentManifest',
@@ -339,6 +344,29 @@ final class Rest
     public static function stagingLogin()
     {
         return Staging::login(self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function snapshotBegin(\WP_REST_Request $request)
+    {
+        return Snapshot::begin(self::json($request), self::$keyId);
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function snapshotStatus(\WP_REST_Request $request)
+    {
+        return Snapshot::status(self::json($request));
+    }
+
+    /** @return \WP_Error|void */
+    public static function snapshotBlocks(\WP_REST_Request $request)
+    {
+        return Snapshot::blocks(self::json($request));
+    }
+
+    public static function snapshotDelete(\WP_REST_Request $request): \WP_REST_Response
+    {
+        return Snapshot::delete(self::json($request));
     }
 
     /**
