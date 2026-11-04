@@ -93,6 +93,14 @@ final class ExcludesTest extends TestCase
         $this->assertSame('excluded_dir', Excludes::path('wpsync-push-0123456789abcdef/p_20261005_0123456789ab/old/0/main.php', 10));
     }
 
+    public function testSnapshotDirIsExcludedAtTop(): void
+    {
+        $this->assertTrue(Excludes::dir('wpsync-snap-0123456789abcdef', true));
+        $this->assertTrue(Excludes::dir('WPSYNC-SNAP-0123456789ABCDEF', true));
+        $this->assertFalse(Excludes::dir('wpsync-snap-0123456789abcdef', false), 'only directly below wp-content');
+        $this->assertSame('excluded_dir', Excludes::path('wpsync-snap-0123456789abcdef/wpsync-snap-' . str_repeat('a', 32) . '.bin', 10));
+    }
+
     /**
      * Spec 2b 5.10: die Staging-Kopie liegt im Webroot neben wp-content. Taucht ihr Ordner doch
      * irgendwo unter wp-content auf (verschoben, Rest), verlässt er den Server trotzdem nie – am
