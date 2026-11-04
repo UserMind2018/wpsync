@@ -29,6 +29,7 @@ wpsync nie.
 - [Was beim Pull passiert](#was-beim-pull-passiert)
 - [Code pushen](#code-pushen)
 - [Inhalte: Manifest, Baseline, Export](#inhalte-manifest-baseline-export)
+- [Nachtbericht: `wpsync activity`](#nachtbericht-wpsync-activity)
 - [Staging auf dem Server](#staging-auf-dem-server)
 - [Sicherheit](#sicherheit)
 - [Serverschonung und IP-Sperren](#serverschonung-und-ip-sperren)
@@ -143,6 +144,7 @@ Danach läuft die Site unter `https://example-com.ddev.site` in `~/wpsync-sites/
 | `wpsync push <site> code [einheit…] [--activate plugins/<slug>]… [--deactivate plugins/<slug>]… [--uploads <liste>] [--content <package.jsonl>] [--no-code] [--require-rescue-db] [--to staging] [--dry-run] [--force] [--yes] [--allow-version-change]` | Bringt lokal geänderte Plugins, Themes und mu-plugins als ganze Verzeichnisse auf die Site, mit `--uploads` dazu neue Dateien unter `wp-content/uploads/` (ab Agent 0.6.0), mit `--content` ein Paket aus Inhaltszeilen (ab Agent 0.7.0, [Inhalte pushen](#inhalte-pushen)); `--no-code` lässt den Code weg, `--require-rescue-db` pusht Inhalte nur, wenn `rescue.php` sie auch ohne WordPress zurücknehmen kann (ab Agent 0.8.0, [Rücknahme ohne WordPress](#rücknahme-ohne-wordpress)). `--activate` und `--deactivate` schalten Plugins im selben Satz ein und aus (ab Agent 0.9.0, [Plugins im Push schalten](#plugins-im-push-schalten)). Ohne Einheiten: alle geänderten, die der letzte Pull geliefert hat – lokal neue Verzeichnisse nur, wenn sie ausdrücklich genannt sind. Braucht ein offenes Push-Fenster. `--dry-run` zeigt nur den Plan, `--force` überschreibt einen Stand, der sich auf der Site seit dem letzten Pull geändert hat. `--to staging` pusht auf die Staging-Kopie statt nach Live; die Baseline bleibt. Details: [Code pushen](#code-pushen). |
 | `wpsync pushes <site> [--confirm <id>]` | Protokoll der Pushes beider Ziele (Spalte ZIEL) mit Status. `--confirm` markiert einen getauschten, aber nicht bestätigten Push als in Ordnung – nur einen Push des eigenen Geräts, und nicht, solange sein Inhalts-Schritt nie quittiert wurde ([Anwenden, Health-Check, Rücknahme](#anwenden-health-check-rücknahme)). |
 | `wpsync rollback <site> [push-id] [--to staging]` | Nimmt einen Push zurück – über den Agent, und wenn WordPress nicht mehr antwortet über `rescue.php` (ab Agent 0.8.0 samt Inhalten, ab 0.9.0 samt Plugin-Zustand). Ohne Push-ID der neueste Push nach Live, mit `--to staging` der neueste nach Staging; mit Push-ID entscheidet der Push selbst über das Ziel. Zurücknehmen kann einen Push nur das Gerät, das ihn gepusht hat – oder ein Administrator im WP-Admin ([Code pushen](#code-pushen)). |
+| `wpsync activity <site> [--since <wann>] [--until <wann>] [--limit n]` | Was auf der Site passiert ist, ohne etwas zu ändern: Updates, Fehlschläge von Auto-Updates, Installieren, Löschen, Aktivieren, Theme-Wechsel – mit Zeitpunkt und Auslöser (ab Agent 0.12.0). Braucht kein Push-Fenster. Details: [Nachtbericht](#nachtbericht-wpsync-activity). |
 | `wpsync staging create <site> [--yes] [--no-anonymize]` | Legt die Staging-Kopie auf dem Server an: Code und Datenbank nach Pull-Profil, pseudonymisiert. Braucht wie `open`, `refresh` und `delete` ein offenes Push-Fenster. Details: [Staging auf dem Server](#staging-auf-dem-server). |
 | `wpsync staging open <site> [--print]` | Holt einen Einmal-Link (Zugang und Anmeldung als Staging-Admin) und öffnet ihn im Browser; `--print` gibt ihn nur aus. Hebt eine Sperre nach Verfall auf. Nicht im selben Browserprofil öffnen, in dem man bei Live angemeldet ist (siehe [Zugang](#staging-auf-dem-server)). |
 | `wpsync staging refresh <site> [--code] [--yes] [--no-anonymize]` | Datenbank der Kopie neu von Live, mit `--code` auch den Code. Fragt nach, weil Daten der Kopie verloren gehen. |
@@ -1392,6 +1394,43 @@ Vorher-Abbilds, nie nach einem Wert aus dem Request ([Plugins im Push schalten](
 | ≥ 0.8.0 | 0.7.x | kein `rescue.db`; `rescue.php` nimmt nur Code und Uploads zurück (`content_not_rolled_back`) |
 | 0.7.x | ≥ 0.8.0 | die CLI bittet nicht um die Inhalte: wie oben; der Umschlag liegt ungenutzt und verfällt |
 
+## Nachtbericht: `wpsync activity`
+
+Was auf der Site passiert ist – ohne etwas zu ändern. Ab Agent 0.12.0; ein älterer Agent antwortet mit
+Exit 11 (`agent_outdated`), alle anderen Befehle laufen unverändert.
+
+    wpsync activity <site>                         # die letzten 24 Stunden
+    wpsync activity <site> --since 2026-11-02T22:00:00+01:00
+    wpsync activity <site> --since 1762218000 --json --secret-stdin   # Server-Modus
+
+`--since` und `--until` nehmen eine Dauer zurück ab `--until` (`24h`, `90m`), einen Zeitpunkt nach
+RFC 3339 oder Unix-Sekunden; ohne `--until` gilt „jetzt“. `--limit` (1–500, Standard 200) begrenzt die
+Zahl der Ereignisse. Der Befehl braucht kein Push-Fenster und legt nichts auf der Site an ausser dem
+Protokoll des Agents.
+
+Gemeldet wird je Ereignis Zeitpunkt, Art (aktualisiert, zurückgestuft, installiert, gelöscht, aktiviert,
+deaktiviert, Theme gewechselt, Update fehlgeschlagen, Übersetzungen aktualisiert) und Auslöser
+(Auto-Update, Benutzer, WP-CLI, wpsync-Push oder „an WordPress vorbei“, z. B. per FTP). Pushes und
+Rücknahmen über wpsync stehen mit ihrer Push-ID im Protokoll. Dazu nennt der Bericht, für welche
+Plugins und Themes die Auto-Updates von WordPress eingeschaltet sind.
+
+Der Agent führt das Protokoll selbst: direkt nach jedem Update, stündlich per WP-Cron
+(`wpsync_activity_check`) und vor jeder Abfrage. Es beginnt mit der Aktivierung des Agents
+(`log_since`), reicht 90 Tage zurück und wird beim Deaktivieren gelöscht. Die Tabelle
+`wpsync_activity` verlässt den Server nie: kein Pull, keine Staging-Kopie, kein Export. Höchstens
+31 Tage und 500 Ereignisse je Abfrage; was darüber liegt, meldet der Bericht als „gekürzt“ (`truncated`)
+und nennt den Zeitpunkt, ab dem man weiterfragt.
+
+Mit `--json` steht der Bericht in `data`: `since`, `until`, `checked`, `log_since`, `agent_version`,
+`core`, `events[]` (`at`, `kind`, `type`, `slug`, `name`, `from`, `to`, `source`, `user`, `detail`),
+`truncated` und `auto_updates`. Texte, die von der Site stammen (Plugin-Namen, Fehlercodes), kürzt der
+Agent und die CLI reinigt sie vor jeder Ausgabe.
+
+Grenzen: Code, der ohne neue Versionsnummer geändert wurde, sieht der Bericht nicht. Wer Admin- oder
+Dateizugriff auf die Site hat, kann das Protokoll ändern – es ist ein Bericht, kein Beweis.
+
+---
+
 ## Staging auf dem Server
 
 Eine Kopie der Live-Site auf dem Server des Kunden – mit dessen PHP, Datenbank und Plugins –,
@@ -2286,6 +2325,11 @@ scripts/e2e-rescue-db.sh
 # Plugins im Push schalten: --activate/--deactivate, Rücknahme über Agent und rescue.php, Staging,
 # alter Agent (eigene DDEV-Projekte wpsync-e2e-plg und -plg-target, braucht jq; rund 5 Minuten)
 scripts/e2e-plugins.sh
+
+# Nachtbericht: wpsync activity gegen eine echte Site – installieren, aktualisieren, Auto-Update,
+# an WordPress vorbei, löschen, Aufräumen (eigenes DDEV-Projekt wpsync-e2e-act, braucht jq und zip;
+# endet mit „… Prüfungen, 0 fehlgeschlagen, … s“)
+scripts/e2e-activity.sh
 
 # Container-Modus: push, pushes und rollback als Linux-Binary in Wegwerf-Containern
 # (eigenes DDEV-Projekt wpsync-e2e-cpush, braucht jq; rund 15 Minuten)
