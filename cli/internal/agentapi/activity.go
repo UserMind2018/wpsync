@@ -3,6 +3,7 @@ package agentapi
 import (
 	"errors"
 	"strings"
+	"unicode"
 )
 
 // ActivityRoute is the night report of agent 0.12.0.
@@ -112,11 +113,15 @@ func (r *ActivityReport) Clean() {
 	r.AutoUpdates.Themes = activityList(r.AutoUpdates.Themes)
 }
 
-// activityClean replaces control characters, keeps valid UTF-8 and cuts at activityText bytes.
+// activityClean replaces control characters and line separators, drops invisible formatting
+// characters (bidi overrides, zero-width), keeps valid UTF-8 and cuts at activityText bytes.
 func activityClean(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+		switch {
+		case unicode.IsControl(r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
 			return ' '
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
 	}, strings.ToValidUTF8(s, ""))
