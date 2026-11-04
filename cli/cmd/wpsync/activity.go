@@ -1,0 +1,164 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"time"
+
+	"github.com/usermind/wpsync/internal/agentapi"
+	"github.com/usermind/wpsync/internal/cliout"
+)
+
+const activityCall = "wpsync activity <site> [--since 24h|<RFC3339>|<unix>] [--until …] [--limit 1–500] [--json] [--secret-stdin]"
+
+// activityMaxRange is the longest span the agent answers (Activity::MAX_RANGE).
+const activityMaxRange = 31 * 24 * time.Hour
+
+// cmdActivity prints what happened on the site: read-only, no push window.
+func (a *app) cmdActivity(args []string) error {
+	fs := a.flags("activity")
+	sinceFlag := fs.String("since", "24h", "ab wann: Dauer zurück ab --until (24h, 90m), Zeitpunkt RFC 3339 oder Unix-Sekunden")
+	untilFlag := fs.String("until", "", "bis wann, Format wie --since (Standard: jetzt)")
+	limit := fs.Int("limit", 200, "höchstens so viele Ereignisse (1–500)")
+	secretStdin := secretStdinFlag(fs)
+	positional, err := a.parse(fs, args, exactly(1), activityCall)
+	if err != nil {
+		return err
+	}
+	until := time.Now()
+	if *untilFlag != "" {
+		if until, err = activityTime(*untilFlag, until); err != nil {
+			return cliout.Usage(fmt.Errorf("--until: %w", err))
+		}
+	}
+	since, err := activityTime(*sinceFlag, until)
+	if err != nil {
+		return cliout.Usage(fmt.Errorf("--since: %w", err))
+	}
+	switch {
+	case since.After(until):
+		return cliout.Usage(errors.New("--since liegt nach --until"))
+	case until.Sub(since) > activityMaxRange:
+		return cliout.Usage(errors.New("höchstens 31 Tage auf einmal – Zeitraum aufteilen"))
+	case *limit < 1 || *limit > agentapi.ActivityMaxEvents:
+		return cliout.Usage(fmt.Errorf("--limit muss zwischen 1 und %d liegen", agentapi.ActivityMaxEvents))
+	}
+	site, secret, err := loadSite(positional[0], a.secretStore(*secretStdin))
+	if err != nil {
+		return err
+	}
+	client := agentapi.New(site.URL, site.KeyID, secret, site.RPS)
+	client.Ctx = a.ctx
+	report, err := client.Activity(since.Unix(), until.Unix(), *limit)
+	if err != nil {
+		return explain(err, site)
+	}
+	if a.json {
+		a.data = struct {
+			Site string `json:"site"`
+			*agentapi.ActivityReport
+		}{site.Name, report}
+		return nil
+	}
+	printActivity(a.out(), site.Name, report)
+	return nil
+}
+
+// activityTime reads a duration back from ref (24h, 90m), Unix seconds or RFC 3339.
+func activityTime(s string, ref time.Time) (time.Time, error) {
+	if d, err := time.ParseDuration(s); err == nil {
+		if d < 0 {
+			return time.Time{}, errors.New("die Dauer darf nicht negativ sein")
+		}
+		return ref.Add(-d), nil
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n >= 0 {
+		return time.Unix(n, 0), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("%s ist weder Dauer (24h), Unix-Sekunden noch RFC 3339", agentapi.Printable(s))
+}
+
+var activityKindText = map[string]string{
+	"updated": "aktualisiert", "downgraded": "zurückgestuft", "installed": "installiert", "deleted": "gelöscht",
+	"activated": "aktiviert", "deactivated": "deaktiviert", "theme_switched": "Theme gewechselt",
+	"update_failed": "Update fehlgeschlagen", "translations_updated": "Übersetzungen aktualisiert",
+}
+
+var activityTypeText = map[string]string{"core": "WordPress", "plugin": "Plugin", "theme": "Theme", "translation": "Übersetzungen"}
+
+func printActivity(w io.Writer, site string, r *agentapi.ActivityReport) {
+	at := func(s int64) string { return time.Unix(s, 0).Format("02.01. 15:04") }
+	fmt.Fprintf(w, "Aktivität auf %s · %s – %s · WordPress %s · Agent %s\n", site, at(r.Since), at(r.Until), r.Core, r.AgentVersion)
+	if r.LogSince == nil {
+		fmt.Fprintln(w, "  ⚠ kein Protokoll – der Agent weiss nichts über diesen Zeitraum")
+	} else if *r.LogSince > r.Since {
+		fmt.Fprintf(w, "  ⚠ Protokoll erst seit %s – davor weiss der Agent nichts\n", at(*r.LogSince))
+	}
+	if len(r.Events) == 0 {
+		fmt.Fprintln(w, "  Keine Ereignisse.")
+	}
+	for _, e := range r.Events {
+		fmt.Fprintf(w, "  %s  %s\n", at(e.At), activityLine(e))
+	}
+	if r.Truncated && len(r.Events) > 0 {
+		fmt.Fprintf(w, "  ⚠ gekürzt – weitere Ereignisse mit --since %d\n", r.Events[len(r.Events)-1].At)
+	}
+	if n, m := len(r.AutoUpdates.Plugins), len(r.AutoUpdates.Themes); n+m > 0 {
+		fmt.Fprintf(w, "  Auto-Update an: %d Plugins, %d Themes\n", n, m)
+	}
+}
+
+func activityLine(e agentapi.ActivityEvent) string {
+	what := activityTypeText[e.Type] + " " + e.Slug
+	switch {
+	case e.Type == "core":
+		what = "WordPress"
+	case e.Kind == "translations_updated":
+		what = "Übersetzungen"
+	case e.Kind == "theme_switched":
+		what = "Theme"
+	}
+	switch {
+	case e.From != nil && e.To != nil:
+		what += " " + *e.From + " → " + *e.To
+	case e.To != nil:
+		what += " " + *e.To
+	case e.From != nil:
+		what += " " + *e.From
+	}
+	line := what + " · " + activityKindText[e.Kind]
+	if e.Detail != nil && *e.Detail != "" && e.Kind != "theme_switched" && e.Source != "wpsync" {
+		line += " (" + *e.Detail + ")"
+	}
+	return line + " · " + activitySource(e)
+}
+
+func activitySource(e agentapi.ActivityEvent) string {
+	switch e.Source {
+	case "auto":
+		return "Auto-Update"
+	case "wpsync":
+		if e.Detail != nil && *e.Detail != "" {
+			return "wpsync (" + *e.Detail + ")"
+		}
+		return "wpsync"
+	case "cli":
+		return "WP-CLI"
+	case "user":
+		if e.User == nil {
+			return "Benutzer"
+		}
+		if e.User.Login != "" {
+			return "Benutzer " + e.User.Login
+		}
+		return fmt.Sprintf("Benutzer #%d", e.User.ID)
+	case "detected":
+		return "beim Abgleich bemerkt (an WordPress vorbei)"
+	}
+	return "Auslöser unbekannt"
+}

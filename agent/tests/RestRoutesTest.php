@@ -240,4 +240,21 @@ final class RestRoutesTest extends TestCase
         Rest::flushOutput();
         $this->assertSame('abc', ob_get_clean());
     }
+
+    public function testTheActivityRouteIsSigned(): void
+    {
+        $this->boot();
+        $routes = $this->routes();
+        $this->assertArrayHasKey('wpsync/v1/activity', $routes);
+        $this->assertSame([Rest::class, 'auth'], $routes['wpsync/v1/activity']['permission_callback']);
+        $this->assertSame([Rest::class, 'activity'], $routes['wpsync/v1/activity']['callback']);
+    }
+
+    /** Commit und Rücknahme tragen die Push-ID ins Protokoll. */
+    public function testCommitAndRollbackRunAttributed(): void
+    {
+        $source = (string) file_get_contents(__DIR__ . '/../src/Rest.php');
+        $this->assertStringContainsString('Activity::attributed($params[\'push_id\'] ?? \'\', static function () use ($params) {' . "\n" . '            return Push::commit($params, self::$keyId);', $source);
+        $this->assertStringContainsString('Activity::attributed($params[\'push_id\'] ?? \'\', static function () use ($params) {' . "\n" . '            return Push::rollback($params, self::$keyId);', $source);
+    }
 }

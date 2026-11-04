@@ -140,6 +140,24 @@ final class FakeWpdb
     }
 
     /**
+     * @param array<string, mixed> $data
+     * @return int|bool
+     */
+    public function replace(string $table, array $data)
+    {
+        return $this->query('REPLACE INTO `' . $table . '` ' . json_encode($data));
+    }
+
+    /**
+     * @param array<string, mixed> $where
+     * @return int|bool
+     */
+    public function delete(string $table, array $where)
+    {
+        return $this->query('DELETE FROM `' . $table . '` WHERE ' . json_encode($where));
+    }
+
+    /**
      * @param mixed $output
      * @return list<array<string, string|null>>|null
      */

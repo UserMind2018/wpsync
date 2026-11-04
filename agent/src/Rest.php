@@ -65,6 +65,8 @@ final class Rest
             'push/confirm'      => 'pushConfirm',
             'push/rollback'     => 'pushRollback',
             'push/list'         => 'pushList',
+            // Nachtbericht: nur lesend, jede Kopplung, kein Push-Fenster.
+            'activity'          => 'activity',
             // Staging (Spec 2b 5.2): dieselbe Signaturprüfung; begin und login zusätzlich nur bei offenem
             // Push-Fenster (S6, U44). /staging/login macht den Aufrufer zum Administrator der Kopie – es gibt
             // dafür keinen anderen Weg als diesen. step setzt nur einen Job fort, den begin angelegt hat.
@@ -297,7 +299,10 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function pushCommit(\WP_REST_Request $request)
     {
-        return Push::commit(self::json($request), self::$keyId);
+        $params = self::json($request);
+        return Activity::attributed($params['push_id'] ?? '', static function () use ($params) {
+            return Push::commit($params, self::$keyId);
+        });
     }
 
     /** @return \WP_REST_Response|\WP_Error */
@@ -309,12 +314,22 @@ final class Rest
     /** @return \WP_REST_Response|\WP_Error */
     public static function pushRollback(\WP_REST_Request $request)
     {
-        return Push::rollback(self::json($request), self::$keyId);
+        $params = self::json($request);
+        return Activity::attributed($params['push_id'] ?? '', static function () use ($params) {
+            return Push::rollback($params, self::$keyId);
+        });
     }
 
     public static function pushList(): \WP_REST_Response
     {
         return Push::index();
+    }
+
+    /** @return \WP_REST_Response|\WP_Error */
+    public static function activity(\WP_REST_Request $request)
+    {
+        $report = Activity::report(self::json($request), new WpActivityProbe(), time());
+        return $report instanceof \WP_Error ? $report : new \WP_REST_Response($report);
     }
 
     /** @return \WP_REST_Response|\WP_Error */

@@ -27,16 +27,25 @@ final class AgentBootstrapTest extends TestCase
         require_once __DIR__ . '/AgentHarness.php';
         require self::PLUGIN;
 
-        $this->assertSame('0.11.0', WPSYNC_VERSION);
+        $this->assertSame('0.12.0', WPSYNC_VERSION);
         foreach (glob(__DIR__ . '/../src/*.php') ?: [] as $file) {
             $name = 'WpSync\\' . basename($file, '.php');
             $this->assertTrue(class_exists($name, false) || interface_exists($name, false), basename($file) . ' fehlt in der Klassenliste');
         }
         $this->assertContains(\WpSync\Staging::CRON, $GLOBALS['wpsync_calls']['actions']);
         $this->assertContains(\WpSync\Snapshot::CRON, $GLOBALS['wpsync_calls']['actions']);
+        $this->assertContains(\WpSync\Activity::CRON, $GLOBALS['wpsync_calls']['actions']);
+        foreach (['pre_auto_update', 'upgrader_process_complete', '_core_updated_successfully', 'update_option_active_plugins', 'deleted_plugin', 'deleted_theme', 'switch_theme', 'automatic_updates_complete'] as $hook) {
+            $this->assertContains($hook, $GLOBALS['wpsync_calls']['actions'], $hook);
+        }
         $this->assertContains('rest_api_init', $GLOBALS['wpsync_calls']['actions']);
         $this->assertSame(1, $GLOBALS['wpsync_calls']['activation']);
         $this->assertCount(1, $GLOBALS['wpsync_calls']['deactivation']);
+    }
+
+    public function testDeactivationUnschedulesTheActivityCheck(): void
+    {
+        $this->assertNotFalse(strpos($this->source(), '\WpSync\Activity::unschedule()'));
     }
 
     /** Spec 2b 5.10: auch wenn active_plugins den Agent in der Kopie doch enthält. */
@@ -96,7 +105,7 @@ final class AgentBootstrapTest extends TestCase
         $source = $this->source();
         $this->assertSame(1, preg_match('/^ \* Version:\s+(\S+)$/m', $source, $header));
         $this->assertSame(1, preg_match("/^const WPSYNC_VERSION = '([^']+)';$/m", $source, $const));
-        $this->assertSame('0.11.0', $header[1]);
+        $this->assertSame('0.12.0', $header[1]);
         $this->assertSame($header[1], $const[1]);
     }
 }

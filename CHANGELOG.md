@@ -3,6 +3,21 @@
 Format: [Keep a Changelog](https://keepachangelog.com/de/). Tag = Version der CLI; die
 Agent-Version steht pro Release dabei.
 
+## [0.12.0] – 2026-11-04 · Agent 0.12.0
+
+### Nachtbericht
+
+**Neu**
+- `wpsync activity <site> [--since] [--until] [--limit] [--json] [--secret-stdin]`: was auf der Site
+  passiert ist – Updates, Fehlschläge von Auto-Updates, Installieren, Löschen, Aktivieren, Theme-Wechsel,
+  Änderungen an WordPress vorbei –, mit Zeitpunkt und Auslöser. Nur lesend, braucht kein Push-Fenster
+- Agent: Tabelle `wpsync_activity` (nie exportiert, 90 Tage), Route `/activity`, stündlicher WP-Cron
+  `wpsync_activity_check`. Pushes und Rücknahmen über wpsync stehen mit ihrer Push-ID im Protokoll
+- `scripts/e2e-activity.sh`: End-to-End-Lauf gegen eine echte DDEV-Site
+
+**Kompatibilität**
+- Agent 0.12.0 nötig für `wpsync activity` (ältere Agents: Exit 11). Alle anderen Befehle unverändert.
+
 ## [0.11.0] – 2026-11-04 · Agent 0.11.0
 
 ### Datenbank als ein Schnappschuss
