@@ -90,3 +90,21 @@ func TestActivityRangeErrorStaysAnAPIError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A plugin header the site controls must not reorder or hide terminal output: bidi overrides,
+// zero-width and line-separator characters go along with the C0/C1 controls.
+func TestActivityCleanDropsInvisibleFormatting(t *testing.T) {
+	cases := map[string]string{
+		"evil‮gpj.exe": "evilgpj.exe",
+		"a​b⁦c":        "abc",
+		"line two":     "line two",
+		"para two":     "para two",
+		"c1\u009bX":    "c1 X",
+		"plain Übung":  "plain Übung",
+	}
+	for in, want := range cases {
+		if got := activityClean(in); got != want {
+			t.Errorf("activityClean(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

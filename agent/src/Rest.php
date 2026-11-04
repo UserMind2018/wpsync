@@ -300,7 +300,7 @@ final class Rest
     public static function pushCommit(\WP_REST_Request $request)
     {
         $params = self::json($request);
-        return Activity::attributed((string) ($params['push_id'] ?? ''), static function () use ($params) {
+        return Activity::attributed($params['push_id'] ?? '', static function () use ($params) {
             return Push::commit($params, self::$keyId);
         });
     }
@@ -315,7 +315,7 @@ final class Rest
     public static function pushRollback(\WP_REST_Request $request)
     {
         $params = self::json($request);
-        return Activity::attributed((string) ($params['push_id'] ?? ''), static function () use ($params) {
+        return Activity::attributed($params['push_id'] ?? '', static function () use ($params) {
             return Push::rollback($params, self::$keyId);
         });
     }

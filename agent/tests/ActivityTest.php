@@ -190,4 +190,69 @@ final class ActivityTest extends TestCase
         $this->assertCount(1, $inserts);
         $this->assertStringContainsString("'update_failed', 'plugin', 'woo', 'Woo', NULL, NULL, 'auto', NULL, 'failed')", $inserts[0]);
     }
+
+    /** Das Update des Plugins per ZIP aktiviert es nicht neu: die Tabelle muss der erste Hook anlegen. */
+    public function testAHookCreatesTheMissingTableBeforeLogging(): void
+    {
+        $db = $this->boot();
+        update_option('wpsync_schema', '0.11.0'); // Stand vor dem ZIP-Update
+        $log = tempnam(sys_get_temp_dir(), 'wpsync-log');
+        ini_set('error_log', (string) $log); // die Sonde braucht WordPress: der Hook meldet "übersprungen", nur die Tabelle zählt
+        Activity::onChange();
+        unlink((string) $log);
+        $creates = array_values(array_filter($db->writes(), static function (string $sql): bool {
+            return strpos($sql, 'CREATE TABLE IF NOT EXISTS `wp_wpsync_activity`') === 0;
+        }));
+        $this->assertCount(1, $creates);
+    }
+
+    /** Fällt jeder INSERT aus, wartet der Schnappschuss: der nächste Abgleich holt die Ereignisse nach. */
+    public function testSnapshotStaysWhenNothingCouldBeWritten(): void
+    {
+        $db = $this->boot();
+        $db->answer("/^SELECT value FROM `wp_wpsync_state` WHERE name = 'activity_snapshot'/", self::OLD);
+        $db->fail('/^INSERT INTO `wp_wpsync_activity`/', 'table is gone');
+        $this->assertSame(0, Activity::reconcile(new FakeActivityProbe($this->newSnap('1.1')), ['detected', null, ''], 2000));
+        foreach ($db->writes() as $sql) {
+            $this->assertStringNotContainsString('REPLACE INTO', $sql);
+        }
+    }
+
+    /** Eine Push-ID, die kein Text ist, trägt nichts ins Protokoll und löst keine Meldung aus. */
+    public function testAPushIdThatIsNotTextIsUnusable(): void
+    {
+        $this->boot(false);
+        $this->assertSame(['wpsync', null, ''], Activity::attributed(['x'], static function (): array {
+            return Activity::source();
+        }));
+    }
+
+    /** Eine Ausnahme aus Commit oder Rücknahme erreicht den Aufrufer unverändert; die Zuordnung endet trotzdem. */
+    public function testAttributedLetsExceptionsThroughAndResets(): void
+    {
+        $this->boot(false);
+        $boom = new \RuntimeException('commit failed');
+        try {
+            Activity::attributed('p_2', static function () use ($boom): void {
+                throw $boom;
+            });
+            $this->fail('exception expected');
+        } catch (\RuntimeException $e) {
+            $this->assertSame($boom, $e);
+        }
+        $this->assertSame(['other', null, ''], Activity::source());
+    }
+
+    /** Nach dem Deaktivieren (Marke gelöscht) legt ein später feuernder Hook nichts wieder an. */
+    public function testAHookAfterDeactivationCreatesNothing(): void
+    {
+        $db  = $this->boot();
+        $log = tempnam(sys_get_temp_dir(), 'wpsync-log');
+        ini_set('error_log', (string) $log);
+        Activity::onChange();
+        unlink((string) $log);
+        $this->assertSame([], array_values(array_filter($db->writes(), static function (string $sql): bool {
+            return strpos($sql, 'CREATE TABLE') !== false;
+        })));
+    }
 }
