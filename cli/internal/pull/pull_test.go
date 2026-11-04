@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -249,5 +250,23 @@ func TestRunAsksBeforePullingPlainPII(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(asked), "klartext") {
 		t.Errorf("question = %q", asked)
+	}
+}
+
+func TestUncachedDropsTablesWithMatchingMarkers(t *testing.T) {
+	dir, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	sum := "1"
+	done := agentapi.Table{Name: "wp_a", Mode: profile.ModeFull, Checksum: &sum}
+	open := agentapi.Table{Name: "wp_b", Mode: profile.ModeFull, Checksum: &sum}
+	if err := writeMarker(dir, done); err != nil {
+		t.Fatal(err)
+	}
+	got := uncached(dir, []agentapi.Table{done, open})
+	if len(got) != 1 || got[0].Name != "wp_b" {
+		t.Fatalf("uncached = %v", got)
 	}
 }
