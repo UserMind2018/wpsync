@@ -5,11 +5,11 @@ import (
 	"strings"
 )
 
-// ActivityRoute is the night report of agent 0.11.0 (Spec 0.11.0 §4).
+// ActivityRoute is the night report of agent 0.12.0.
 const ActivityRoute = "/wpsync/v1/activity"
 
 // MinAgentActivity is the first agent that keeps the activity log.
-const MinAgentActivity = "0.11.0"
+const MinAgentActivity = "0.12.0"
 
 // ActivityMaxEvents bounds one answer, as the agent does (ActivityLog::MAX_LIMIT).
 const ActivityMaxEvents = 500
@@ -34,7 +34,7 @@ type ActivityUser struct {
 	Login string `json:"login,omitempty"`
 }
 
-// ActivityEvent is one change of the installed software (Spec 0.11.0 §2).
+// ActivityEvent is one change of the installed software.
 type ActivityEvent struct {
 	At     int64         `json:"at"`
 	Kind   string        `json:"kind"`
@@ -54,7 +54,7 @@ type AutoUpdates struct {
 	Themes  []string `json:"themes"`
 }
 
-// ActivityReport is the answer of /activity (Spec 0.11.0 §4.2).
+// ActivityReport is the answer of /activity.
 type ActivityReport struct {
 	Since        int64           `json:"since"`
 	Until        int64           `json:"until"`
@@ -68,7 +68,7 @@ type ActivityReport struct {
 }
 
 // Activity asks for the events between since and until (Unix seconds), at most limit of them.
-// An agent before 0.11.0 has no such route: that is an OutdatedError (exit agent_outdated).
+// An agent before 0.12.0 has no such route: that is an OutdatedError (exit agent_outdated).
 func (c *Client) Activity(since, until int64, limit int) (*ActivityReport, error) {
 	var res ActivityReport
 	err := c.PostJSON(ActivityRoute, map[string]any{"since": since, "until": until, "limit": limit}, &res)
@@ -83,7 +83,7 @@ func (c *Client) Activity(since, until int64, limit int) (*ActivityReport, error
 	return &res, nil
 }
 
-// Clean drops what the agent never sends and makes every text safe to print (Spec 0.11.0 §7 R5).
+// Clean drops what the agent never sends and makes every text safe to print.
 func (r *ActivityReport) Clean() {
 	events := make([]ActivityEvent, 0, len(r.Events))
 	for _, e := range r.Events {

@@ -27,7 +27,7 @@ func activityServer(t *testing.T, status int, answer string) (*Client, *map[stri
 
 func TestActivitySendsTheRangeAndCleans(t *testing.T) {
 	long := strings.Repeat("x", 300)
-	c, got := activityServer(t, 200, `{"since":100,"until":200,"checked":200,"log_since":50,"agent_version":"0.11.0","core":"6.8.3",
+	c, got := activityServer(t, 200, `{"since":100,"until":200,"checked":200,"log_since":50,"agent_version":"0.12.0","core":"6.8.3",
 "events":[
  {"at":150,"kind":"updated","type":"plugin","slug":"a","name":"A\u001b[31m","from":"1.0","to":"1.1","source":"auto","user":null,"detail":null},
  {"at":151,"kind":"pwned","type":"plugin","slug":"b","name":"B","from":null,"to":null,"source":"auto","user":null,"detail":null},
