@@ -79,12 +79,17 @@ func ReadTableFrames(r io.Reader, onTable TableHandler) ([]string, error) {
 	}
 }
 
+// readLine reads one frame header line. A line longer than the reader's buffer (1 MiB) is an error:
+// a hostile site must not make the CLI buffer an endless line in memory.
 func readLine(br *bufio.Reader) (string, error) {
-	line, err := br.ReadString('\n')
+	line, err := br.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", errors.New("frame line too long")
+	}
 	if err != nil {
 		return "", fmt.Errorf("stream truncated: %w", err)
 	}
-	return strings.TrimSuffix(line, "\n"), nil
+	return strings.TrimSuffix(string(line), "\n"), nil
 }
 
 func consume(br *bufio.Reader, size int64, handle func(io.Reader) error) error {

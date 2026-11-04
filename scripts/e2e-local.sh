@@ -434,6 +434,13 @@ $a = WpSync\Snapshot::begin($p, "probe"); $b = WpSync\Snapshot::begin($p, "probe
 echo $a->get_data()["state"], " ", $b->get_data()["state"]; WpSync\Snapshot::delete(["id" => str_repeat("b", 32)]);')"
 [ "$probe" = "done done" ] || fail "AC-313 begin twice: $probe"
 
+echo "== Spec I9: während eines Pushs startet kein Schnappschuss"
+busy="$(ssrc ddev wp eval 'WpSync\Store::setState("push_lock", ["push_id" => "x", "key_id" => "x", "target" => "live", "touched" => time()]);
+$r = WpSync\Snapshot::begin(["id" => str_repeat("c", 32), "tables" => ["e2e_posts"], "scope" => []], "probe");
+WpSync\Store::setState("push_lock", null); echo is_wp_error($r) ? $r->get_error_code() : "started";')"
+[ "$busy" = "wpsync_snapshot_busy" ] || fail "I9 snapshot started during a push: $busy"
+ssrc ddev wp eval 'WpSync\Snapshot::delete(["id" => str_repeat("c", 32)]);' >/dev/null
+
 # Aufräumen: Profil wieder ohne Ausnahme für e2e_personen, Tabelle weg.
 "${SCAN[@]}" >/dev/null
 u38_cleanup

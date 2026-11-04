@@ -427,8 +427,8 @@ Commit:
   sodium_compat aus WordPress), eine beschreibbare Ablage, genug freier Platz für die vollen Tabellen.
   Fehlt etwas, nennt die Site den Grund und der Pull fällt zurück.
 - **Lebensdauer:** Ein fertiger Schnappschuss bleibt höchstens eine Stunde abrufbar, jede Datei
-  höchstens sechs Stunden. Aufgeräumt wird bei jedem Start, stündlich per Cron, nach dem Download und
-  beim Deaktivieren des Plugins. Ein Job, dessen Prozess endete, gilt nach 60 Sekunden als
+  höchstens sechs Stunden. Aufgeräumt wird bei jedem Start, stündlich per WP-Cron (fehlt der, beim nächsten Start), nach dem
+  Download und beim Deaktivieren des Plugins; ein abgelaufener Schnappschuss ist auch dann nicht mehr abrufbar. Ein Job, dessen Prozess endete, gilt nach 60 Sekunden als
   gestorben. Ein Dump dauert höchstens 15 Minuten.
 - **Ein Job pro Site:** Läuft schon einer oder ein Push, antwortet die Site mit „beschäftigt“; im
   Modus `auto` laden die Häppchen.
