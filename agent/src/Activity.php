@@ -97,6 +97,11 @@ final class Activity
             // Erst die Ereignisse, dann der Schnappschuss: fällt das zweite aus, meldet der nächste
             // Abgleich doppelt statt gar nicht.
             $written = ActivityLog::add($events, $now, $source[0], $source[1], $source[2]);
+            if ($written === 0) {
+                // Nichts ging ins Protokoll (Tabelle fehlt, Datenbank gestört): der Schnappschuss bleibt,
+                // der nächste Abgleich holt die Ereignisse nach – ohne Doppelte, es wurde ja nichts geschrieben.
+                return 0;
+            }
             Store::setState(self::SNAPSHOT, $new);
             return $written;
         } finally {
@@ -161,12 +166,13 @@ final class Activity
      * Commit oder Rücknahme eines Pushs: was dabei an der Software geändert wird, trägt die Push-ID.
      * Danach ein Abgleich – der Tausch der Ordner löst keinen Hook von WordPress aus.
      *
+     * @param mixed             $pushId ungeprüft aus der Anfrage; nur ein passender Text wird zur Kennung
      * @param callable(): mixed $run
      * @return mixed was $run liefert
      */
-    public static function attributed(string $pushId, callable $run)
+    public static function attributed($pushId, callable $run)
     {
-        self::$push = preg_match('/^[A-Za-z0-9_-]{1,32}\z/', $pushId) === 1 ? $pushId : '';
+        self::$push = is_string($pushId) && preg_match('/^[A-Za-z0-9_-]{1,32}\z/', $pushId) === 1 ? $pushId : '';
         try {
             return $run();
         } finally {
@@ -242,7 +248,12 @@ final class Activity
     {
         global $wpdb;
         try {
-            ContentSql::silent($wpdb, $work);
+            ContentSql::silent($wpdb, static function () use ($work): void {
+                // Nach einem ZIP-Update ohne erneute Aktivierung fehlt die Tabelle, bis eine Kopplung
+                // sich meldet; ein Hook davor würde sonst ins Leere schreiben.
+                Store::install();
+                $work();
+            });
         } catch (\Throwable $e) {
             error_log('wpsync: activity check skipped (' . get_class($e) . ')');
         }

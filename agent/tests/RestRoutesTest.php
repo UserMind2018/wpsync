@@ -254,7 +254,7 @@ final class RestRoutesTest extends TestCase
     public function testCommitAndRollbackRunAttributed(): void
     {
         $source = (string) file_get_contents(__DIR__ . '/../src/Rest.php');
-        $this->assertStringContainsString('Activity::attributed((string) ($params[\'push_id\'] ?? \'\'), static function () use ($params) {' . "\n" . '            return Push::commit($params, self::$keyId);', $source);
-        $this->assertStringContainsString('Activity::attributed((string) ($params[\'push_id\'] ?? \'\'), static function () use ($params) {' . "\n" . '            return Push::rollback($params, self::$keyId);', $source);
+        $this->assertStringContainsString('Activity::attributed($params[\'push_id\'] ?? \'\', static function () use ($params) {' . "\n" . '            return Push::commit($params, self::$keyId);', $source);
+        $this->assertStringContainsString('Activity::attributed($params[\'push_id\'] ?? \'\', static function () use ($params) {' . "\n" . '            return Push::rollback($params, self::$keyId);', $source);
     }
 }
