@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:       wpsync Agent
- * Description:       Signierte Schnittstelle für wpsync: pull (Live → Lokal), push von Code im Push-Fenster und Staging-Kopie auf dem Server.
- * Version:           0.11.0
+ * Description:       Signierte Schnittstelle für wpsync: pull (Live → Lokal), push von Code im Push-Fenster, Staging-Kopie auf dem Server und Nachtbericht.
+ * Version:           0.12.0
  * Requires at least: 5.9
  * Requires PHP:      7.4
  * Author:            usermind
@@ -18,14 +18,14 @@ if (defined('WPSYNC_STAGING')) {
     return;
 }
 
-const WPSYNC_VERSION = '0.11.0';
+const WPSYNC_VERSION = '0.12.0';
 
 foreach ([
     'Signature', 'Budget', 'Excludes', 'PathPatterns', 'Scope', 'FileWalker', 'SizeScan', 'SqlBuilder', 'Frames', 'Pairing',
     'Classifier', 'Anonymizer', 'Probe', 'Inventory', 'TableList', 'SecretBox', 'SecretKey', 'Store', 'WpProbe',
     'Infosheet', 'Protection', 'PushUnits', 'PushManifest', 'PushUploads', 'PushSwap', 'PushRescue', 'RescueSeal', 'RescueLink', 'MysqliLink', 'RescueDb', 'RescueContent', 'PushRescueStub', 'PushWindow', 'Push',
     'StagingException', 'StagingGuard', 'SerializedWalker', 'StagingReplace', 'ContentOrigin', 'Canon', 'ContentLists', 'ContentReader', 'ContentManifest', 'ContentException', 'ContentStore', 'ContentState', 'ContentPackage', 'ContentSql', 'ContentTarget', 'ContentRepair', 'ContentPlugins', 'ContentCheck', 'ContentImage', 'ContentApply', 'ContentRollback', 'ContentElementor', 'ContentPostActions', 'StagingConfig', 'StagingAccess', 'StagingHosts',
-    'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'PushPlugins', 'WpdbLink', 'TableDump', 'SnapshotSink', 'SnapshotFile', 'SnapshotException', 'SnapshotDump', 'SnapshotJob', 'Snapshot', 'Rest', 'Admin',
+    'StagingFiles', 'StagingDb', 'Staging', 'PushContent', 'PushPlugins', 'WpdbLink', 'TableDump', 'SnapshotSink', 'SnapshotFile', 'SnapshotException', 'SnapshotDump', 'SnapshotJob', 'Snapshot', 'ActivityDiff', 'ActivityLog', 'Rest', 'Admin',
 ] as $wpsync_class) {
     require_once __DIR__ . '/src/' . $wpsync_class . '.php';
 }
